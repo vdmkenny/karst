@@ -9,6 +9,7 @@ members = [
     "crates/karst-mix",
     "crates/karst-symmetry",
     "crates/karst-value",
+    "crates/karst-fuzz",
     "crates/karst-attest",
     "crates/karst-afford",
     "crates/karst-thread",

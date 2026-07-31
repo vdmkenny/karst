@@ -268,6 +268,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "karst-fuzz"
+version = "0.1.0"
+dependencies = [
+ "karst-attest",
+ "karst-cap",
+ "karst-doc",
+ "karst-id",
+ "karst-object",
+ "rand",
+]
+
+[[package]]
 name = "karst-id"
 version = "0.1.0"
 dependencies = [

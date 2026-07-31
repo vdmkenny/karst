@@ -33,7 +33,7 @@ list of everything the design makes worse.
 > [`docs/05-anonymity.md`](docs/05-anonymity.md).
 
 ```bash
-cargo test          # 142 tests
+cargo test          # 153 tests
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
 cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?
@@ -51,6 +51,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`karst-mix`](crates/karst-mix) | L4 Mixing | Fixed-size unlinkable packets, Poisson delay, and passive plus active adversary simulators. |
 | [`karst-symmetry`](crates/karst-symmetry) | L16 Symmetry | Does flattening returns to scale actually prevent capture? Partly. |
 | [`karst-value`](crates/karst-value) | L14 Value | Capacity credentials, earned by relaying and spent unlinkably. No bank. |
+| [`karst-fuzz`](crates/karst-fuzz) | commitment 4 | Property tests for reject-never-recover across every decoder. |
 | [`karst-thread`](crates/karst-thread) | Applications | Threads assembled from backlinks, boards as views, no host. |
 
 ## What the demo actually proves
@@ -93,8 +94,9 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 2. **No ambient authority.** Every right is an explicit, attenuable, revocable capability.
 3. **Small enough to reimplement is a security property.** A specification only two
    organisations can afford to implement has a de facto owner regardless of who wrote it.
-4. **Reject, never recover.** Malformed input is an error. Parser differentials are how signed
-   documents come to mean two things.
+4. **Reject, never recover.** Malformed input is an error, and every accepted byte string
+   re-encodes to itself, so exactly one encoding names each value. Parser differentials are how
+   signed documents come to mean two things. Enforced by `karst-fuzz`, not by assertion.
 5. **State the costs.** A design that lists only its properties is a manifesto.
 
 ## What this costs
