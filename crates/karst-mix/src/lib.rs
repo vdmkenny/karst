@@ -26,9 +26,13 @@
 //! implementation, and does not cover active adversaries, node compromise, or long-run
 //! intersection attacks. Passing here is necessary and nowhere near sufficient.
 
+pub mod active;
 pub mod packet;
 pub mod sim;
 
+pub use active::{
+    batch_under_skew, drain_cost, n_minus_one, ActiveConfig, ActiveResult, Discipline, SkewResult,
+};
 pub use packet::{Hop, MixError, MixKey, Packet, Peeled, PACKET_BYTES, MAX_HOPS};
 pub use sim::{run, SimConfig, SimResult};
 

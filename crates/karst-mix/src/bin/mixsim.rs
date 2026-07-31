@@ -2,6 +2,7 @@
 //!
 //! `cargo run -p karst-mix --bin karst-mixsim`
 
+use karst_mix::active::{batch_under_skew, drain_cost, n_minus_one, ActiveConfig, Discipline};
 use karst_mix::sim::{run, SimConfig};
 use karst_mix::{Hop, MixKey, Packet, Peeled, PACKET_BYTES};
 
@@ -120,25 +121,90 @@ fn main() {
         );
     }
 
-    println!("\n\x1b[1mWhat this shows, including the part we did not expect\x1b[0m");
+    // -------------------------------------------------- active adversary
+    println!("\n\x1b[1mActive adversary: the n-1 attack\x1b[0m");
     println!("{}", "-".repeat(70));
-    println!("  Onion routing is trivially broken by this adversary, which is not news:");
-    println!("  Tor says so itself. Volume alone identifies who was talking.");
+    println!("  \x1b[2mSuppress every other honest packet entering a mix, inject packets you\x1b[0m");
+    println!("  \x1b[2mcan recognise, and anything else leaving is the target.\x1b[0m");
+    println!(
+        "  {:<24} {:>10} {:>11} {:>12} {:>10}",
+        "discipline", "anon.set", "isolated", "suppressed", "detected"
+    );
+
+    for d in [Discipline::Batch { round_ticks: 1 }, Discipline::Poisson] {
+        let r = n_minus_one(&ActiveConfig {
+            discipline: d,
+            ..ActiveConfig::default()
+        });
+        let flag = if r.isolation_rate > 0.1 { "\x1b[31m" } else { "\x1b[32m" };
+        println!(
+            "  {:<24} {:>10.1} {}{:>10.1}%\x1b[0m {:>12.0} {:>9.1}%",
+            r.label,
+            r.mean_anonymity_set,
+            flag,
+            r.isolation_rate * 100.0,
+            r.mean_suppressed,
+            r.detection_probability * 100.0
+        );
+    }
+
+    let (ticks, packets) = drain_cost(10.0, 8.0, 1.0);
+    println!(
+        "\n  \x1b[2mDraining a Poisson mix from steady state to one packet takes {ticks:.0} ticks\x1b[0m"
+    );
+    println!("  \x1b[2mand costs {packets:.0} suppressed packets. A batch mix needs one flush.\x1b[0m");
+    println!("  \x1b[2mExponential residuals are memoryless, so waiting does not help the\x1b[0m");
+    println!("  \x1b[2madversary: the backlog never ages out, it only drains.\x1b[0m");
+
+    // -------------------------------------------------- clock skew
+    println!("\n\x1b[1mBatching needs a clock. Continuous time does not.\x1b[0m");
+    println!("{}", "-".repeat(70));
+    println!(
+        "  {:<16} {:>12} {:>12} {:>14}",
+        "clock skew", "mean batch", "worst batch", "batches < 3"
+    );
+    for skew in [0.0, 0.25, 0.5, 1.0, 2.0] {
+        let s = batch_under_skew(10.0, 1.0, skew, 800, 5);
+        println!(
+            "  {:<16} {:>12.1} {:>12} {:>13.1}%",
+            format!("{skew} ticks"),
+            s.mean_batch,
+            s.min_batch,
+            s.degenerate_fraction * 100.0
+        );
+    }
+    println!("  \x1b[2mA Poisson mix has no row here, because it has no round boundary for\x1b[0m");
+    println!("  \x1b[2manyone to disagree about. A mechanism you cannot misconfigure is worth\x1b[0m");
+    println!("  \x1b[2msomething that does not show up in a passive measurement.\x1b[0m");
+
+    println!("\n\x1b[1mWhat this shows\x1b[0m");
+    println!("{}", "-".repeat(70));
+    println!("  Onion routing is trivially broken by a whole-network observer, which is");
+    println!("  not news: Tor says so itself. Volume alone identifies who was talking.");
     println!();
-    println!("  \x1b[1mConstant rate cover is the mechanism doing the work.\x1b[0m Poisson delay");
-    println!("  alone still leaves the adversary a real advantage, and cover alone scores");
-    println!("  identically to cover plus delay. Uniform cover at every tick is effectively");
-    println!("  a synchronous batch mix, and a batch mix is strong against an observer who");
-    println!("  only watches.");
+    println!("  \x1b[1mAgainst a passive adversary, cover traffic does all the work.\x1b[0m Poisson");
+    println!("  delay alone still leaves a real advantage, and cover alone scores exactly");
+    println!("  as well as cover plus delay. On that evidence the delay layer looked");
+    println!("  unjustified, and for one commit this project said so.");
     println!();
-    println!("  \x1b[1mSo this harness does not justify the delay layer.\x1b[0m Loopix's case for it");
-    println!("  rests on resistance to active n-1 and flooding attacks, and on not needing");
-    println!("  the global clock synchronisation a batch mix requires. Neither is modelled");
-    println!("  here. Until they are, the delay mechanism is taken on the paper's authority");
-    println!("  rather than on our own evidence. Tracked as an open issue.");
+    println!("  \x1b[1mThe active adversary reverses that.\x1b[0m Uniform cover with prompt forwarding");
+    println!("  is a synchronous batch mix, and a batch mix has a moment when it is empty");
+    println!("  but for the target. Suppress one round of arrivals, 10 packets, and the");
+    println!("  target walks out alone half the time. A Poisson mix has no such moment:");
+    println!("  exponential residuals are memoryless, so the backlog never ages out, it");
+    println!("  only drains, and draining it costs hundreds of suppressed packets that");
+    println!("  loop traffic detects with certainty.");
     println!();
-    println!("  Not modelled: active adversaries, node compromise, long-run intersection");
-    println!("  attacks across sessions, packet loss, or a real implementation's bugs.");
+    println!("  \x1b[1mBatching also needs a clock.\x1b[0m At one tick of skew, a third of batches");
+    println!("  hold fewer than three packets and the worst holds none. Continuous time");
+    println!("  has no round boundary to disagree about.");
+    println!();
+    println!("  So the delay layer earns its place, and not for the reason the passive");
+    println!("  measurement suggested. Both mechanisms are load bearing, against different");
+    println!("  adversaries.");
+    println!();
+    println!("  Still not modelled: node compromise, long-run intersection attacks across");
+    println!("  sessions, packet loss, and a real implementation's bugs.");
     println!();
     println!("  \x1b[1mThe cost is the honest headline.\x1b[0m Constant rate cover means every client");
     println!("  transmits every tick forever, which at this duty cycle is roughly 200x the");

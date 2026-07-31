@@ -22,7 +22,7 @@
 
 use std::collections::BTreeMap;
 
-use karst_cap::{authorize, CapError, Capability, Caveat, Request};
+use karst_cap::{authorize, CapError, Capability, Caveat, Request, SignedInvocation, UseLedger};
 use karst_doc::Value;
 use karst_id::Address;
 use karst_object::{Cid, Enc};
@@ -168,6 +168,10 @@ pub enum InvokeError {
     },
     /// The capability addresses a different object entirely.
     WrongResource,
+    /// The arguments presented are not the ones the invoker signed.
+    ArgumentsNotSigned,
+    /// The signed price does not match what the operation actually costs.
+    PriceMismatch { signed: u64, actual: u64 },
     NotAuthorized(CapError),
 }
 
@@ -181,6 +185,14 @@ impl core::fmt::Display for InvokeError {
                 write!(f, "parameter '{param}' must be {expected}")
             }
             InvokeError::WrongResource => write!(f, "capability is for a different resource"),
+            InvokeError::ArgumentsNotSigned => {
+                write!(f, "arguments do not match the signed invocation")
+            }
+            InvokeError::PriceMismatch { signed, actual } => write!(
+                f,
+                "signed for {}.{:02} but the operation costs {}.{:02}",
+                signed / 100, signed % 100, actual / 100, actual % 100
+            ),
             InvokeError::NotAuthorized(e) => write!(f, "not authorized: {e}"),
         }
     }
@@ -224,32 +236,86 @@ impl Receipt {
     }
 }
 
-pub struct Invocation<'a> {
-    pub operation: &'a str,
-    pub args: &'a BTreeMap<String, Value>,
-    pub at: u64,
-    pub use_index: u32,
+/// Canonical digest of an argument set, so a signed invocation is bound to exactly the
+/// arguments it was signed for.
+pub fn digest_args(args: &BTreeMap<String, Value>) -> Cid {
+    let mut e = Enc::new();
+    e.str("karst.args.v1").u64(args.len() as u64);
+    // BTreeMap iterates in key order, so this is canonical.
+    for (k, v) in args {
+        e.str(k);
+        v.encode(&mut e);
+    }
+    e.hash()
+}
+
+/// Build the request an agent must sign in order to invoke an operation.
+pub fn request_for(
+    operation: &str,
+    price_minor: u64,
+    at: u64,
+    nonce: [u8; 16],
+    args: &BTreeMap<String, Value>,
+) -> Request {
+    Request {
+        operation: operation.to_string(),
+        amount: price_minor,
+        at,
+        nonce,
+        args_digest: digest_args(args),
+    }
 }
 
 impl Resource {
-    /// Invoke an operation. Every check is local: the capability verifies offline
-    /// against this object and the owner's address, with no directory and no callback
-    /// to an authorization server.
-    pub fn invoke(&self, cap: &Capability, inv: Invocation<'_>) -> Result<Receipt, InvokeError> {
+    /// Invoke an operation.
+    ///
+    /// Every check is local: the capability verifies offline against this object and the
+    /// owner's address, with no directory and no callback to an authorization server.
+    ///
+    /// Four things must hold, in order:
+    /// 1. the capability addresses this resource,
+    /// 2. its chain verifies to this owner and only ever narrowed,
+    /// 3. **the presenter proves possession of the holder's key**, so a copied capability
+    ///    is useless,
+    /// 4. the arguments match the ones the presenter signed, and the ledger accepts one
+    ///    use.
+    pub fn invoke(
+        &self,
+        cap: &Capability,
+        signed: &SignedInvocation,
+        args: &BTreeMap<String, Value>,
+        ledger: &mut UseLedger,
+    ) -> Result<Receipt, InvokeError> {
         if cap.resource != self.cid() {
             return Err(InvokeError::WrongResource);
         }
 
-        let effective = cap
-            .verify(self.owner)
+        let effective = cap.verify(self.owner).map_err(InvokeError::NotAuthorized)?;
+
+        // Possession, before anything else is trusted.
+        let invoker = signed
+            .verify_possession(cap)
             .map_err(InvokeError::NotAuthorized)?;
 
+        // The signature covers a digest of the arguments, so these must be those.
+        if signed.request.args_digest != digest_args(args) {
+            return Err(InvokeError::ArgumentsNotSigned);
+        }
+
+        let op = signed.request.operation.clone();
         let aff = self
-            .find(inv.operation)
-            .ok_or_else(|| InvokeError::UnknownOperation(inv.operation.to_string()))?;
+            .find(&op)
+            .ok_or(InvokeError::UnknownOperation(op.clone()))?;
+
+        if signed.request.amount != aff.price_minor {
+            return Err(InvokeError::PriceMismatch {
+                signed: signed.request.amount,
+                actual: aff.price_minor,
+            });
+        }
 
         for p in &aff.params {
-            match inv.args.get(&p.name) {
+            match args.get(&p.name) {
                 Some(v) => {
                     if !p.ty.accepts(v) {
                         return Err(InvokeError::WrongType {
@@ -262,29 +328,22 @@ impl Resource {
                 None => {}
             }
         }
-        for k in inv.args.keys() {
+        for k in args.keys() {
             if !aff.params.iter().any(|p| &p.name == k) {
                 return Err(InvokeError::UnknownParam(k.clone()));
             }
         }
 
-        authorize(
-            &effective,
-            &Request {
-                operation: aff.name.clone(),
-                amount: aff.price_minor,
-                at: inv.at,
-                use_index: inv.use_index,
-            },
-        )
-        .map_err(InvokeError::NotAuthorized)?;
+        authorize(&effective, &signed.request, cap.id(), ledger)
+            .map_err(InvokeError::NotAuthorized)?;
 
         Ok(Receipt {
             resource: self.cid(),
             operation: aff.name.clone(),
             charged_minor: aff.price_minor,
             currency: aff.currency.clone(),
-            invoker: cap.holder().unwrap_or(self.owner),
+            // The verified presenter, not merely whoever the capability names.
+            invoker,
             authority_chain: cap
                 .delegation_chain()
                 .map_err(InvokeError::NotAuthorized)?,
@@ -334,162 +393,180 @@ mod tests {
     }
 
     fn args(pairs: &[(&str, Value)]) -> BTreeMap<String, Value> {
-        pairs
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect()
+        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
     }
 
-    #[test]
-    fn an_agent_can_invoke_within_its_delegated_budget() {
+    struct Fixture {
+        clinic: Identity,
+        person: Identity,
+        agent: Identity,
+        res: Resource,
+        ledger: UseLedger,
+    }
+
+    fn fixture() -> Fixture {
         let clinic = Identity::generate();
         let person = Identity::generate();
         let agent = Identity::generate();
         let res = clinic_resource(clinic.address());
+        Fixture { clinic, person, agent, res, ledger: UseLedger::new() }
+    }
 
-        let root = Capability::issue(&clinic, res.cid(), person.address(), vec![]);
-        let scoped = root
-            .attenuate(
-                &person,
-                agent.address(),
-                agent_budget("book", 5000, 100, 1),
-            )
-            .unwrap();
+    fn agent_cap(f: &Fixture, caveats: Vec<Caveat>) -> Capability {
+        Capability::issue(&f.clinic, f.res.cid(), f.person.address(), vec![])
+            .attenuate(&f.person, f.agent.address(), caveats)
+            .unwrap()
+    }
 
+    #[test]
+    fn an_agent_can_invoke_within_its_delegated_budget() {
+        let mut f = fixture();
+        let cap = agent_cap(&f, agent_budget("book", 5000, 100, 1));
         let a = args(&[("slot", Value::Instant(42))]);
-        let receipt = res
-            .invoke(
-                &scoped,
-                Invocation {
-                    operation: "book",
-                    args: &a,
-                    at: 10,
-                    use_index: 0,
-                },
-            )
-            .unwrap();
+        let signed = SignedInvocation::sign(
+            &f.agent, &cap, request_for("book", 4500, 10, [1; 16], &a));
 
+        let receipt = f.res.invoke(&cap, &signed, &a, &mut f.ledger).unwrap();
         assert_eq!(receipt.charged_minor, 4500);
-        assert_eq!(receipt.invoker, agent.address());
+        assert_eq!(receipt.invoker, f.agent.address());
         assert_eq!(receipt.authority_chain.len(), 2);
     }
 
     #[test]
     fn the_agent_cannot_reach_an_operation_it_was_not_given() {
-        let clinic = Identity::generate();
-        let person = Identity::generate();
-        let agent = Identity::generate();
-        let res = clinic_resource(clinic.address());
+        let mut f = fixture();
+        let cap = agent_cap(&f, agent_budget("book", 5000, 100, 1));
+        let a = args(&[("booking", Value::Ref(f.res.cid()))]);
+        let signed = SignedInvocation::sign(
+            &f.agent, &cap, request_for("cancel", 0, 10, [2; 16], &a));
 
-        let root = Capability::issue(&clinic, res.cid(), person.address(), vec![]);
-        let scoped = root
-            .attenuate(&person, agent.address(), agent_budget("book", 5000, 100, 1))
-            .unwrap();
-
-        let a = args(&[("booking", Value::Ref(res.cid()))]);
-        let err = res
-            .invoke(
-                &scoped,
-                Invocation {
-                    operation: "cancel",
-                    args: &a,
-                    at: 10,
-                    use_index: 0,
-                },
-            )
-            .unwrap_err();
-        assert!(matches!(err, InvokeError::NotAuthorized(_)));
+        assert!(matches!(
+            f.res.invoke(&cap, &signed, &a, &mut f.ledger),
+            Err(InvokeError::NotAuthorized(_))
+        ));
     }
 
     #[test]
     fn a_price_above_the_spend_cap_is_refused() {
-        let clinic = Identity::generate();
-        let person = Identity::generate();
-        let agent = Identity::generate();
-        let res = clinic_resource(clinic.address());
-
-        let root = Capability::issue(&clinic, res.cid(), person.address(), vec![]);
-        // Budget of 10.00 against a 45.00 operation.
-        let scoped = root
-            .attenuate(&person, agent.address(), agent_budget("book", 1000, 100, 1))
-            .unwrap();
-
+        let mut f = fixture();
+        let cap = agent_cap(&f, agent_budget("book", 1000, 100, 1));
         let a = args(&[("slot", Value::Instant(42))]);
-        let err = res
-            .invoke(
-                &scoped,
-                Invocation {
-                    operation: "book",
-                    args: &a,
-                    at: 10,
-                    use_index: 0,
-                },
-            )
-            .unwrap_err();
-        assert!(matches!(err, InvokeError::NotAuthorized(_)));
+        let signed = SignedInvocation::sign(
+            &f.agent, &cap, request_for("book", 4500, 10, [3; 16], &a));
+
+        assert!(matches!(
+            f.res.invoke(&cap, &signed, &a, &mut f.ledger),
+            Err(InvokeError::NotAuthorized(_))
+        ));
     }
 
     #[test]
     fn types_are_checked_so_an_agent_cannot_guess() {
-        let clinic = Identity::generate();
-        let person = Identity::generate();
-        let res = clinic_resource(clinic.address());
-        let cap = Capability::issue(&clinic, res.cid(), person.address(), vec![]);
+        let mut f = fixture();
+        let cap = agent_cap(&f, vec![]);
 
         let wrong = args(&[("slot", Value::Text("next tuesday-ish".into()))]);
+        let s1 = SignedInvocation::sign(
+            &f.agent, &cap, request_for("book", 4500, 0, [4; 16], &wrong));
         assert_eq!(
-            res.invoke(
-                &cap,
-                Invocation {
-                    operation: "book",
-                    args: &wrong,
-                    at: 0,
-                    use_index: 0
-                }
-            )
-            .unwrap_err(),
-            InvokeError::WrongType {
-                param: "slot".into(),
-                expected: "instant"
-            }
+            f.res.invoke(&cap, &s1, &wrong, &mut f.ledger).unwrap_err(),
+            InvokeError::WrongType { param: "slot".into(), expected: "instant" }
         );
 
         let missing = args(&[]);
+        let s2 = SignedInvocation::sign(
+            &f.agent, &cap, request_for("book", 4500, 0, [5; 16], &missing));
         assert_eq!(
-            res.invoke(
-                &cap,
-                Invocation {
-                    operation: "book",
-                    args: &missing,
-                    at: 0,
-                    use_index: 0
-                }
-            )
-            .unwrap_err(),
+            f.res.invoke(&cap, &s2, &missing, &mut f.ledger).unwrap_err(),
             InvokeError::MissingParam("slot".into())
         );
     }
 
     #[test]
     fn a_capability_for_another_object_does_not_work_here() {
-        let clinic = Identity::generate();
-        let person = Identity::generate();
-        let res = clinic_resource(clinic.address());
-        let other = Capability::issue(&clinic, Cid::of(b"something else"), person.address(), vec![]);
-
+        let mut f = fixture();
+        let other = Capability::issue(&f.clinic, Cid::of(b"something else"), f.agent.address(), vec![]);
         let a = args(&[("slot", Value::Instant(1))]);
+        let signed = SignedInvocation::sign(
+            &f.agent, &other, request_for("book", 4500, 0, [6; 16], &a));
+
         assert_eq!(
-            res.invoke(
-                &other,
-                Invocation {
-                    operation: "book",
-                    args: &a,
-                    at: 0,
-                    use_index: 0
-                }
-            )
-            .unwrap_err(),
+            f.res.invoke(&other, &signed, &a, &mut f.ledger).unwrap_err(),
             InvokeError::WrongResource
+        );
+    }
+
+    /// Regression for issue #30, reported by @matthiasantierens.
+    #[test]
+    fn copying_the_capability_is_not_enough_to_spend_it() {
+        let mut f = fixture();
+        let thief = Identity::generate();
+        let cap = agent_cap(&f, vec![]);
+        let a = args(&[("slot", Value::Instant(42))]);
+
+        let stolen = SignedInvocation::sign(
+            &thief, &cap, request_for("book", 4500, 0, [7; 16], &a));
+        assert_eq!(
+            f.res.invoke(&cap, &stolen, &a, &mut f.ledger).unwrap_err(),
+            InvokeError::NotAuthorized(CapError::NotTheHolder)
+        );
+    }
+
+    /// Regression for issue #30: the signature must cover the arguments.
+    #[test]
+    fn arguments_cannot_be_swapped_under_a_valid_signature() {
+        let mut f = fixture();
+        let cap = agent_cap(&f, vec![]);
+        let signed_for = args(&[("slot", Value::Instant(42))]);
+        let actually_sent = args(&[("slot", Value::Instant(999))]);
+
+        let signed = SignedInvocation::sign(
+            &f.agent, &cap, request_for("book", 4500, 0, [8; 16], &signed_for));
+        assert_eq!(
+            f.res.invoke(&cap, &signed, &actually_sent, &mut f.ledger).unwrap_err(),
+            InvokeError::ArgumentsNotSigned
+        );
+    }
+
+    /// Regression for issue #29, reported by @matthiasantierens.
+    #[test]
+    fn a_one_use_capability_cannot_be_spent_twice() {
+        let mut f = fixture();
+        let cap = agent_cap(&f, agent_budget("book", 5000, 100, 1));
+        let a = args(&[("slot", Value::Instant(42))]);
+
+        let first = SignedInvocation::sign(
+            &f.agent, &cap, request_for("book", 4500, 10, [9; 16], &a));
+        assert!(f.res.invoke(&cap, &first, &a, &mut f.ledger).is_ok());
+
+        // A fresh nonce, an honest-looking second attempt, and nothing the caller can
+        // assert about how many times it has already gone.
+        let second = SignedInvocation::sign(
+            &f.agent, &cap, request_for("book", 4500, 10, [10; 16], &a));
+        assert!(matches!(
+            f.res.invoke(&cap, &second, &a, &mut f.ledger),
+            Err(InvokeError::NotAuthorized(_))
+        ));
+
+        // And a bit-for-bit replay of the first is caught as a replay.
+        assert_eq!(
+            f.res.invoke(&cap, &first, &a, &mut f.ledger).unwrap_err(),
+            InvokeError::NotAuthorized(CapError::Replayed)
+        );
+    }
+
+    #[test]
+    fn a_signed_price_that_disagrees_with_the_object_is_refused() {
+        let mut f = fixture();
+        let cap = agent_cap(&f, vec![]);
+        let a = args(&[("slot", Value::Instant(42))]);
+        // Agent signs for a cheaper price than the operation actually costs.
+        let signed = SignedInvocation::sign(
+            &f.agent, &cap, request_for("book", 1, 0, [11; 16], &a));
+
+        assert_eq!(
+            f.res.invoke(&cap, &signed, &a, &mut f.ledger).unwrap_err(),
+            InvokeError::PriceMismatch { signed: 1, actual: 4500 }
         );
     }
 

@@ -13,8 +13,8 @@
 //! |---|---|
 //! | [`Agency::Direct`] | **No.** An unfalsifiable claim, permanently. |
 //! | [`Agency::Assisted`] | No, but a person's key is on it. |
-//! | [`Agency::Delegated`] | **Yes.** The chain must verify to the named principal. |
-//! | [`Agency::Autonomous`] | **Yes**, as to which operator runs it. |
+//! | [`Agency::Delegated`] | **Yes.** Carries the signed capability, verified in full. |
+//! | [`Agency::Autonomous`] | **No.** Nothing proves the named operator runs the agent. |
 //!
 //! So you cannot falsely claim to be *authorised by* someone, and you can always falsely
 //! claim to be a person. What the design buys is that the false claim is signed, permanent,
@@ -42,14 +42,24 @@ pub enum Agency {
     /// accountable; the tool is named for the reader's benefit.
     Assisted { tool: String },
 
-    /// An agent acted under a specific principal's authority. The chain is checkable.
+    /// An agent acted under a specific principal's authority.
+    ///
+    /// Carries the **actual signed capability**, not a summary of it. An earlier version
+    /// stored only `(issuer, audience)` address pairs, which anyone could type out, so a
+    /// post could claim any principal at all (issue #28). The evidence now travels with
+    /// the claim.
     Delegated {
-        principal: Address,
-        /// `(issuer, audience)` pairs, from the principal down to the signer.
-        chain: Vec<(Address, Address)>,
+        /// The address the capability's root grant must be signed by. Verification fails
+        /// unless the chain genuinely starts here.
+        resource_owner: Address,
+        capability: Capability,
     },
 
     /// An agent acting on its own standing, with no principal authorising this act.
+    ///
+    /// **Not verifiable.** There is no evidence in this variant that the named operator
+    /// runs this agent, and the signer can name anyone. It is a claim, exactly like
+    /// [`Agency::Direct`], and [`Agency::is_verifiable`] says so.
     Autonomous { operator: Address },
 }
 
@@ -95,16 +105,45 @@ impl fmt::Display for AttestError {
 impl std::error::Error for AttestError {}
 
 impl Agency {
-    /// Derive a verified `Delegated` claim from a real capability. This is the honest
-    /// construction: the chain is not asserted, it is taken from a credential that
-    /// already verified against the resource owner.
+    /// Build a `Delegated` claim from a real capability, keeping the credential itself.
     pub fn from_capability(cap: &Capability, owner: Address) -> Result<Agency, AttestError> {
         cap.verify(owner).map_err(AttestError::Capability)?;
-        let chain = cap
-            .delegation_chain()
-            .map_err(AttestError::Capability)?;
-        let principal = chain.first().ok_or(AttestError::EmptyChain)?.0;
-        Ok(Agency::Delegated { principal, chain })
+        Ok(Agency::Delegated {
+            resource_owner: owner,
+            capability: cap.clone(),
+        })
+    }
+
+    /// The root authority behind a delegated act, if this is one.
+    pub fn principal(&self) -> Option<Address> {
+        match self {
+            Agency::Delegated { capability, .. } => {
+                capability.delegation_chain().ok()?.first().map(|l| l.0)
+            }
+            _ => None,
+        }
+    }
+
+    /// The party that handed authority to the signer specifically. For a chain of
+    /// clinic to person to agent, this is the person: the one who chose to delegate to
+    /// this agent, rather than the clinic at the root who never met it.
+    pub fn delegator(&self) -> Option<Address> {
+        match self {
+            Agency::Delegated { capability, .. } => {
+                capability.delegation_chain().ok()?.last().map(|l| l.0)
+            }
+            _ => None,
+        }
+    }
+
+    /// The full authority trail, for a reader who wants to see every hop.
+    pub fn chain(&self) -> Vec<(Address, Address)> {
+        match self {
+            Agency::Delegated { capability, .. } => {
+                capability.delegation_chain().unwrap_or_default()
+            }
+            _ => Vec::new(),
+        }
     }
 
     pub fn class(&self) -> Class {
@@ -123,43 +162,56 @@ impl Agency {
         )
     }
 
-    /// Whether this claim can be checked at all, as opposed to merely asserted.
+    /// Whether this claim can be checked, as opposed to merely asserted.
+    ///
+    /// Only [`Agency::Delegated`] can. `Autonomous` used to be listed here, which was
+    /// wrong: nothing in it proves the named operator runs the agent.
     pub fn is_verifiable(&self) -> bool {
-        matches!(
-            self,
-            Agency::Delegated { .. } | Agency::Autonomous { .. }
-        )
+        matches!(self, Agency::Delegated { .. })
     }
 
-    /// Who carries responsibility. For a delegated act that is the principal, not the
-    /// agent, which is the entire reason to record the chain.
+    /// Who carries responsibility.
+    ///
+    /// For a delegated act this is the **immediate delegator**, the party that chose to
+    /// hand authority to this specific signer, rather than the root of the chain who may
+    /// never have heard of it. Use [`Agency::principal`] and [`Agency::chain`] for the
+    /// rest of the trail.
     pub fn accountable(&self, signer: Address) -> Address {
         match self {
             Agency::Direct | Agency::Assisted { .. } => signer,
-            Agency::Delegated { principal, .. } => *principal,
-            Agency::Autonomous { operator } => *operator,
+            Agency::Delegated { .. } => self.delegator().unwrap_or(signer),
+            // Nothing here is proven, so the only party we can actually hold to this is
+            // whoever signed it.
+            Agency::Autonomous { .. } => signer,
         }
     }
 
-    /// Check what can be checked. `Direct` and `Assisted` always pass, because there is
-    /// nothing in them to falsify. That is not an oversight, it is the limit.
+    /// Check what can be checked.
+    ///
+    /// `Direct` and `Assisted` always pass, because there is nothing in them to falsify.
+    /// `Autonomous` also passes for the same reason, and reports itself unverifiable.
+    ///
+    /// `Delegated` is checked properly: every grant signature in the capability, chain
+    /// continuity, attenuation at each step, that the root grant came from the declared
+    /// resource owner, and that the final audience is the key that signed this object.
     pub fn verify(&self, signer: Address) -> Result<(), AttestError> {
         match self {
             Agency::Direct | Agency::Assisted { .. } | Agency::Autonomous { .. } => Ok(()),
-            Agency::Delegated { principal, chain } => {
-                let first = chain.first().ok_or(AttestError::EmptyChain)?;
-                if first.0 != *principal {
-                    return Err(AttestError::WrongPrincipal);
+            Agency::Delegated {
+                resource_owner,
+                capability,
+            } => {
+                // This does the real work: signatures, continuity, and that authority
+                // only ever narrowed.
+                capability
+                    .verify(*resource_owner)
+                    .map_err(AttestError::Capability)?;
+
+                match capability.holder() {
+                    None => Err(AttestError::EmptyChain),
+                    Some(h) if h != signer => Err(AttestError::NotTerminatedAtSigner),
+                    Some(_) => Ok(()),
                 }
-                for pair in chain.windows(2) {
-                    if pair[0].1 != pair[1].0 {
-                        return Err(AttestError::BrokenChain);
-                    }
-                }
-                if chain.last().expect("checked non-empty").1 != signer {
-                    return Err(AttestError::NotTerminatedAtSigner);
-                }
-                Ok(())
             }
         }
     }
@@ -168,13 +220,16 @@ impl Agency {
         match self {
             Agency::Direct => "human (claimed, unverifiable)".into(),
             Agency::Assisted { tool } => format!("human, assisted by {tool}"),
-            Agency::Delegated { principal, chain } => format!(
-                "agent under {} (chain of {}, verified)",
-                principal.short(),
-                chain.len()
-            ),
+            Agency::Delegated { .. } => match self.delegator() {
+                Some(d) => format!(
+                    "agent for {} (chain of {}, signatures verified)",
+                    d.short(),
+                    self.chain().len()
+                ),
+                None => "agent (malformed chain)".into(),
+            },
             Agency::Autonomous { operator } => {
-                format!("autonomous agent, operator {}", operator.short())
+                format!("autonomous agent, claims operator {} (unverified)", operator.short())
             }
         }
     }
@@ -187,11 +242,12 @@ impl Agency {
             Agency::Assisted { tool } => {
                 e.u8(1).str(tool);
             }
-            Agency::Delegated { principal, chain } => {
-                e.u8(2).addr(principal).u64(chain.len() as u64);
-                for (from, to) in chain {
-                    e.addr(from).addr(to);
-                }
+            Agency::Delegated {
+                resource_owner,
+                capability,
+            } => {
+                e.u8(2).addr(resource_owner);
+                capability.encode(e);
             }
             Agency::Autonomous { operator } => {
                 e.u8(3).addr(operator);
@@ -204,15 +260,12 @@ impl Agency {
             0 => Ok(Agency::Direct),
             1 => Ok(Agency::Assisted { tool: d.str()? }),
             2 => {
-                let principal = d.addr()?;
-                let n = d.u64()? as usize;
-                let mut chain = Vec::with_capacity(n.min(1024));
-                for _ in 0..n {
-                    let from = d.addr()?;
-                    let to = d.addr()?;
-                    chain.push((from, to));
-                }
-                Ok(Agency::Delegated { principal, chain })
+                let resource_owner = d.addr()?;
+                let capability = Capability::decode(d)?;
+                Ok(Agency::Delegated {
+                    resource_owner,
+                    capability,
+                })
             }
             3 => Ok(Agency::Autonomous {
                 operator: d.addr()?,
@@ -265,76 +318,85 @@ mod tests {
     use karst_id::Identity;
     use karst_object::Cid;
 
-    #[test]
-    fn a_delegated_claim_verifies_to_its_principal() {
-        let clinic = Identity::generate();
+    fn delegated() -> (Identity, Identity, Identity, Agency) {
+        let owner = Identity::generate();
         let person = Identity::generate();
         let agent = Identity::generate();
-        let res = Cid::of(b"resource");
-
-        let root = Capability::issue(&clinic, res, person.address(), vec![]);
+        let root = Capability::issue(&owner, Cid::of(b"resource"), person.address(), vec![]);
         let scoped = root
             .attenuate(&person, agent.address(), vec![Caveat::MaxUses(1)])
             .unwrap();
-
-        let a = Agency::from_capability(&scoped, clinic.address()).unwrap();
-        assert!(a.verify(agent.address()).is_ok());
-        assert!(a.is_machine());
-        assert!(a.is_verifiable());
-        // Responsibility rests with the clinic that issued the root authority.
-        assert_eq!(a.accountable(agent.address()), clinic.address());
+        let a = Agency::from_capability(&scoped, owner.address()).unwrap();
+        (owner, person, agent, a)
     }
 
     #[test]
-    fn a_forged_delegation_claim_is_caught() {
-        let real_principal = Identity::generate();
-        let liar = Identity::generate();
+    fn a_delegated_claim_verifies_to_its_principal() {
+        let (owner, person, agent, a) = delegated();
+        assert!(a.verify(agent.address()).is_ok());
+        assert!(a.is_machine());
+        assert!(a.is_verifiable());
+        assert_eq!(a.principal(), Some(owner.address()));
+        // The person chose to delegate to this agent, so the person answers for it.
+        assert_eq!(a.accountable(agent.address()), person.address());
+        assert_eq!(a.chain().len(), 2);
+    }
 
-        // Claim to be acting for someone who never authorised anything.
-        let fake = Agency::Delegated {
-            principal: real_principal.address(),
-            chain: vec![(liar.address(), liar.address())],
+    /// Regression for issue #28, reported by @matthiasantierens.
+    ///
+    /// `Delegated` used to hold only `(issuer, audience)` address pairs, and `verify` only
+    /// checked that they lined up. An attacker could therefore name any victim as
+    /// principal and have the post attributed to them. The variant now carries the signed
+    /// capability, so a claim with no grant behind it has nothing to present.
+    #[test]
+    fn an_attacker_cannot_name_a_victim_as_their_principal() {
+        let victim = Identity::generate();
+        let attacker = Identity::generate();
+
+        // The exact attack from the report: claim the victim authorised you. There is now
+        // no way to express it without a capability the victim actually signed, and the
+        // attacker cannot produce one.
+        let forged_root = Capability::issue(&attacker, Cid::of(b"resource"), attacker.address(), vec![]);
+        let forged = Agency::Delegated {
+            resource_owner: victim.address(),
+            capability: forged_root,
         };
-        assert_eq!(
-            fake.verify(liar.address()),
-            Err(AttestError::WrongPrincipal)
+
+        assert!(
+            forged.verify(attacker.address()).is_err(),
+            "a chain not rooted at the victim must be rejected"
         );
     }
 
     #[test]
     fn a_chain_that_does_not_reach_the_signer_is_caught() {
-        let a = Identity::generate();
-        let b = Identity::generate();
+        let (_owner, _person, _agent, a) = delegated();
         let someone_else = Identity::generate();
-
-        let claim = Agency::Delegated {
-            principal: a.address(),
-            chain: vec![(a.address(), b.address())],
-        };
         assert_eq!(
-            claim.verify(someone_else.address()),
+            a.verify(someone_else.address()),
             Err(AttestError::NotTerminatedAtSigner)
         );
-        assert!(claim.verify(b.address()).is_ok());
     }
 
     #[test]
-    fn a_gap_in_the_chain_is_caught() {
-        let a = Identity::generate();
-        let b = Identity::generate();
-        let c = Identity::generate();
-        let d = Identity::generate();
+    fn tampering_with_the_carried_capability_breaks_it() {
+        let (owner, person, agent, _) = delegated();
+        let root = Capability::issue(&owner, Cid::of(b"resource"), person.address(), vec![]);
+        let mut scoped = root
+            .attenuate(&person, agent.address(), vec![Caveat::MaxAmount(100)])
+            .unwrap();
+        // Widen the budget after the fact.
+        scoped.chain[1].caveats = vec![Caveat::MaxAmount(999_999)];
 
-        let claim = Agency::Delegated {
-            principal: a.address(),
-            chain: vec![(a.address(), b.address()), (c.address(), d.address())],
+        let a = Agency::Delegated {
+            resource_owner: owner.address(),
+            capability: scoped,
         };
-        assert_eq!(claim.verify(d.address()), Err(AttestError::BrokenChain));
+        assert!(a.verify(agent.address()).is_err());
     }
 
     #[test]
     fn claiming_to_be_human_always_passes_and_that_is_the_known_limit() {
-        // A bot with a fresh key. Nothing here catches it, by construction.
         let bot = Identity::generate();
         assert!(Agency::Direct.verify(bot.address()).is_ok());
         assert!(!Agency::Direct.is_verifiable());
@@ -342,18 +404,26 @@ mod tests {
     }
 
     #[test]
+    fn autonomous_no_longer_claims_to_be_verifiable() {
+        let bot = Identity::generate();
+        let victim = Identity::generate();
+        let a = Agency::Autonomous { operator: victim.address() };
+
+        assert!(a.is_machine());
+        assert!(!a.is_verifiable(), "nothing proves the operator relationship");
+        // And it does not launder responsibility onto the named operator.
+        assert_eq!(a.accountable(bot.address()), bot.address());
+        assert!(a.describe().contains("unverified"));
+    }
+
+    #[test]
     fn round_trips_through_the_canonical_encoding() {
-        let p = Identity::generate().address();
+        let (_owner, _person, agent, deleg) = delegated();
         let q = Identity::generate().address();
         for a in [
             Agency::Direct,
-            Agency::Assisted {
-                tool: "an editor".into(),
-            },
-            Agency::Delegated {
-                principal: p,
-                chain: vec![(p, q)],
-            },
+            Agency::Assisted { tool: "an editor".into() },
+            deleg,
             Agency::Autonomous { operator: q },
         ] {
             let mut e = Enc::new();
@@ -362,7 +432,12 @@ mod tests {
             let mut d = Dec::new(&bytes);
             let back = Agency::decode(&mut d).unwrap();
             d.end().unwrap();
-            assert_eq!(a, back);
+            assert_eq!(a.class(), back.class());
+            assert_eq!(a.describe(), back.describe());
+            // Crucially, a decoded delegation still verifies, so the evidence survived.
+            if back.is_verifiable() {
+                assert!(back.verify(agent.address()).is_ok());
+            }
         }
     }
 
@@ -371,16 +446,13 @@ mod tests {
         let op = Identity::generate().address();
         let human = Agency::Direct;
         let bot = Agency::Autonomous { operator: op };
-        let delegated = Agency::Delegated {
-            principal: op,
-            chain: vec![(op, op)],
-        };
+        let (_o, _p, _a, deleg) = delegated();
 
         assert!(Policy::HumanClaimedOnly.admits(&human));
         assert!(!Policy::HumanClaimedOnly.admits(&bot));
-        assert!(!Policy::HumanClaimedOnly.admits(&delegated));
+        assert!(!Policy::HumanClaimedOnly.admits(&deleg));
 
-        assert!(Policy::ExcludeAutonomous.admits(&delegated));
+        assert!(Policy::ExcludeAutonomous.admits(&deleg));
         assert!(!Policy::ExcludeAutonomous.admits(&bot));
 
         assert!(Policy::MachineOnly.admits(&bot));

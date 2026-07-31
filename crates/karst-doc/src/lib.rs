@@ -41,7 +41,7 @@ pub enum Value {
 }
 
 impl Value {
-    fn encode(&self, e: &mut Enc) {
+    pub fn encode(&self, e: &mut Enc) {
         match self {
             Value::Text(s) => {
                 e.u8(0).str(s);
@@ -124,7 +124,7 @@ impl Run {
         }
     }
 
-    fn encode(&self, e: &mut Enc) {
+    pub fn encode(&self, e: &mut Enc) {
         e.str(&self.text).u8(self.emphasis as u8);
         match self.link {
             Some(c) => {
@@ -230,12 +230,28 @@ impl Node {
         Cid::of(&self.encode())
     }
 
-    /// Outbound references, which is how L13 builds backlinks.
-    pub fn refs(&self) -> Vec<Cid> {
+    /// **Structural containment only.** The nodes that are part of this document.
+    ///
+    /// Kept strictly separate from [`Node::links`]. Conflating the two is how a quoted or
+    /// linked third-party node ends up inside your document as far as a machine reader is
+    /// concerned, while a human reader never sees it: the two views then describe
+    /// different documents, which is an injection vector against anything at L11 that acts
+    /// on what it reads.
+    pub fn contained(&self) -> Vec<Cid> {
         match self {
-            Node::Prose { runs } => runs.iter().filter_map(|r| r.link).collect(),
             Node::List { items, .. } => items.clone(),
             Node::Section { children, .. } => children.clone(),
+            _ => Vec::new(),
+        }
+    }
+
+    /// **Outbound references to content that is not part of this document.** Quotations,
+    /// media sources, inline links, and typed reference fields.
+    ///
+    /// Following these is always a deliberate act by the reader, never automatic.
+    pub fn links(&self) -> Vec<Cid> {
+        match self {
+            Node::Prose { runs } => runs.iter().filter_map(|r| r.link).collect(),
             Node::Quote { source, .. } => vec![*source],
             Node::Media { source, .. } => vec![*source],
             Node::Record { fields, .. } => fields
@@ -245,8 +261,17 @@ impl Node {
                     _ => None,
                 })
                 .collect(),
-            Node::Heading { .. } => Vec::new(),
+            Node::Heading { .. } | Node::List { .. } | Node::Section { .. } => Vec::new(),
         }
+    }
+
+    /// Every outbound edge, containment and links together. This is the right set for
+    /// building backlinks (L13), where the question is "who points at this at all", and
+    /// the wrong set for deciding what a document contains.
+    pub fn refs(&self) -> Vec<Cid> {
+        let mut out = self.contained();
+        out.extend(self.links());
+        out
     }
 }
 
@@ -362,6 +387,11 @@ impl Doc {
 
     /// What an agent or a device reads: typed records, no parsing, no scraping, no
     /// guessing which `<span>` held the price.
+    ///
+    /// Descends **containment only**, exactly as [`Doc::render_text`] does, so the machine
+    /// view and the human view always describe the same document. A quoted or linked
+    /// third-party node cannot inject records here, because following a link is a separate
+    /// and deliberate act. See [`Doc::linked_records`].
     pub fn records(&self, root: &Cid) -> Vec<(String, BTreeMap<String, Value>)> {
         let mut out = Vec::new();
         self.collect_records(root, &mut out);
@@ -375,11 +405,42 @@ impl Doc {
         if let Node::Record { schema, fields } = node {
             out.push((schema.clone(), fields.clone()));
         }
-        for r in node.refs() {
+        for r in node.contained() {
             if self.nodes.contains_key(&r) {
                 self.collect_records(&r, out);
             }
         }
+    }
+
+    /// Records reachable by *following links out of* this document, tagged with the node
+    /// that pointed at them.
+    ///
+    /// Separate from [`Doc::records`] on purpose. An agent that wants to act on quoted or
+    /// linked material has to ask for it explicitly and knows it is looking at somebody
+    /// else's content, rather than receiving it silently mixed in with the document's own.
+    pub fn linked_records(
+        &self,
+        root: &Cid,
+    ) -> Vec<(Cid, String, BTreeMap<String, Value>)> {
+        let mut out = Vec::new();
+        // Walk this document's containment, and at each node take one step outward.
+        let mut frontier = vec![*root];
+        let mut seen = std::collections::BTreeSet::new();
+        while let Some(cid) = frontier.pop() {
+            if !seen.insert(cid) {
+                continue;
+            }
+            let Some(node) = self.nodes.get(&cid) else {
+                continue;
+            };
+            for target in node.links() {
+                for (schema, fields) in self.records(&target) {
+                    out.push((target, schema, fields));
+                }
+            }
+            frontier.extend(node.contained());
+        }
+        out
     }
 
     /// Backlinks: given the nodes we hold, who points at `target`. This is the feature
@@ -501,6 +562,80 @@ mod tests {
         // The quote points at content, so the quoted text cannot be edited underneath it.
         assert_eq!(doc.get(&quote).unwrap().refs(), vec![original]);
         assert_eq!(doc.backlinks(&original), vec![quote]);
+    }
+
+    /// Regression for issue #33, reported by @matthiasantierens.
+    ///
+    /// `records()` used to follow every outbound edge including quotations, so quoting a
+    /// hostile document silently pulled its typed records into yours. A human reading
+    /// `render_text` never saw them. The two views disagreed about what the document said,
+    /// and an L11 agent acting on the machine view would act on somebody else's content.
+    #[test]
+    fn a_quoted_document_cannot_inject_records_into_the_quoting_one() {
+        let mut doc = Doc::new();
+
+        // Somebody else's document, with a record in it.
+        let mut hostile_fields = BTreeMap::new();
+        hostile_fields.insert("price".to_string(), money(1));
+        hostile_fields.insert("recipient".to_string(), Value::Text("attacker".into()));
+        let hostile_rec = doc.add(Node::Record {
+            schema: "payment".into(),
+            fields: hostile_fields,
+        });
+        let hostile_root = doc.add(Node::Section {
+            title: "their document".into(),
+            children: vec![hostile_rec],
+        });
+
+        // Our document merely quotes it.
+        let quote = doc.add(Node::Quote {
+            source: hostile_root,
+            comment: "as they claim".into(),
+        });
+        let ours = doc.add(Node::Section {
+            title: String::new(),
+            children: vec![quote],
+        });
+
+        // The machine view of our document contains none of their records.
+        assert!(
+            doc.records(&ours).is_empty(),
+            "quoted records leaked into the quoting document"
+        );
+
+        // The human view does not render them either. The two views agree.
+        let text = doc.render_text(&ours);
+        assert!(!text.contains("attacker"));
+
+        // Following the link is available, explicit, and attributed to its source.
+        let linked = doc.linked_records(&ours);
+        assert_eq!(linked.len(), 1);
+        assert_eq!(linked[0].0, hostile_root);
+        assert_eq!(linked[0].1, "payment");
+    }
+
+    #[test]
+    fn containment_and_links_are_distinct_edge_kinds() {
+        let target = Cid::of(b"elsewhere");
+        let sec = Node::Section {
+            title: "s".into(),
+            children: vec![target],
+        };
+        let q = Node::Quote {
+            source: target,
+            comment: String::new(),
+        };
+
+        assert_eq!(sec.contained(), vec![target]);
+        assert!(sec.links().is_empty());
+
+        assert!(q.contained().is_empty());
+        assert_eq!(q.links(), vec![target]);
+
+        // Backlinks still want both, because "who points at this at all" is a different
+        // question from "what does this document contain".
+        assert_eq!(q.refs(), vec![target]);
+        assert_eq!(sec.refs(), vec![target]);
     }
 
     #[test]
