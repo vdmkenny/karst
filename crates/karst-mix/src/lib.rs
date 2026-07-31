@@ -30,6 +30,7 @@ pub mod active;
 pub mod frontier;
 pub mod intersection;
 pub mod packet;
+pub mod retrieval;
 pub mod sim;
 
 pub use active::{

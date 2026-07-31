@@ -293,3 +293,28 @@ resistance easier when present.
 Cited in `15-fundamental-limits.md`, where it withdraws the claim that the join boundary has no
 complete defence. It has a known direction and no deployed solution, which is a different
 statement.
+
+---
+
+## Fetch privacy and relay incentives
+
+**Private information retrieval.** Corrigan-Gibbs and Kogan, *PIR with Sublinear Online Time*
+(<https://eprint.iacr.org/2019/1075.pdf>); *Simple and Practical Amortized Sublinear PIR using
+Dummy Subsets*, ACM CCS 2024 (<https://eprint.iacr.org/2023/1072.pdf>); SealPIR and the XPIR
+line on query compression.
+
+Cited in `16-fetch-privacy.md`. Online overhead approaching twice an unprotected fetch is
+affordable; what is not is the surrounding structure, since sublinear schemes need client state
+built with a specific server and multi-server schemes need non-colluding servers. Both are
+assumptions KARST refuses elsewhere.
+
+**Anonymous relay incentives.** TEARS (Jansen, Miller, Syverson, Ford, HotPETs 2014,
+<https://www.robgjansen.com/publications/tears-hotpets2014.pdf>); BRAIDS; LIRA (NDSS 2013);
+TorCoin/TorPath (<https://dedis.cs.yale.edu/dissent/papers/hotpets14-torpath.pdf>). Overview:
+<https://blog.torproject.org/tor-incentives-research-roundup-goldstar-par-braids-lira-tears-and-torcoin/>
+
+Cited in `17-paying-concealed-relays.md`. All four make the *payment* anonymous and all four
+observe the *earning*, which is evidence that the conflict with membership concealment is
+structural rather than an oversight. TEARS' PriorityPass construction, which lets relays prevent
+double spending locally without leaking information, is directly relevant to the open question
+in #44.
