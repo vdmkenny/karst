@@ -1,0 +1,12 @@
+[package]
+name = "karst-id"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KARST L2 Identity: self-certifying addresses derived from locally generated keys"
+
+[dependencies]
+ed25519-dalek.workspace = true
+blake3.workspace = true
+rand.workspace = true
+hex.workspace = true

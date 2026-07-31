@@ -1,0 +1,10 @@
+[package]
+name = "karst-blob"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KARST L6/L7 file serving: chunked merkle manifests, dedup, verified random access, swarm delivery"
+
+[dependencies]
+karst-id.workspace = true
+karst-object.workspace = true

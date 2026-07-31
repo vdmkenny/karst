@@ -1,0 +1,12 @@
+[package]
+name = "karst-afford"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KARST L11 Affordance: typed machine operations declared inside the object"
+
+[dependencies]
+karst-id.workspace = true
+karst-object.workspace = true
+karst-cap.workspace = true
+karst-doc = { path = "../karst-doc" }

@@ -1,0 +1,12 @@
+[package]
+name = "karst-object"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KARST L6 Objects: signed, immutable, content-addressed data"
+
+[dependencies]
+karst-id.workspace = true
+ed25519-dalek.workspace = true
+blake3.workspace = true
+hex.workspace = true

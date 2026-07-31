@@ -1,0 +1,12 @@
+[package]
+name = "karst-thread"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Messaging and discussion boards over KARST objects, with no host"
+
+[dependencies]
+karst-id.workspace = true
+karst-object.workspace = true
+karst-cap.workspace = true
+karst-attest.workspace = true

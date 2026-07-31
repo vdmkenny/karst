@@ -1,0 +1,34 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/karst-id",
+    "crates/karst-object",
+    "crates/karst-doc",
+    "crates/karst-blob",
+    "crates/karst-cap",
+    "crates/karst-attest",
+    "crates/karst-afford",
+    "crates/karst-thread",
+    "crates/karst-demo",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/unset/karst"
+
+[workspace.dependencies]
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+blake3 = "1"
+rand = "0.8"
+hex = "0.4"
+
+karst-id = { path = "crates/karst-id" }
+karst-object = { path = "crates/karst-object" }
+karst-doc = { path = "crates/karst-doc" }
+karst-blob = { path = "crates/karst-blob" }
+karst-cap = { path = "crates/karst-cap" }
+karst-attest = { path = "crates/karst-attest" }
+karst-afford = { path = "crates/karst-afford" }
+karst-thread = { path = "crates/karst-thread" }
