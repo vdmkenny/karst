@@ -6,6 +6,7 @@ members = [
     "crates/karst-doc",
     "crates/karst-blob",
     "crates/karst-cap",
+    "crates/karst-mix",
     "crates/karst-attest",
     "crates/karst-afford",
     "crates/karst-thread",
@@ -29,6 +30,7 @@ karst-object = { path = "crates/karst-object" }
 karst-doc = { path = "crates/karst-doc" }
 karst-blob = { path = "crates/karst-blob" }
 karst-cap = { path = "crates/karst-cap" }
+karst-mix = { path = "crates/karst-mix" }
 karst-attest = { path = "crates/karst-attest" }
 karst-afford = { path = "crates/karst-afford" }
 karst-thread = { path = "crates/karst-thread" }
