@@ -316,6 +316,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "karst-value"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "karst-id",
+ "karst-object",
+ "rand",
+]
+
+[[package]]
 name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"

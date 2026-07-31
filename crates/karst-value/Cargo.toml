@@ -1,0 +1,12 @@
+[package]
+name = "karst-value"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KARST L14: capacity credentials that are earned and spent without linking the two"
+
+[dependencies]
+karst-id.workspace = true
+karst-object.workspace = true
+blake3.workspace = true
+rand.workspace = true

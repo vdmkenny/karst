@@ -722,7 +722,7 @@ Full treatment in [`docs/10-versioning-and-permanence.md`](docs/10-versioning-an
 
 ### L14 Value
 
-*Fixes errors 02 and 03. Status: sketched.*
+*Fixes errors 02 and 03. Status: **built** (`karst-value`); threshold issuance and the earn/spend loop implemented, blind signature not.*
 
 **Lever removed.** Payment processors, and the de-banking that runs through them.
 
@@ -743,10 +743,25 @@ ever worked on anything.
 Tor's development has been heavily funded by US government sources, which is a permanent
 adoption cost even where the reality is fine, and a genuine structural dependency.
 
-**Open, and serious.** This layer conflicts directly with L4. A payment system inside an
-anonymity network is a notorious correlation surface: if who paid whom is observable, the
-anonymity above it is decorative. Payment and traffic must be unlinkable, and we do not have a
-design for that. This is the most serious unresolved conflict in the stack. See §6.10.
+**Resolution of the L4 conflict.** Acquisition and spending are two acts with opposite
+requirements, joined only by habit. Credentials are acquired in the open, rarely, and spent
+unlinkably, constantly. The spender's anonymity set is not everyone spending right now, which
+would be small and time-correlated; it is **everyone who ever acquired**, which is large and
+grows monotonically. This is Coconut (Sonnino et al., NDSS 2019), whose listed applications
+include distributing proxies for censorship resistance. Issuance is threshold, so no issuer is
+a correlation point or a subpoena target.
+
+**And there is no money.** Capacity is earned by providing capacity: a relay that carries
+traffic earns credentials, a client that consumes capacity spends them. The loop closes with
+no bank and nothing to de-bank, which is what this layer required. A financial on-ramp is
+optional rather than structural.
+
+Denominations are fixed at one unit, because a variable amount is a fingerprint.
+
+**What remains open** is double spending across verifiers that cannot see each other. A
+credential is worth one unit *per verifier*, not one in the universe, and closing that needs
+either a shared ledger with its consensus cost or an always-online authority. See §6.10 and
+[`docs/14-value-and-anonymity.md`](docs/14-value-and-anonymity.md).
 
 ---
 
@@ -1009,9 +1024,13 @@ behind it. Attenuation and spend caps bound each individual compromise, which is
 attempted abuse against a uniform discoverable priced action surface will exceed anything the scraping
 era produced.
 
-**6.10 The value layer and the anonymity layer are in direct conflict.** L14 needs settlement to be
-observable enough to be trusted; L4 needs it to be unlinkable. We do not have a design that satisfies
-both. This is the most serious unresolved technical problem in the stack, and it is not a detail.
+**6.10 A credential is worth one unit per verifier, not one in the universe.** The L14 and L4
+conflict resolves by separating acquisition from spending, so this is no longer the stack's largest
+open problem. What it leaves is double spending: a serial spent twice at one verifier is caught, and
+two verifiers that cannot see each other both accept the same credential. Closing that requires a
+shared ledger with its consensus cost, or short epochs that bound the damage, or accepting that each
+relay honours a credential once. The same limit applies to L9's use counts, for the same reason, and
+in both cases the design has to pick an option rather than imply the problem is solved.
 
 **6.11 Constrained devices are exempt from cover traffic and are therefore not anonymous.** A battery
 powered sensor cannot emit continuously. The exemption is honest and it segments the anonymity set,
