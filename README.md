@@ -29,7 +29,7 @@ list of everything the design makes worse.
 > being worth anything.
 
 ```bash
-cargo test          # 57 tests
+cargo test          # 60 tests
 cargo run -p karst-demo
 ```
 
@@ -67,6 +67,7 @@ cargo run -p karst-demo
 | [`docs/05-anonymity.md`](docs/05-anonymity.md) | L4 Mixing: constant-rate cover and Poisson delay, against a global passive adversary. |
 | [`docs/06-messaging-and-boards.md`](docs/06-messaging-and-boards.md) | Why neither needs to be a layer. |
 | [`docs/07-authorship.md`](docs/07-authorship.md) | Human versus machine content, and why detection is the wrong question. |
+| [`docs/10-versioning-and-permanence.md`](docs/10-versioning-and-permanence.md) | Updating content while old versions survive, and what still needs an archive. |
 | [`docs/08-roadmap.md`](docs/08-roadmap.md) | Phases, mapped to milestones. |
 | [`docs/09-references.md`](docs/09-references.md) | Citations, and an explicit list of claims with none. |
 

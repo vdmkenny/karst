@@ -639,6 +639,44 @@ about who may speak is an opinion, and opinions belong in subscribable views.
 Full treatment in [`docs/07-authorship.md`](docs/07-authorship.md), implemented in
 `karst-attest`.
 
+#### 3.13.2 Versioning, and whether this replaces the Internet Archive
+
+Objects are immutable, so editing publishes a *new* object carrying `supersedes` pointing at
+its predecessor. Every version keeps its own name and signature forever. `Lineage` walks this
+both ways: back to the original, forward to the current head.
+
+Two properties today's web cannot offer. **A citation cannot rot**, because a reference is a
+hash that resolves from anyone holding that version. **A citation cannot silently change
+meaning**, which is the underrated one: today a page is edited under a stable URL and every
+citation to it now points at different text with no signal to the reader. Here a quote names an
+exact version, so what you cited is what is returned, and `resolve()` separately tells you what
+it has since become.
+
+If an author signs two different successors to one version, showing different histories to
+different audiences, resolution returns `Forked` rather than picking silently. Silently
+choosing is how an author gets away with it.
+
+**Does this remove the need for an Internet Archive? Partly, and the remainder matters.**
+
+It removes the authenticity problem, since an archived version verifies against the author's
+key, so a copy from a stranger or a hostile party is exactly as checkable as one from the
+archive. It removes the singularity problem, since every reader is already an equal replica and
+no single organisation's loss is categorically worse than any other node's.
+
+It does not remove the cost. **Content addressing provides integrity and addressability, never
+availability.** If nobody holds a version it is gone, and it is gone whether or not everyone
+could have proved what it said. Replication follows attention, so popular content is held by
+thousands and the obscure municipal document that matters in one lawsuit eight years later is
+held by nobody, which is precisely what an archive exists for. The archival function survives
+and changes shape: a deliberate custodian of unpopular things, one among many rather than *the*
+one. That is a much better position than the Internet Archive occupies today and it is not the
+same as not needing one.
+
+Timestamp attestation, the Wayback Machine's other function, comes from L8 logs witnessing that
+a version existed by a given point, plurally, rather than trusting one organisation's clock.
+
+Full treatment in [`docs/10-versioning-and-permanence.md`](docs/10-versioning-and-permanence.md).
+
 ---
 
 ### L14 Value
@@ -977,6 +1015,7 @@ See [`docs/08-roadmap.md`](docs/08-roadmap.md) for phases and open issues.
 | L11 Affordance | built, tested | `karst-afford` |
 | L13 Provenance | built, tested | `karst-doc`, `karst-object` |
 | L13.1 Authorship agency | built, tested | `karst-attest` |
+| L13.2 Version lineage | built, tested | `karst-object` |
 | Boards, threads | built, tested | `karst-thread` |
 | L4 Mixing | specified, unbuilt | none |
 | L12 Agency, L15 Discovery | specified, unbuilt | none |

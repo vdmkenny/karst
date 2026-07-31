@@ -17,6 +17,7 @@
 //! rather than reject it. Rejecting is a security property.
 
 use core::fmt;
+use std::collections::BTreeMap;
 
 use karst_id::{Address, Identity, Peer, Signature};
 
@@ -363,6 +364,116 @@ impl fmt::Debug for Object {
     }
 }
 
+/// How a version series resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Resolution {
+    /// One current version.
+    Head(Cid),
+    /// The author signed two or more successors to the same version. This is
+    /// equivocation and it is surfaced rather than silently resolved, because silently
+    /// picking one is how an author shows different histories to different readers.
+    Forked(Vec<Cid>),
+    Unknown,
+}
+
+/// A version history: immutable objects linked by `supersedes`.
+///
+/// This is the answer to "can content be updated while old versions survive". Editing
+/// publishes a new object pointing at its predecessor. The predecessor is untouched,
+/// still verifies, and keeps its own name forever, so a citation to it cannot rot and
+/// cannot silently come to mean something else.
+///
+/// **What this does not do is keep the bytes alive.** Content addressing gives integrity
+/// and addressability, never availability. If nobody holds a version, it is gone, and it
+/// is gone whether or not anybody can prove what it said. See
+/// `docs/10-versioning-and-permanence.md`.
+#[derive(Default)]
+pub struct Lineage {
+    objects: BTreeMap<Cid, Object>,
+}
+
+impl Lineage {
+    pub fn new() -> Self {
+        Lineage::default()
+    }
+
+    /// Verify and store. Objects may arrive in any order and from anyone.
+    pub fn insert(&mut self, obj: Object) -> Result<Cid, ObjectError> {
+        obj.verify()?;
+        let cid = obj.cid();
+        self.objects.insert(cid, obj);
+        Ok(cid)
+    }
+
+    pub fn get(&self, cid: &Cid) -> Option<&Object> {
+        self.objects.get(cid)
+    }
+
+    pub fn len(&self) -> usize {
+        self.objects.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.objects.is_empty()
+    }
+
+    /// Walk backwards to the original, newest first. Every entry still verifies.
+    pub fn history(&self, cid: &Cid) -> Vec<&Object> {
+        let mut out = Vec::new();
+        let mut cursor = Some(*cid);
+        while let Some(c) = cursor {
+            match self.objects.get(&c) {
+                Some(o) => {
+                    out.push(o);
+                    cursor = o.supersedes;
+                }
+                None => break,
+            }
+        }
+        out
+    }
+
+    /// Versions that declare this one as their predecessor. More than one means the
+    /// author equivocated, or a fork was intentional.
+    pub fn successors(&self, cid: &Cid) -> Vec<Cid> {
+        let mut out: Vec<Cid> = self
+            .objects
+            .values()
+            .filter(|o| o.supersedes.as_ref() == Some(cid))
+            .map(|o| o.cid())
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// Follow the chain forward from any version to the current one.
+    pub fn resolve(&self, from: &Cid) -> Resolution {
+        if !self.objects.contains_key(from) {
+            return Resolution::Unknown;
+        }
+        let mut cursor = *from;
+        loop {
+            let next = self.successors(&cursor);
+            match next.len() {
+                0 => return Resolution::Head(cursor),
+                1 => cursor = next[0],
+                _ => return Resolution::Forked(next),
+            }
+        }
+    }
+
+    /// Did this author ever sign two successors to the same version anywhere in the
+    /// store. A transparency log at L8 is what makes this detectable in practice, since
+    /// an equivocating author simply would not show you both.
+    pub fn equivocations(&self) -> Vec<Cid> {
+        self.objects
+            .keys()
+            .filter(|c| self.successors(c).len() > 1)
+            .copied()
+            .collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -411,6 +522,69 @@ mod tests {
         let a = Object::create(&author, "note", 3, b"same".to_vec(), None);
         let b = Object::create(&author, "note", 3, b"same".to_vec(), None);
         assert_eq!(a.cid(), b.cid());
+    }
+
+    #[test]
+    fn an_old_citation_still_resolves_and_still_verifies_after_edits() {
+        let author = Identity::generate();
+        let mut lin = Lineage::new();
+
+        let v1 = Object::create(&author, "page", 0, b"the original claim".to_vec(), None);
+        let c1 = lin.insert(v1).unwrap();
+        let v2 = Object::create(&author, "page", 1, b"a revised claim".to_vec(), Some(c1));
+        let c2 = lin.insert(v2).unwrap();
+        let v3 = Object::create(&author, "page", 2, b"the final claim".to_vec(), Some(c2));
+        let c3 = lin.insert(v3).unwrap();
+
+        // Someone cited v1 years ago. It has not moved and has not changed.
+        let cited = lin.get(&c1).unwrap();
+        assert_eq!(cited.payload, b"the original claim");
+        assert!(cited.verify().is_ok());
+
+        // And from that citation you can find what it became.
+        assert_eq!(lin.resolve(&c1), Resolution::Head(c3));
+        assert_eq!(lin.history(&c3).len(), 3);
+        assert_eq!(lin.history(&c3)[2].payload, b"the original claim");
+    }
+
+    #[test]
+    fn an_author_showing_two_histories_is_detectable_rather_than_silent() {
+        let author = Identity::generate();
+        let mut lin = Lineage::new();
+
+        let v1 = Object::create(&author, "page", 0, b"original".to_vec(), None);
+        let c1 = lin.insert(v1).unwrap();
+
+        // The same author signs two different successors to the same version.
+        let a = Object::create(&author, "page", 1, b"what I told you".to_vec(), Some(c1));
+        let b = Object::create(&author, "page", 1, b"what I told them".to_vec(), Some(c1));
+        let ca = lin.insert(a).unwrap();
+        let cb = lin.insert(b).unwrap();
+
+        match lin.resolve(&c1) {
+            Resolution::Forked(heads) => {
+                assert_eq!(heads.len(), 2);
+                assert!(heads.contains(&ca) && heads.contains(&cb));
+            }
+            other => panic!("equivocation must not resolve silently, got {other:?}"),
+        }
+        assert_eq!(lin.equivocations(), vec![c1]);
+    }
+
+    #[test]
+    fn holding_only_part_of_a_history_is_honest_about_it() {
+        // Availability is not a property content addressing provides. If nobody kept v1,
+        // v1 is gone, and the store says so rather than inventing something.
+        let author = Identity::generate();
+        let mut lin = Lineage::new();
+        let v1 = Object::create(&author, "page", 0, b"lost".to_vec(), None);
+        let c1 = v1.cid();
+        let v2 = Object::create(&author, "page", 1, b"kept".to_vec(), Some(c1));
+        let c2 = lin.insert(v2).unwrap();
+
+        assert_eq!(lin.history(&c2).len(), 1, "we hold only what we hold");
+        assert_eq!(lin.resolve(&c1), Resolution::Unknown);
+        assert!(lin.get(&c1).is_none());
     }
 
     #[test]
