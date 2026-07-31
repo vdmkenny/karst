@@ -1,138 +1,120 @@
-# 11 — Hardware-backed keys, and TPM 2.0
+# 11 — Hardware-backed keys: TPM 2.0 considered and rejected
 
-**Short answer: yes, optionally, for storing keys. Never as a condition of being talked to.**
+**Decision: KARST does not use TPM 2.0. Not required, not optional, not behind a feature
+flag.**
 
-That distinction is the whole design, and it is not a detail. A TPM used one way
-strengthens L2 and L9 at essentially no architectural cost. The same chip used the other
-way reintroduces error 03 in its most concentrated form and would undo L16.
-
----
-
-## 1. What it genuinely buys
-
-### Keys that cannot be copied (L2)
-
-A TPM generates a keypair and never releases the private half. It signs on request. Under
-KARST an address is the hash of a public key, so nothing about L2 changes: the address is
-derived the same way, there is still no registrar, and the object format is untouched. What
-changes is that stealing the disk, the backup, or the process memory no longer steals the
-identity.
-
-### Proof of possession that survives compromise (L9)
-
-Issue #30 introduced signed invocations: the holder must sign a canonical request, so a
-copied capability is useless without the key. A TPM sharpens that considerably. Malware on
-the machine can ask the TPM to sign *while it is resident*, but it cannot exfiltrate the key
-and keep signing next month from somewhere else.
-
-That is a downgrade from permanent compromise to transient compromise, which is a real and
-underrated improvement. It does not make the endpoint trustworthy, and WHITEPAPER §6.4
-still stands.
-
-### Devices that outlive their vendor (device profile)
-
-The device profile already says identity is generated at manufacture or first boot, from
-nobody. A TPM or a cheap secure element is the natural way to do that: a per-device key that
-was never in a vendor database and cannot be read out. Measured boot over PCRs additionally
-gives firmware integrity that composes with L6's signed firmware lineage.
+This document records why, because it is a question that will be asked again and the
+reasoning is not obvious. The short version is that the benefit is modest and already
+largely covered elsewhere, while the costs attack three separate design commitments at
+once.
 
 ---
 
-## 2. Why attestation is the dangerous part
+## 1. What was on offer
 
-A TPM can prove things about itself remotely. That capability, not the key storage, is where
-this stops being free.
+A TPM generates a keypair and never releases the private half. An address is the hash of a
+public key, so L2 would not have changed at all. The gain would have been that stealing the
+disk, a backup, or process memory no longer steals the identity, and that malware could sign
+only while it was actually resident rather than exfiltrating the key and continuing next
+month.
 
-### The manufacturer is a singleton
-
-Every TPM ships with an Endorsement Key burned in by the manufacturer, usually with an EK
-certificate issued by that manufacturer. Verifying that a signature came from "a genuine
-TPM" means trusting Infineon, Nuvoton, ST, AMD, or Intel. That is a root store with five
-entries, which is error 03 with the numbers filed off, and it is precisely what L8 exists to
-delete.
-
-The classic Privacy CA arrangement is worse still: the CA is assumed to know the Endorsement
-Keys of all valid TPMs, so it is simultaneously a global registry of devices and a
-correlation point.
-
-### DAA is the real mitigation, and it does not remove the issuer
-
-Direct Anonymous Attestation (Brickell, Camenisch and Chen, ACM CCS 2004) exists exactly for
-this, and the TCG adopted it into TPM 2.0 as ECDAA. It lets a TPM prove it is a genuine TPM
-**without revealing which one**, removing the per-device correlation the Privacy CA model
-creates.
-
-That is a genuine advance and it is not sufficient here. DAA still requires a DAA issuer
-whose signature says "this is a real TPM", and that issuer is tied to the manufacturer. The
-correlation goes away; the singleton does not.
-
-### Ed25519 is largely unavailable
-
-`TPM_ECC_CURVE_25519` is registered in the TCG Algorithm Registry, but it is barely present
-in the TPM Library and PC Client specifications and rarely implemented. Deployed TPMs do RSA
-and NIST-curve ECDSA. KARST signs everything with Ed25519.
-
-So a TPM-backed identity today means either a per-device signature suite (an ECDSA variant
-alongside Ed25519, with all the negotiation surface that implies) or waiting for hardware
-that does not exist in volume. This is a concrete blocker, not a detail to sort out later.
+That is a real gain. It is not nothing. It is also smaller than it first appears, for the
+reasons in §3.
 
 ---
 
-## 3. The rule
+## 2. Why not
 
-> **Hardware backing is a local choice about where your key lives. It is never an admission
-> criterion, and attestation never appears on the wire in normal operation.**
+### 2.1 It requires a second signature suite, and that is the decisive one
 
-Allowed:
+`TPM_ECC_CURVE_25519` is registered in the TCG Algorithm Registry but is barely present in
+the TPM Library and PC Client specifications, and is rarely implemented. Deployed TPMs do RSA
+and NIST-curve ECDSA. KARST signs everything, everywhere, with Ed25519.
 
-- I choose to keep my key in a TPM, secure element, or Secure Enclave.
-- My client tells *me* that my key is hardware-backed.
-- A device ships with a hardware identity because that is how its manufacturer built it.
+So supporting TPMs means shipping a second signature suite and a mechanism for deciding which
+one is in use. Algorithm agility is one of the most reliable sources of protocol
+vulnerabilities in existence: it adds negotiation, negotiation adds downgrade attacks, and
+every verifier now has two code paths where it had one.
 
-Forbidden by design:
+Design commitment 3 says **small enough to reimplement is a security property**. Doubling the
+signature surface of the entire stack, so that some users on some hardware get better key
+storage, is directly contrary to it. One curve, no negotiation, no downgrade path is worth
+more than hardware key custody.
 
-- A relay, board, index, or resource requiring proof that your key is in hardware before it
-  will talk to you.
-- Any capability, rate limit, or standing that is available only to attesting clients.
+### 2.2 The attestation machinery is a manufacturer singleton, and it will not stay optional
 
-The second list is remote attestation used as gatekeeping, which is the substance of the
-objection to Web Environment Integrity style proposals. It would exclude old hardware, free
-operating systems, anyone compiling their own client, and anyone whose vendor did not sign
-their bootloader. It directly contradicts L16's "no privileged client", and it converts
-"small enough to reimplement" from a security property into a fiction, because a
-reimplementation that cannot attest is a reimplementation nobody will accept.
+Every TPM ships with an endorsement key burned in by its manufacturer, usually with a
+manufacturer-issued certificate. Verifying that a signature came from a genuine TPM means
+trusting Infineon, Nuvoton, ST, AMD or Intel. That is a root store with five entries, which
+is error 03 with the numbers filed off, and L8 exists to delete exactly that.
 
-**A protocol that can require attestation will eventually be made to require it.** So the
-capability should not exist at the protocol level at all, rather than existing with a
-convention against using it.
+Direct Anonymous Attestation (Brickell, Camenisch and Chen, ACM CCS 2004), adopted into TPM
+2.0 as ECDAA, is the real mitigation and it is a genuine advance: a TPM can prove it is a
+genuine TPM without revealing which one, which removes the per-device correlation the Privacy
+CA model creates. It does not remove the issuer, and the issuer is tied to the manufacturer.
+
+The intended posture was "key storage yes, attestation never". The problem with that posture
+is the same argument this project already makes about protocol capabilities generally: **a
+protocol that can require attestation will eventually be made to require it.** Once TPM
+plumbing exists in the client, the distance to a relay or index that prefers attesting peers
+is one patch and a plausible anti-abuse rationale. Remote attestation used as gatekeeping
+excludes old hardware, free operating systems, and anyone compiling their own client, which
+contradicts L16's no-privileged-client rule outright.
+
+Not building the plumbing is a stronger guarantee than building it and promising not to
+misuse it.
+
+### 2.3 It risks a second partition of the anonymity set
+
+The device profile is already exempt from constant-rate cover and is therefore not anonymous
+(WHITEPAPER §6.11). That partition is a known hole. If hardware-backed identities were ever
+distinguishable on the wire, whether through a different signature suite, a different key
+format, or an attestation blob, that would be a second partition for a much weaker reason.
+
+### 2.4 The benefit is already partly bought elsewhere
+
+Issue #30 introduced signed invocations, so a copied capability is useless without the
+holder's key. That closes the copied-credential attack without any hardware. What a TPM adds
+on top is protection against key *exfiltration* specifically.
+
+That matters, and WHITEPAPER §6.4 already says plainly that the endpoint beats every layer
+above it. An adversary with code execution on your machine can sign whatever they like for as
+long as they are there, TPM or not. Buying "they cannot also sign next month" at the price of
+§2.1 and §2.2 is not a good trade.
 
 ---
 
-## 4. Costs, if this is adopted
+## 3. What is still allowed
 
-1. **Signature suite fragmentation.** Ed25519 everywhere is a simplification worth
-   protecting. Adding an ECDSA path for hardware-backed keys doubles the verification
-   surface and adds algorithm negotiation, which is a classic source of downgrade attacks.
-2. **A second anonymity-set split.** The device profile is already exempt from cover traffic
-   and therefore not anonymous (WHITEPAPER §6.11). If hardware-backed identities were ever
-   distinguishable on the wire, that would be a second partition of the set, for the same
-   bad reason.
-3. **False confidence.** A TPM protects the key, not the machine. A user told their identity
-   is hardware-backed may reasonably conclude they are safe from an adversary who has root,
-   and they are not: that adversary can sign anything they like for as long as they are
-   present.
-4. **It does not fix the `Autonomous` problem.** Attestation could in principle substantiate
-   "this agent runs this software under this operator", which is exactly the claim
-   `Agency::Autonomous` currently cannot make (issue #28). Making that verifiable would
-   require the manufacturer trust root, so we are choosing to leave the claim unverifiable
-   rather than buy verifiability at that price. That is a deliberate trade and it is worth
-   revisiting only if a manufacturer-independent attestation scheme appears.
+Rejecting TPM 2.0 is not rejecting hardware key custody in general. The objections above are
+specific:
+
+- a second signature suite (§2.1),
+- attestation machinery and its manufacturer trust root (§2.2).
+
+A secure element that simply **holds an Ed25519 key and signs with it**, with no attestation
+surface, no endorsement certificate, and no second algorithm, has none of those problems. It
+is invisible to every peer, it changes no wire format, and it is a purely local choice about
+where a key lives. Several exist.
+
+So the line is:
+
+> **Acceptable:** hardware that stores an Ed25519 key and signs, and is indistinguishable
+> from software to every other participant.
+>
+> **Rejected:** TPM 2.0, and anything else that brings a second signature suite, a
+> manufacturer trust root, or a remote attestation capability.
+
+If a future TPM generation implements Ed25519 widely *and* the attestation surface can be
+compiled out entirely, this is worth revisiting. Neither is true today.
 
 ---
 
-## 5. Status
+## 4. Consequence for the design
 
-Nothing implemented. The clean shape is a signing trait behind which a software key, a TPM,
-a Secure Enclave, or a smartcard can sit, chosen locally and invisible to every peer.
+No change to any layer. This is a decision not to add something, which is the cheapest kind
+of decision to implement and the easiest kind to get wrong by drift, so it is written down
+here rather than left implicit.
 
-Tracked as an issue. See also `docs/09-references.md`.
+The signing path stays a single Ed25519 implementation with no algorithm negotiation
+anywhere in the stack.

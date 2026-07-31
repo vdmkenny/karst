@@ -146,9 +146,16 @@ Attestation.* ACM CCS 2004.
 Lets a TPM prove it is a genuine TPM without revealing which one, removing the per-device
 correlation that the Privacy CA model creates. Adopted by the TCG into TPM 2.0 as ECDAA.
 
-Cited in `11-hardware-keys.md` §2 as the real mitigation for TPM attestation privacy, and as
-insufficient for our purposes: DAA removes the correlation and keeps the issuer, and that
+Cited in `11-hardware-keys.md` §2.2 as the real mitigation for TPM attestation privacy, and
+as insufficient for our purposes: DAA removes the correlation and keeps the issuer, and that
 issuer is tied to the manufacturer.
+
+**TPM 2.0 was considered and rejected.** Not for the attestation privacy problem alone, but
+because supporting it requires a second signature suite: `TPM_ECC_CURVE_25519` is registered
+in the TCG Algorithm Registry yet barely implemented, and deployed TPMs do RSA and NIST-curve
+ECDSA while KARST signs everything with Ed25519. Algorithm agility buys downgrade attacks and
+two verifier code paths where there was one, which is directly contrary to design commitment
+3. See `11-hardware-keys.md`.
 
 **TPM 2.0 and Ed25519.** `TPM_ECC_CURVE_25519` is registered in the TCG Algorithm Registry
 but is barely present in the TPM Library and PC Client specifications and rarely implemented;
