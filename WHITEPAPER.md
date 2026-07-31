@@ -1122,6 +1122,16 @@ fall below that line, so a request identifies its requester. PIR is the known an
 affordable, and needs either a per-server client relationship or non-colluding servers, both of
 which this design refuses elsewhere. Unresolved.
 
+**6.13a Constant-rate emission is a signature to your own access provider.** L3 hides what the
+bytes are and not what shape they arrive in. Ordinary residential traffic is bursty; L4 mandates
+a fixed rate forever, and a classifier separates the two above 99% with a byte counter, no
+payload inspection required. The BKA operation against Boystown ended with a court order to
+Telefónica identifying which subscriber had connected to a node, and that is exactly the stage
+this exposes. The anonymity set is not everyone on the network, it is everyone on that ISP
+emitting at a constant rate, so the only defence is adoption and the mechanism that provides
+anonymity at scale removes it when few people are using it. See
+[`docs/18-documented-attacks.md`](docs/18-documented-attacks.md).
+
 **6.14 Paying relays leaks that they are relays, to the issuer quorum.** Concealment and payment
 pull against each other, and the four published anonymous incentive schemes for Tor all observe
 the earning side. KARST narrows the leak to `t` issuers rather than a network observer; it does
