@@ -325,12 +325,11 @@ distribution:
 **Against a passive adversary, cover traffic does all the work.** Poisson delay alone leaves a
 3.2x advantage, and cover alone scores identically to cover plus delay, because uniform
 emission every tick is effectively a synchronous batch mix and a batch mix is strong against
-an observer who only watches. On that evidence the delay layer looked unjustified, and for one
-commit this document said so.
+an observer who only watches. Passive evidence alone does not justify the delay layer.
 
-**The active adversary reverses it.** An attacker who can suppress traffic mounts the n-1
-attack: block every other honest packet entering a mix, inject packets it recognises, and
-anything else departing is the target.
+**The active adversary does.** An attacker who can suppress traffic mounts the n-1 attack:
+block every other honest packet entering a mix, inject packets it recognises, and anything
+else departing is the target.
 
 | Discipline | Anonymity set | Target isolated | Packets suppressed | Detected by loops |
 |---|---|---|---|---|
@@ -346,8 +345,8 @@ three packets and the worst holds none, while continuous time has no round bound
 disagree about.
 
 **Both mechanisms are load bearing, against different adversaries.** Cover defeats the passive
-observer, delay defeats the active one. The passive measurement alone would have led us to
-drop the wrong one.
+observer, delay defeats the active one. Neither is redundant, and a passive measurement alone
+argues for dropping the wrong one.
 
 **The cost is roughly 200x bandwidth at that duty cycle**, charged continuously to everyone
 including everyone who never needed it.
@@ -791,7 +790,7 @@ design specifically against it.
 
 ### L16 Symmetry
 
-*Fixes error 04. Status: sketched. The newest and weakest layer here.*
+*Fixes error 04. Status: **simulated** (`karst-symmetry`); mechanism holds under contention, observation gap confirmed.*
 
 **Lever removed.** Acquisition. Buy the largest operator and inherit its position.
 
@@ -822,14 +821,39 @@ hostile guard and 35% of a hostile middle relay. It was caught by a small number
 carefully at metadata over a period of years. Vigilance does not scale and does not survive the
 departure of the people providing it.
 
-Under L16, a fresh Sybil fleet starts at zero standing and cannot buy its way up, and L4 requires
-path hops from standing-disjoint neighbourhoods, so holding both ends of a path means infiltrating
-socially separate parts of the graph rather than operating more machines.
+Under L16 a fresh Sybil fleet starts at zero standing and cannot buy its way up. That constrains an
+adversary who wants to be *trusted* and does nothing about one who only wants to be *present*, which
+is what KAX17 was. The defence against presence is L5 admission, not L16 standing.
 
-**The honest counterargument.** KAX17 wanted observation, not reputation. Flat returns on standing
-would not have prevented a single one of those relays from being deployed. Sybil resistance for
-reputation is not Sybil resistance for observation, and it is L4 rather than L16 that has to defeat
-the latter. See §6.6.
+**Simulated results.** `karst-symmetry` puts a 200-node operator against forty five-node operators
+under contention, for 800 rounds.
+
+| | Standing per node | Traffic share | Compounding |
+|---|---|---|---|
+| Linear returns | 1.06 and rising | 50.8% | grows |
+| **Flat returns** | **1.00** | 50.1% | flat |
+
+Claims 1 and 2 hold. Standing per node stays between 1.00 and 1.01 across a 90% to 99.9% uptime
+range, because a ceiling is a ceiling however often you reach it, so buying reliability does not
+route around it. Reliability buys a few points of traffic share, proportional to being available to
+be chosen, and does not compound. Acquisition transfers machines and not position.
+
+**The hole is observation, and it is not small.** An adversary who wants to watch rather than be
+trusted is untouched by every rule above, because path coverage tracks node count and there is no
+reputation involved to saturate:
+
+| Fleet | Paths touched | Both endpoints held |
+|---|---|---|
+| 900 of 9,500 (KAX17 scale) | 25.8% | 0.90% |
+| 1,800 of 9,500 | 46.8% | 3.59% |
+| 3,000 of 9,500 | 68.0% | 9.97% |
+
+KAX17 ran that first line against Tor for four years and would have been exactly as effective under
+every rule tested here.
+
+**L16 raises the cost of buying position and does nothing about buying presence.** That is a real
+defence against acquisition and no defence at all against surveillance, which is L4's job. L16 does
+not prevent capture in general. See §6.6.
 
 ---
 
@@ -953,14 +977,20 @@ a fraud investigation, a sanctions regime, a court order for a stalker's logs, a
 chokepoint opens only for good reasons, because a chokepoint that opens selectively is a chokepoint with
 better marketing. This is an engineering fact rather than an ethical objection, and it is not small.
 
-**6.6 Flat returns is an unproven bet that costs real efficiency, and may not hold at all.** L16
-deliberately prevents an operator who is genuinely better at running infrastructure from serving more,
-so the network will be slower, less reliable, and more expensive per byte than a well run centralised
-one. Worse, nobody has demonstrated that flat returns hold under adversarial conditions at scale. If a
-determined operator finds the gradient anyway, through convenience, defaults, bundling, or simply being
-the one everybody has heard of, the anti-capture story collapses and this becomes another decentralised
-network with three companies in it. And L16 does nothing at all about an adversary like KAX17 who wants
-observation rather than standing.
+**6.6 Flat returns costs real efficiency, and defends against only half the threat.** L16 deliberately
+prevents an operator who is genuinely better at running infrastructure from serving proportionally more,
+so the network will be slower, less reliable and more expensive per byte than a well run centralised one.
+That is the trade: pluralism bought with efficiency, paid every day forever.
+
+On the mechanism itself, simulation (§3, L16) is good: a per-node ceiling holds under contention, stops
+an initial advantage compounding, and is not routed around by buying uptime. What it does **not** touch
+is observation. An adversary who wants to watch rather than be trusted buys path coverage with node
+count alone, with no ceiling, because no reputation is involved to saturate. A KAX17-sized fleet touches
+a quarter of all paths under every rule tested.
+
+So L16 raises the cost of buying position and does nothing about buying presence. Surveillance is
+L4's problem. What remains unproven is whether the ceiling survives the channels the simulation does
+not model: convenience, defaults, bundling, and simply being the operator everybody has heard of.
 
 **6.7 Mandatory indexes tell everyone what you authored.** L15 kills the search monopoly by making
 publication and announcement one act, and the direct consequence is that authorship is observable. The

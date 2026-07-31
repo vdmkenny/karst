@@ -161,3 +161,49 @@ two verifier code paths where there was one, which is directly contrary to desig
 but is barely present in the TPM Library and PC Client specifications and rarely implemented;
 deployed TPMs do RSA and NIST-curve ECDSA. This is a concrete blocker for hardware-backing
 KARST identities, not a detail to sort out later.
+
+---
+
+## Algorithm evolution
+
+**NIST post-quantum signature standards.** FIPS 204 (ML-DSA, formerly CRYSTALS-Dilithium)
+and FIPS 205 (SLH-DSA, formerly SPHINCS+), both finalised August 2024. FIPS 206 (FN-DSA,
+Falcon) expected to follow.
+<https://www.nist.gov/news-events/news/2024/08/nist-releases-first-3-finalized-post-quantum-encryption-standards>
+
+Cited in `12-algorithm-evolution.md`. The successor to Ed25519 is already named, which
+removes most of the uncertainty and leaves cost as the problem: ML-DSA signatures are roughly
+2.4 KB against Ed25519's 64 B. Since L4 fixes mix packets at 1024 bytes, a post-quantum
+migration is a redesign of the wire format rather than a swap of a signing function.
+
+**Agility is not negotiation.** TLS spent two decades learning that runtime cipher
+negotiation is where downgrade attacks live, and TLS 1.3 responded by deleting most of the
+negotiation surface rather than extending it. KARST takes the same position: one active suite
+per protocol version, changed by specification on a schedule, never chosen per peer.
+
+---
+
+## Defending against observation
+
+**Guard placement attacks.** Wan, Johnson et al. *Guard Placement Attacks on Path Selection
+Algorithms for Tor.* PoPETs 2019.
+<https://www.ohmygodel.com/publications/guard-placement-popets2019.pdf>
+
+Counter-RAPTOR, DeNASA and LASTor, the three state-of-the-art location-aware path selection
+algorithms for Tor, all fall to the same attack. An adversary contributing 0.216% of Tor's
+bandwidth attains 18.22% guard selection probability, 84 times vanilla Tor. The paper also
+proposes a generic mechanism that provably defends any path selection algorithm against
+placement.
+
+Cited in `13-observation-defence.md`. This is why L16's standing-disjoint path rule must not
+ship as specified: any structural preference an operator can read is a placement target.
+
+**SybilLimit.** Yu, Gibbons, Kaminsky, Xiao. *SybilLimit: A Near-Optimal Social Network
+Defense against Sybil Attacks.* IEEE S&P 2008. Preceded by **SybilGuard** (Yu, Kaminsky,
+Gibbons, Flaxman, SIGCOMM 2006).
+
+Bounds accepted Sybils per attack edge to within a log *n* factor of optimal, roughly 200x
+better than SybilGuard on a million-node experiment, and supplied the first real-world
+evidence that social networks are fast mixing. This is the right shape for L5, which already
+requires a social graph: it bounds **admission**, which is what an observer needs, rather than
+**reputation**, which it does not.

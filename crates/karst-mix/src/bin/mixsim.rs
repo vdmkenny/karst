@@ -184,10 +184,10 @@ fn main() {
     println!();
     println!("  \x1b[1mAgainst a passive adversary, cover traffic does all the work.\x1b[0m Poisson");
     println!("  delay alone still leaves a real advantage, and cover alone scores exactly");
-    println!("  as well as cover plus delay. On that evidence the delay layer looked");
-    println!("  unjustified, and for one commit this project said so.");
+    println!("  as well as cover plus delay. Passive evidence alone does not justify the");
+    println!("  delay layer.");
     println!();
-    println!("  \x1b[1mThe active adversary reverses that.\x1b[0m Uniform cover with prompt forwarding");
+    println!("  \x1b[1mThe active adversary does.\x1b[0m Uniform cover with prompt forwarding");
     println!("  is a synchronous batch mix, and a batch mix has a moment when it is empty");
     println!("  but for the target. Suppress one round of arrivals, 10 packets, and the");
     println!("  target walks out alone half the time. A Poisson mix has no such moment:");

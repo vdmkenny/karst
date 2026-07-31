@@ -30,7 +30,7 @@ list of everything the design makes worse.
 > evidence we have produced. See [`docs/05-anonymity.md`](docs/05-anonymity.md) §7.
 
 ```bash
-cargo test          # 78 tests
+cargo test          # 118 tests
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim   # anonymity vs a whole-network observer
 ```
@@ -44,7 +44,8 @@ cargo run -p karst-mix --bin karst-mixsim   # anonymity vs a whole-network obser
 | [`karst-cap`](crates/karst-cap) | L9 Authority | Capability chains that can only ever narrow, verifiable with no directory. |
 | [`karst-attest`](crates/karst-attest) | L13.1 | Human or machine authorship, declared and where possible verified. |
 | [`karst-afford`](crates/karst-afford) | L11 Affordance | Typed, priced machine operations inside the signed object. |
-| [`karst-mix`](crates/karst-mix) | L4 Mixing | Fixed-size unlinkable packets, Poisson delay, and a global passive adversary simulator. |
+| [`karst-mix`](crates/karst-mix) | L4 Mixing | Fixed-size unlinkable packets, Poisson delay, and passive plus active adversary simulators. |
+| [`karst-symmetry`](crates/karst-symmetry) | L16 Symmetry | Does flattening returns to scale actually prevent capture? Partly. |
 | [`karst-thread`](crates/karst-thread) | Applications | Threads assembled from backlinks, boards as views, no host. |
 
 ## What the demo actually proves
@@ -71,6 +72,9 @@ cargo run -p karst-mix --bin karst-mixsim   # anonymity vs a whole-network obser
 | [`docs/06-messaging-and-boards.md`](docs/06-messaging-and-boards.md) | Why neither needs to be a layer. |
 | [`docs/07-authorship.md`](docs/07-authorship.md) | Human versus machine content, and why detection is the wrong question. |
 | [`docs/10-versioning-and-permanence.md`](docs/10-versioning-and-permanence.md) | Updating content while old versions survive, and what still needs an archive. |
+| [`docs/11-hardware-keys.md`](docs/11-hardware-keys.md) | TPM 2.0 considered and rejected, and where the line actually falls. |
+| [`docs/12-algorithm-evolution.md`](docs/12-algorithm-evolution.md) | Ed25519 is not forever. Versioned evolution, never runtime negotiation. |
+| [`docs/13-observation-defence.md`](docs/13-observation-defence.md) | Why diversity-aware path selection backfires, and where the Sybil defence actually belongs. |
 | [`docs/08-roadmap.md`](docs/08-roadmap.md) | Phases, mapped to milestones. |
 | [`docs/09-references.md`](docs/09-references.md) | Citations, and an explicit list of claims with none. |
 
@@ -95,9 +99,9 @@ The full list is WHITEPAPER §6. The three that matter most:
 - **Ungovernable is symmetric and cannot be aimed.** The properties that defeat a censor equally
   defeat a fraud investigation and a court order for a stalker's logs. No chokepoint opens only
   for good reasons.
-- **L16 may simply not work.** Flat returns to scale is the newest idea here and has no proof and
-  no deployment. If it fails, this becomes another decentralised network with three companies in
-  it, and the failure will not be a seizure. It will be an acquisition.
+- **L16 defends against half its threat.** Simulation shows the per-node ceiling does hold and does
+  stop an advantage compounding. It does nothing about an adversary who buys *presence* rather than
+  position: a KAX17-sized fleet touches a quarter of all paths under every rule tested.
 
 ## Prior art
 
