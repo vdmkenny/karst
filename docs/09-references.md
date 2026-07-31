@@ -264,3 +264,32 @@ Measures the mixing time of real social graphs and finds it **much larger than t
 assumes**, so systems built on fast mixing have weaker guarantees than claimed or must be less
 efficient to compensate. Directly qualifies the SybilLimit bound cited in
 `13-observation-defence.md`.
+
+---
+
+## Fundamental limits
+
+**Anonymity trilemma.** Das, Meiser, Mohammadi, Kate. *Anonymity Trilemma: Strong Anonymity,
+Low Bandwidth Overhead, Low Latency, Choose Two.* IEEE S&P 2018.
+<https://www.freehaven.net/anonbib/cache/trilemma-oakland2018.pdf>
+
+Proves an anonymous communication protocol achieves at most two of strong anonymity, low
+bandwidth overhead and low latency against a global passive adversary, with separate bounds for
+synchronised and unsynchronised user behaviour.
+
+Cited in `15-fundamental-limits.md`. This establishes that KARST's bandwidth cost is
+theorem-mandated rather than an implementation defect, and it raises the question the doc then
+answers: KARST pays *both* costs where the theorem requires one, which is justified because the
+trilemma governs passive adversaries only and the latency is buying active resistance.
+
+**Membership-concealing overlay networks.** Vasserman, Jansen, Tyra, Hopper, Kim. ACM CCS 2009.
+<https://www.robgjansen.com/publications/mcon-ccs2009.pdf>
+
+Formalises hiding the real-world identities of participants, so an observer cannot tell who is a
+member. Three proof-of-concept designs trading efficiency against churn robustness. Membership
+concealment is orthogonal to anonymity and makes pseudonymous communication and censorship
+resistance easier when present.
+
+Cited in `15-fundamental-limits.md`, where it withdraws the claim that the join boundary has no
+complete defence. It has a known direction and no deployed solution, which is a different
+statement.

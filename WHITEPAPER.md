@@ -349,7 +349,15 @@ observer, delay defeats the active one. Neither is redundant, and a passive meas
 argues for dropping the wrong one.
 
 **The cost is roughly 200x bandwidth at that duty cycle**, charged continuously to everyone
-including everyone who never needed it.
+including everyone who never needed it. That cost is **not a defect to be optimised away**. Das,
+Meiser, Mohammadi and Kate prove an anonymity trilemma (IEEE S&P 2018): strong anonymity, low
+bandwidth overhead and low latency, choose two. Any roadmap item promising to cut this without
+weakening anonymity is promising to refute a theorem.
+
+The two costs buy different things from different adversaries. Cover traffic buys the passive
+result and delay does not, as the table above shows. Delay buys the *active* result, where a
+batch mix is isolated 51.7% of the time and a Poisson mix 0.7%. The trilemma governs the
+bandwidth; the n-1 attack governs the latency. Neither is redundant.
 
 **The patient adversary.** Both results above concern a single message. The long-run attack is
 statistical disclosure (Danezis 2003): difference the recipient population across rounds where
@@ -1063,7 +1071,14 @@ protects a participant and not the act of becoming one. An adversary who was alr
 gets the absent-population baseline that statistical disclosure needs, and half an observation
 window of it is enough for full attribution. Joining before you need the network helps and
 costs the full bandwidth rate from that moment; joining in cohorts helps and needs coordination
-the design deliberately lacks. There is no complete defence short of having always been there.
+the design deliberately lacks.
+
+There is a known research direction and no deployed solution. Membership-concealing overlay
+networks (Vasserman et al., CCS 2009) hide who is participating at all, so the differencing
+boundary does not exist rather than being padded over. L5 already conceals membership from a
+*directory*; what remains is concealing it from a *network observer*, which is an unfinished
+research problem rather than an engineering task. See
+[`docs/15-fundamental-limits.md`](docs/15-fundamental-limits.md).
 
 **6.11 Constrained devices are exempt from cover traffic and are therefore not anonymous.** A battery
 powered sensor cannot emit continuously. The exemption is honest and it segments the anonymity set,

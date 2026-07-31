@@ -33,7 +33,7 @@ list of everything the design makes worse.
 > [`docs/05-anonymity.md`](docs/05-anonymity.md).
 
 ```bash
-cargo test          # 153 tests
+cargo test          # 156 tests
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
 cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?
@@ -84,6 +84,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`docs/12-algorithm-evolution.md`](docs/12-algorithm-evolution.md) | Ed25519 is not forever. Versioned evolution, never runtime negotiation. |
 | [`docs/13-observation-defence.md`](docs/13-observation-defence.md) | Why diversity-aware path selection backfires, and where the Sybil defence actually belongs. |
 | [`docs/14-value-and-anonymity.md`](docs/14-value-and-anonymity.md) | Paying for capacity without deanonymising the payer. |
+| [`docs/15-fundamental-limits.md`](docs/15-fundamental-limits.md) | The anonymity trilemma, why the bandwidth cost is a theorem, and one claim withdrawn. |
 | [`docs/08-roadmap.md`](docs/08-roadmap.md) | Phases, mapped to milestones. |
 | [`docs/09-references.md`](docs/09-references.md) | Citations, and an explicit list of claims with none. |
 
