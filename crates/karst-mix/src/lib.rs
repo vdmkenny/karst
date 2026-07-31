@@ -27,6 +27,7 @@
 //! intersection attacks. Passing here is necessary and nowhere near sufficient.
 
 pub mod active;
+pub mod frontier;
 pub mod intersection;
 pub mod packet;
 pub mod sim;

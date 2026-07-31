@@ -237,8 +237,13 @@ Mitigations, none complete and none free:
 - **Join in cohorts**, so an arrival is not individually timed. This needs coordination the
   rest of the design deliberately lacks.
 
-The general shape of this is unavoidable. A network you can be observed joining leaks
-something at the moment you join, and the only complete defence is to have always been there.
+A network you can be observed joining leaks at the moment you join. The research direction that
+removes the boundary rather than padding it is **membership concealment**: Vasserman et al.,
+*Membership-Concealing Overlay Networks* (CCS 2009), hide who is participating at all, so there
+is no join event to observe. L5 already conceals membership from a directory; concealing it from
+a network observer is the unfinished part. No MCON design has deployed, and the paper's three
+proposals trade efficiency against churn robustness rather than dominating. See
+`15-fundamental-limits.md`.
 
 ---
 
