@@ -207,3 +207,31 @@ better than SybilGuard on a million-node experiment, and supplied the first real
 evidence that social networks are fast mixing. This is the right shape for L5, which already
 requires a social graph: it bounds **admission**, which is what an observer needs, rather than
 **reputation**, which it does not.
+
+---
+
+## Value without deanonymisation
+
+**Coconut.** Sonnino, Al-Bassam, Bano, Meiklejohn, Danezis. *Coconut: Threshold Issuance
+Selective Disclosure Credentials with Applications to Distributed Ledgers.* NDSS 2019.
+<https://arxiv.org/pdf/1802.07344>
+
+Threshold issuance, selective disclosure, re-randomisation, and multiple unlinkable showings,
+remaining correct when a subset of issuing authorities is malicious or offline. Its listed
+applications include anonymous payments and distributing proxies for censorship resistance,
+which is the L14 problem exactly.
+
+Cited in `14-value-and-anonymity.md`. Threshold issuance is what stops the value layer
+becoming error 03: a single issuer sees every request and can link every one to the party that
+made it.
+
+**RSA Blind Signatures.** RFC 9474, IRTF CFRG.
+<https://www.rfc-editor.org/rfc/rfc9474>
+
+The single-issuer ancestor, standardising Chaum's construction for untraceable payments, with
+the unblinded signature verifiable by a standard RSA-PSS library. Simpler than Coconut and
+without threshold issuance, so it trades the singleton back in.
+
+`karst-value` implements neither. It implements the protocol shape and real threshold sharing,
+and tests that the issuance and spend transcripts share no field. The cryptographic binding is
+open work.

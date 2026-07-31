@@ -21,18 +21,20 @@ none of them.
 
 ## Status
 
-Research project. Working code for eight layers, a specification for the rest, and an itemised
+Research project. Working code for ten layers, a specification for the rest, and an itemised
 list of everything the design makes worse.
 
-> **L4 mixing now has a packet format and a simulator, not a network.** The simulator holds a
-> whole-network observer to chance, at roughly 200x bandwidth. It also produced a negative
-> result: cover traffic is doing all the work, and Poisson delay is not justified by any
-> evidence we have produced. See [`docs/05-anonymity.md`](docs/05-anonymity.md) §7.
+> **L4 mixing has a packet format and simulators, not a network.** Against a whole-network
+> observer the design holds the adversary to chance, at roughly 200x bandwidth. Cover traffic
+> carries that result on its own; Poisson delay earns its place against an *active* adversary,
+> where a batch mix is isolated 51.7% of the time and a Poisson mix 0.7%. See
+> [`docs/05-anonymity.md`](docs/05-anonymity.md).
 
 ```bash
-cargo test          # 118 tests
+cargo test          # 135 tests
 cargo run -p karst-demo
-cargo run -p karst-mix --bin karst-mixsim   # anonymity vs a whole-network observer
+cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
+cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?
 ```
 
 | Crate | Layer | What it does |
@@ -46,6 +48,7 @@ cargo run -p karst-mix --bin karst-mixsim   # anonymity vs a whole-network obser
 | [`karst-afford`](crates/karst-afford) | L11 Affordance | Typed, priced machine operations inside the signed object. |
 | [`karst-mix`](crates/karst-mix) | L4 Mixing | Fixed-size unlinkable packets, Poisson delay, and passive plus active adversary simulators. |
 | [`karst-symmetry`](crates/karst-symmetry) | L16 Symmetry | Does flattening returns to scale actually prevent capture? Partly. |
+| [`karst-value`](crates/karst-value) | L14 Value | Capacity credentials, earned by relaying and spent unlinkably. No bank. |
 | [`karst-thread`](crates/karst-thread) | Applications | Threads assembled from backlinks, boards as views, no host. |
 
 ## What the demo actually proves
@@ -61,6 +64,8 @@ cargo run -p karst-mix --bin karst-mixsim   # anonymity vs a whole-network obser
 - An agent's post carries a delegation chain back to whoever is accountable. A forged claim of
   delegation is caught. A bot claiming to be human is **not** caught, and that limit is
   permanent and documented rather than papered over.
+- Capacity credentials are earned by relaying and spent unlinkably: the issuance transcript and
+  the spend transcript share no field, and no bank is involved anywhere in the loop.
 
 ## Documents
 
@@ -75,6 +80,7 @@ cargo run -p karst-mix --bin karst-mixsim   # anonymity vs a whole-network obser
 | [`docs/11-hardware-keys.md`](docs/11-hardware-keys.md) | TPM 2.0 considered and rejected, and where the line actually falls. |
 | [`docs/12-algorithm-evolution.md`](docs/12-algorithm-evolution.md) | Ed25519 is not forever. Versioned evolution, never runtime negotiation. |
 | [`docs/13-observation-defence.md`](docs/13-observation-defence.md) | Why diversity-aware path selection backfires, and where the Sybil defence actually belongs. |
+| [`docs/14-value-and-anonymity.md`](docs/14-value-and-anonymity.md) | Paying for capacity without deanonymising the payer. |
 | [`docs/08-roadmap.md`](docs/08-roadmap.md) | Phases, mapped to milestones. |
 | [`docs/09-references.md`](docs/09-references.md) | Citations, and an explicit list of claims with none. |
 
