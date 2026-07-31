@@ -88,9 +88,11 @@ KARST composes paths from the signed path segments of L1, learned through the so
 introductions of L5. There is no document listing the network and no authority
 publishing one.
 
-**Constraint:** hops must be drawn from standing-disjoint neighbourhoods, per L16. An
-adversary aiming to hold both ends of a path must therefore infiltrate socially separate
-parts of the graph rather than simply operating more machines.
+**Selection is uniform over admitted relays.** A structural preference that relay operators
+can read is a placement target: guard placement attacks defeat Counter-RAPTOR, DeNASA and
+LASTor, letting an adversary with 0.216% of Tor's bandwidth reach 18.22% guard selection.
+Diversity heuristics are worse than uniform unless they carry a proof. The defence against an
+observer sits at L5 admission instead. See `13-observation-defence.md`.
 
 ---
 
@@ -131,15 +133,17 @@ Stated flatly, because an anonymity system that oversells itself gets people hur
    distinctive peer set. L4 protects packets, not judgement.
 3. **The gateway to today's internet.** Traffic leaving for the ordinary web is outside
    every guarantee here, and clients must mark it.
-4. **Long-term intersection attacks.** An adversary who observes the network over months
-   and correlates who was online when a given identity was active still gains
-   information. Constant-rate cover greatly slows this and does not stop it.
+4. **The moment you join.** Constant-rate cover defeats statistical disclosure for a
+   participant and not for the act of becoming one, because arriving is exactly the
+   before-and-after boundary the attack needs. Measured in §8. An adversary who was already
+   watching gets full attribution.
 5. **The device profile.** Constrained devices are exempt from constant-rate cover
    because a battery-powered sensor cannot emit continuously. **Exempt devices are not
    anonymous.** This is a hole and we know it is a hole. See WHITEPAPER §6.11.
-6. **The value layer.** L14 payments are a correlation surface. If who paid whom is
-   observable, the anonymity above it is decorative. This is unresolved and it is the
-   most serious open problem in the design.
+6. **The value layer, partially.** Paying for capacity is a correlation surface if payment and
+   traffic are linkable. L14 separates acquisition from spending so they are not, but the
+   *timing* of acquisition remains one: obtaining credentials immediately before a burst of
+   activity narrows the field. See `14-value-and-anonymity.md`.
 
 ---
 
@@ -159,7 +163,7 @@ suits.
 
 ---
 
-## 7. Simulated results, including one we did not expect
+## 7. Simulated results
 
 `crates/karst-mix` implements the packet format and a global passive adversary simulator.
 200 clients, 3 mix layers, 1500 ticks, 0.5% duty cycle. The adversary observes every link,
@@ -194,7 +198,51 @@ loose bound, say 480 ticks against a 24 tick mean, makes the attacker weak enoug
 configuration looks safe. Overstating your own defences is the failure this harness exists to
 prevent.
 
-## 8. The active adversary
+## 8. The patient adversary
+
+The passive and active harnesses both measure **one message**. The long-run attack is the
+statistical disclosure attack (Danezis 2003, extending Kesdogan): difference the recipient
+population in rounds where a target is sending against rounds where they are not, and the
+excess is theirs. Against a steady-state mix network it is slowed but still succeeds.
+
+`karst-mix::intersection` runs it against 200 users over 4,000 rounds. The metric that matters
+is **attribution**: how much better the adversary does at finding the target's contacts than a
+stranger's, from identical observations. A target's contacts being popular is not a secret;
+the adversary knowing they are *the target's* is.
+
+| Target behaviour | Attribution | Full recall at |
+|---|---|---|
+| Sends only when it has traffic | **+1.00** | round 500 |
+| Constant-rate emission | 0.00 | never |
+| Constant rate, joins at round 500 | +0.33 | never |
+| Constant rate, joins at round 2,000 | **+1.00** | round 3,000 |
+
+**Constant-rate emission removes the attack's input.** The differencing needs rounds in which
+the target is absent, and there are none. Without it, the target is fully identified within
+500 rounds.
+
+### Joining is the hole, and everyone joins exactly once
+
+The last two rows are the finding. Constant-rate cover protects a *participant*. It does not
+protect the act of *becoming* one, because arriving creates exactly the before-and-after
+boundary the attack is built on, and the longer the adversary watched beforehand the sharper
+the boundary. Half an observation window of pre-join baseline identifies the target's contacts
+completely.
+
+Mitigations, none complete and none free:
+
+- **Join before you need it.** Traffic-free participation costs the full constant rate, which
+  is the point: the bandwidth bill starts when you join, not when you have something to say.
+- **Never leave.** A departure is the same boundary in reverse.
+- **Join in cohorts**, so an arrival is not individually timed. This needs coordination the
+  rest of the design deliberately lacks.
+
+The general shape of this is unavoidable. A network you can be observed joining leaks
+something at the moment you join, and the only complete defence is to have always been there.
+
+---
+
+## 9. The active adversary
 
 An adversary who can suppress traffic, not merely observe it. `karst-mix::active` mounts the
 n-1 attack: block every other honest packet entering a mix, inject packets you can recognise,

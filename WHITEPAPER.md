@@ -351,10 +351,27 @@ argues for dropping the wrong one.
 **The cost is roughly 200x bandwidth at that duty cycle**, charged continuously to everyone
 including everyone who never needed it.
 
+**The patient adversary.** Both results above concern a single message. The long-run attack is
+statistical disclosure (Danezis 2003): difference the recipient population across rounds where
+a target is sending against rounds where it is not. `karst-mix::intersection` measures it over
+4,000 rounds, scoring **attribution**, meaning how much better the adversary does on its target
+than on a stranger given identical data:
+
+| Target behaviour | Attribution | Full recall at |
+|---|---|---|
+| Sends only when it has traffic | **+1.00** | round 500 |
+| Constant-rate emission | 0.00 | never |
+| Constant rate, joins at round 2,000 | **+1.00** | round 3,000 |
+
+Constant-rate emission removes the attack's input, because the differencing needs absent rounds
+and there are none. **Joining is the exception, and everyone joins exactly once.** Arriving
+creates precisely the before-and-after boundary the attack needs, and the longer the adversary
+watched beforehand the sharper it is. The only complete defence is to have always been there.
+
 **Open.** The device profile is exempt from constant rate cover, because a battery powered
-sensor cannot emit continuously, and **exempt devices are therefore not anonymous**. That
-is a hole, and it segments the anonymity set, which is exactly the mistake this layer
-otherwise avoids. See §6.11.
+sensor cannot emit continuously, and **exempt devices are therefore not anonymous**. That is a
+hole, and it segments the anonymity set, which is exactly the mistake this layer otherwise
+avoids. See §6.11.
 
 ---
 
@@ -1031,6 +1048,13 @@ two verifiers that cannot see each other both accept the same credential. Closin
 shared ledger with its consensus cost, or short epochs that bound the damage, or accepting that each
 relay honours a credential once. The same limit applies to L9's use counts, for the same reason, and
 in both cases the design has to pick an option rather than imply the problem is solved.
+
+**6.11a Joining the network is observable, and everyone does it once.** Constant-rate cover
+protects a participant and not the act of becoming one. An adversary who was already watching
+gets the absent-population baseline that statistical disclosure needs, and half an observation
+window of it is enough for full attribution. Joining before you need the network helps and
+costs the full bandwidth rate from that moment; joining in cohorts helps and needs coordination
+the design deliberately lacks. There is no complete defence short of having always been there.
 
 **6.11 Constrained devices are exempt from cover traffic and are therefore not anonymous.** A battery
 powered sensor cannot emit continuously. The exemption is honest and it segments the anonymity set,

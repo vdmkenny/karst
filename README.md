@@ -26,12 +26,14 @@ list of everything the design makes worse.
 
 > **L4 mixing has a packet format and simulators, not a network.** Against a whole-network
 > observer the design holds the adversary to chance, at roughly 200x bandwidth. Cover traffic
-> carries that result on its own; Poisson delay earns its place against an *active* adversary,
-> where a batch mix is isolated 51.7% of the time and a Poisson mix 0.7%. See
+> carries that result; Poisson delay earns its place against an *active* adversary, where a
+> batch mix is isolated 51.7% of the time and a Poisson mix 0.7%. Against a *patient* one,
+> constant-rate emission defeats statistical disclosure entirely, **except at the moment you
+> join**, which fully deanonymises a user the adversary was already watching. See
 > [`docs/05-anonymity.md`](docs/05-anonymity.md).
 
 ```bash
-cargo test          # 135 tests
+cargo test          # 142 tests
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
 cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?
