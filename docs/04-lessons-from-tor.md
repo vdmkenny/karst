@@ -145,13 +145,20 @@ and does not survive the departure of the people providing it.
 **KARST.** Two mechanisms, both from L16 Symmetry. Standing saturates per node, so a
 thousand nodes under one owner earn what a thousand independent ones do. Standing is
 earned per relationship and does not transfer, so a fresh Sybil fleet starts at zero
-and cannot buy its way up. On top of that, L4 path selection requires hops drawn from
-standing-disjoint neighbourhoods, so owning both ends of a path means infiltrating
-separate parts of the social graph rather than simply buying more servers.
+and cannot buy its way up.
 
-**Cost.** Sybil resistance for *reputation* is not Sybil resistance for *observation*.
-An adversary who does not care about standing can still run many nodes purely to watch,
-and the mixing layer rather than the reputation layer is what has to defeat that. This
+A third mechanism was specified and is **withdrawn**: drawing path hops from standing-disjoint
+neighbourhoods. Guard placement attacks defeat exactly that shape of rule, because any
+structural preference an operator can read tells them where to stand, and an adversary with
+0.216% of Tor's bandwidth reaches 18.22% guard selection against the algorithms built this way.
+Path selection is uniform over admitted relays. See `13-observation-defence.md`.
+
+**Cost.** Sybil resistance for *reputation* is not Sybil resistance for *observation*, and
+simulation confirms it: an adversary who does not care about standing runs many nodes purely to
+watch, and path coverage tracks node count with no ceiling because no reputation is involved to
+saturate. A KAX17-sized fleet touches 25.8% of paths under every rule tested. **L16 defends
+against acquisition and not against surveillance**, so the defence has moved to L5 admission,
+which is unbuilt and whose bound is contingent on a graph property nobody has measured. This
 also raises a real barrier for legitimate new operators, who start at zero forever.
 
 ---

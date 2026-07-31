@@ -156,6 +156,28 @@ Status key: **built** means implemented and tested in `crates/`. **specified** m
 described here in enough detail to implement. **sketched** means the mechanism is named
 and the details are open.
 
+### Two invariants that are not layers
+
+Anonymity is assigned to L4 and economics to L14 in the diagram above, and both assignments are
+convenient rather than accurate. **Each is a property every layer can violate, and several do:**
+
+| Violation | Layers involved |
+|---|---|
+| Constant-rate emission is an ISP-visible signature (§6.13a) | L4 requires it, L3 promises the opposite |
+| Paying a relay reveals it is a relay (§6.14) | L14 needs measurement, L5 needs concealment |
+| A fetch names what you wanted (§6.13) | L6 addresses by hash, L4 hides only the sender |
+| Announcement leaks authorship (§6.7) | L15 requires it, L4 wants nothing observable |
+
+All four are conflicts *between* layers rather than defects *inside* one, which is what a
+cross-cutting property looks like when it has been filed as a layer. So:
+
+> **L4 is the main contributor to anonymity and not its owner. Every layer must preserve it,
+> and a layer that trades it away for a local benefit has broken a global invariant rather than
+> made a local choice.** The same holds for L14 and the economics.
+
+Read that way the four conflicts are predictable rather than surprising, and the next one should
+be caught in review instead of in an audit.
+
 ---
 
 ### L0 Bearer
@@ -200,8 +222,12 @@ authority to revoke from, because nothing was ever allocated.
 
 This is SCION's design. It is not a thought experiment and it carries production traffic.
 
-**Interaction with L4.** Path selection also determines anonymity, so segments must be
-drawn from standing-disjoint neighbourhoods per L16. See §3.5 and §6.3.
+**Interaction with L4.** Path selection also determines anonymity, and **selection is uniform
+over admitted relays**. A structural preference that relay operators can read is a placement
+target: guard placement attacks defeat Counter-RAPTOR, DeNASA and LASTor, letting an adversary
+with 0.216% of Tor's bandwidth reach 18.22% guard selection probability. The defence against an
+observer belongs at L5 admission, not in path selection. See
+[`docs/13-observation-defence.md`](docs/13-observation-defence.md).
 
 **Open.** Sender-chosen paths mean the sender decides who gets paid, which inverts transit
 economics in a direction whose equilibrium we cannot predict.

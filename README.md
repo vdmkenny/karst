@@ -88,6 +88,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`docs/16-fetch-privacy.md`](docs/16-fetch-privacy.md) | Requesting an object names it. Most of a catalogue is tail, so most requests identify you. |
 | [`docs/17-paying-concealed-relays.md`](docs/17-paying-concealed-relays.md) | You cannot conceal that a node relays and pay it for relaying. |
 | [`docs/18-documented-attacks.md`](docs/18-documented-attacks.md) | Audited against three deanonymisations that actually happened. Two would work. |
+| [`docs/19-where-the-design-is-wrong.md`](docs/19-where-the-design-is-wrong.md) | Stocktake: what needs a decision, what needs research, what is merely unbuilt. |
 | [`docs/08-roadmap.md`](docs/08-roadmap.md) | Phases, mapped to milestones. |
 | [`docs/09-references.md`](docs/09-references.md) | Citations, and an explicit list of claims with none. |
 
