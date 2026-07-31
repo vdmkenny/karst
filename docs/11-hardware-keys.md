@@ -14,9 +14,8 @@ once.
 
 A TPM generates a keypair and never releases the private half. An address is the hash of a
 public key, so L2 would not have changed at all. The gain would have been that stealing the
-disk, a backup, or process memory no longer steals the identity, and that malware could sign
-only while it was actually resident rather than exfiltrating the key and continuing next
-month.
+disk, a backup, or process memory does not steal the identity, and malware can sign only while
+it is actually resident rather than exfiltrating the key and continuing next month.
 
 That is a real gain. It is not nothing. It is also smaller than it first appears, for the
 reasons in §3.
@@ -40,6 +39,17 @@ Design commitment 3 says **small enough to reimplement is a security property**.
 signature surface of the entire stack, so that some users on some hardware get better key
 storage, is directly contrary to it. One curve, no negotiation, no downgrade path is worth
 more than hardware key custody.
+
+> **Scope of this objection, per `12-algorithm-evolution.md`.** It is not an argument against
+> ever changing algorithms, which would forbid migrating off Ed25519 and is untenable, since
+> Ed25519 is not the right default forever and is wrong once a cryptographically relevant
+> quantum computer exists.
+>
+> The objection is to a **permanent concurrent** second suite, active for some peers and not
+> others, selected by what hardware someone happens to own. That is negotiation, and
+> negotiation is where downgrade attacks live. A **versioned** migration, where the
+> specification changes the one active suite on a schedule with a hard end date, has no
+> downgrade surface and is planned for.
 
 ### 2.2 The attestation machinery is a manufacturer singleton, and it will not stay optional
 

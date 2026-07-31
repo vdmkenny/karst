@@ -84,14 +84,13 @@ continuity, that authority only ever narrowed, that the root grant came from the
 resource owner, and that the final audience is the key that signed the object. A forged
 claim fails, so you cannot falsely claim to be *authorised by* someone.
 
-An earlier version of this stored only `(issuer, audience)` address pairs and checked that
-they lined up, which meant an attacker could name any victim as their principal and have a
-post attributed to them. That was reported as issue #28 and it was a total forgery of the
-one property this layer exists to provide. The evidence now travels with the claim.
+Address pairs alone are not evidence: anyone can type out a pair naming a victim as their
+principal, so a claim built from them forges the one property this layer exists to provide.
+The signed capability travels with the claim instead.
 
-`Autonomous` is **not** checkable, and no longer says it is. Nothing in it proves the named
-operator runs the agent, so it is a bare claim exactly like `Direct`, and responsibility
-falls on whoever signed it rather than on the operator they named.
+`Autonomous` is **not** checkable. Nothing in it proves the named operator runs the agent, so
+it is a bare claim exactly like `Direct`, and responsibility falls on whoever signed it rather
+than on the operator they named.
 
 `Direct` is not checkable and never will be. That is the whole difficulty and this document
 will not pretend otherwise.

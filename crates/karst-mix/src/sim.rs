@@ -232,11 +232,11 @@ pub fn run(cfg: &SimConfig) -> SimResult {
     //
     // The window must be a tight high quantile of the actual latency distribution, not a
     // loose bound. Total latency is the sum of `layers` exponentials, which is Erlang with
-    // shape k and mean k*m, standard deviation sqrt(k)*m. A first version of this used
-    // 20*mean*layers, which for the default parameters was a 480 tick window against a 24
-    // tick mean, and it made the adversary so weak that every configuration looked safe.
-    // Overstating your own defences is the failure mode this whole harness exists to
-    // prevent, so the window is now mean + 4 standard deviations.
+    // shape k and mean k*m, standard deviation sqrt(k)*m, so the window is mean + 4 SD.
+    //
+    // A loose bound makes the adversary weak enough that every configuration looks safe:
+    // 20*mean*layers is a 480 tick window against a 24 tick mean latency. Overstating your
+    // own defences is the failure mode this harness exists to prevent.
     let k = cfg.layers as f64;
     let (min_lat, max_lat) = if cfg.mixing {
         let mean = k * cfg.mean_delay;

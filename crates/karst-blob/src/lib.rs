@@ -412,12 +412,10 @@ mod tests {
 
     /// xorshift64, period 2^64-1.
     ///
-    /// The first version of this helper was `(i as u8).wrapping_mul(31)`, which has a
-    /// period of 256 bytes, so with 1 KiB chunks every chunk of a file was byte for byte
-    /// identical and deduplication collapsed the whole thing to two distinct chunks. The
-    /// tests below failed and the code was right. Worth keeping the note: content
-    /// addressing makes degenerate test data disappear, so test fixtures need real
-    /// entropy or they measure nothing.
+    /// Test fixtures here need real entropy. A generator with a short period, say
+    /// `(i as u8).wrapping_mul(31)` at 256 bytes, makes every 1 KiB chunk byte for byte
+    /// identical, and deduplication then collapses a whole file to two distinct chunks. The
+    /// tests below would be measuring the fixture rather than the code.
     fn data_of(len: usize, seed: u64) -> Vec<u8> {
         let mut s = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1;
         (0..len)

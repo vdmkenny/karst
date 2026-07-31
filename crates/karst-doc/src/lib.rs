@@ -389,9 +389,9 @@ impl Doc {
     /// guessing which `<span>` held the price.
     ///
     /// Descends **containment only**, exactly as [`Doc::render_text`] does, so the machine
-    /// view and the human view always describe the same document. A quoted or linked
-    /// third-party node cannot inject records here, because following a link is a separate
-    /// and deliberate act. See [`Doc::linked_records`].
+    /// view and the human view describe the same document. A quoted or linked third-party
+    /// node cannot inject records here: following a link is a separate and deliberate act.
+    /// See [`Doc::linked_records`].
     pub fn records(&self, root: &Cid) -> Vec<(String, BTreeMap<String, Value>)> {
         let mut out = Vec::new();
         self.collect_records(root, &mut out);

@@ -432,10 +432,9 @@ impl Capability {
 
 /// A concrete attempt to use a capability.
 ///
-/// Note the absence of a use counter. An earlier version took one from the caller, which
-/// meant a one-use capability could be replayed forever by always sending index zero
-/// (issue #29). Usage is now counted by the verifier in a [`UseLedger`], where the caller
-/// cannot reach it.
+/// Note the absence of a use counter. A caller-supplied count lets a one-use capability be
+/// replayed forever by always sending zero, so usage is counted by the verifier in a
+/// [`UseLedger`] where the caller cannot reach it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub operation: String,
@@ -465,10 +464,10 @@ impl Request {
 
 /// An invocation signed by the capability holder.
 ///
-/// A capability on its own is a bearer token: anyone who copies it can spend it (issue
-/// #30). Requiring the holder to sign the request, and checking that signature against the
-/// final grant's audience, means possession of the token is not enough. You need the key it
-/// was issued to.
+/// A capability on its own is a bearer token, and anyone who copies it can spend it.
+/// Requiring the holder to sign the request, and checking that signature against the final
+/// grant's audience, means possession of the token is not enough: you need the key it was
+/// issued to.
 #[derive(Clone)]
 pub struct SignedInvocation {
     pub request: Request,

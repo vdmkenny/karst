@@ -299,6 +299,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "karst-symmetry"
+version = "0.1.0"
+dependencies = [
+ "rand",
+]
+
+[[package]]
 name = "karst-thread"
 version = "0.1.0"
 dependencies = [

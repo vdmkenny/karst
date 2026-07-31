@@ -182,17 +182,17 @@ itself. Volume alone narrows the sender to two candidates out of two hundred.
 leaves a 3.2x advantage, because without cover only the clients who were actually talking
 transmit at all, and that set is small.
 
-### The negative result, and its reversal
+### What the passive result does not show
 
 **Cover alone scores identically to cover plus delay.** Uniform emission at every tick is
 effectively a synchronous batch mix, and a batch mix is strong against an observer who only
-watches. On the passive evidence alone, the Poisson delay mechanism looked unjustified, and
-for one commit this project said exactly that.
+watches. Passive evidence alone therefore does not justify the Poisson delay mechanism. §8
+does.
 
-The first version of this harness gave every configuration a clean bill of health, because
-the adversary's timing window was 480 ticks against a 24 tick mean latency. Tightening it to
-mean plus four standard deviations produced the table above. Overstating your own defences is
-the failure this harness exists to prevent, and it caught itself once already.
+The adversary's timing window has to be a tight quantile of the real latency distribution. A
+loose bound, say 480 ticks against a 24 tick mean, makes the attacker weak enough that every
+configuration looks safe. Overstating your own defences is the failure this harness exists to
+prevent.
 
 ## 8. The active adversary
 
@@ -217,8 +217,8 @@ attack is expensive and loud.
 
 Note the residual: isolation is 0.7% rather than zero. If the target draws a long delay and
 every resident happens to leave first, it walks out alone. That is roughly one message in a
-hundred and fifty, it is inherent to a probabilistic defence, and rounding it to "never" would
-repeat the overclaiming the harness already caught once.
+hundred and fifty. It is inherent to a probabilistic defence, and rounding it to "never" would
+be exactly the overclaiming this harness exists to catch.
 
 ### Batching needs a clock, and continuous time does not
 

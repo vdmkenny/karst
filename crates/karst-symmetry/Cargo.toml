@@ -1,0 +1,13 @@
+[package]
+name = "karst-symmetry"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KARST L16: does flattening returns to scale actually prevent centralisation?"
+
+[[bin]]
+name = "karst-symsim"
+path = "src/bin/symsim.rs"
+
+[dependencies]
+rand.workspace = true

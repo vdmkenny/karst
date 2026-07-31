@@ -44,10 +44,9 @@ pub enum Agency {
 
     /// An agent acted under a specific principal's authority.
     ///
-    /// Carries the **actual signed capability**, not a summary of it. An earlier version
-    /// stored only `(issuer, audience)` address pairs, which anyone could type out, so a
-    /// post could claim any principal at all (issue #28). The evidence now travels with
-    /// the claim.
+    /// Carries the **actual signed capability**, not a summary of it. Address pairs alone
+    /// are something anyone can type out, so a claim built from them can name any principal
+    /// at all. The evidence travels with the claim.
     Delegated {
         /// The address the capability's root grant must be signed by. Verification fails
         /// unless the chain genuinely starts here.
@@ -164,8 +163,8 @@ impl Agency {
 
     /// Whether this claim can be checked, as opposed to merely asserted.
     ///
-    /// Only [`Agency::Delegated`] can. `Autonomous` used to be listed here, which was
-    /// wrong: nothing in it proves the named operator runs the agent.
+    /// Only [`Agency::Delegated`] can. Nothing in `Autonomous` proves the named operator
+    /// runs the agent.
     pub fn is_verifiable(&self) -> bool {
         matches!(self, Agency::Delegated { .. })
     }
