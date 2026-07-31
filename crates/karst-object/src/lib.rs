@@ -23,25 +23,93 @@ use karst_id::{Address, Identity, Peer, Signature};
 
 /// A content identifier: the BLAKE3 hash of a canonical encoding.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct Cid([u8; 32]);
+pub struct Cid {
+    alg: u8,
+    len: u8,
+    /// Zero-padded so the derived comparisons stay well defined.
+    digest: [u8; MAX_DIGEST],
+}
+
+/// Largest digest any algorithm may produce, sized for SHA3-512 and friends.
+pub const MAX_DIGEST: usize = 64;
+
+/// Hash algorithm identifiers.
+///
+/// **A content address is a permanent name**, so a digest that does not say which function
+/// produced it can never be migrated: if BLAKE3 breaks, every reference everywhere points at a
+/// name an attacker can now collide, and there is no way to tell an old name from a new one.
+/// Self-description costs two bytes per reference and is the only thing that makes a future
+/// hash distinguishable rather than ambiguous.
+///
+/// This must exist before there is data, which is why it exists now.
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum HashAlg {
+    Blake3 = 1,
+}
+
+impl HashAlg {
+    pub fn from_tag(t: u8) -> Option<HashAlg> {
+        match t {
+            1 => Some(HashAlg::Blake3),
+            _ => None,
+        }
+    }
+    pub fn digest_len(&self) -> usize {
+        match self {
+            HashAlg::Blake3 => 32,
+        }
+    }
+}
+
+/// The algorithm new content is named with. Changing this is a protocol version change, per
+/// `docs/12-algorithm-evolution.md`, never a per-peer negotiation.
+pub const CURRENT_HASH: HashAlg = HashAlg::Blake3;
 
 impl Cid {
     pub fn of(bytes: &[u8]) -> Self {
-        Cid(*blake3::hash(bytes).as_bytes())
+        let mut digest = [0u8; MAX_DIGEST];
+        digest[..32].copy_from_slice(blake3::hash(bytes).as_bytes());
+        Cid {
+            alg: CURRENT_HASH as u8,
+            len: 32,
+            digest,
+        }
     }
 
-    pub fn as_bytes(&self) -> &[u8; 32] {
-        &self.0
+    /// Reconstruct from parts, rejecting an unknown algorithm or a length that does not match
+    /// it. A decoder must not accept a digest whose length disagrees with its own tag.
+    pub fn from_parts(alg: u8, digest: &[u8]) -> Option<Cid> {
+        let a = HashAlg::from_tag(alg)?;
+        if digest.len() != a.digest_len() || digest.len() > MAX_DIGEST {
+            return None;
+        }
+        let mut buf = [0u8; MAX_DIGEST];
+        buf[..digest.len()].copy_from_slice(digest);
+        Some(Cid {
+            alg,
+            len: digest.len() as u8,
+            digest: buf,
+        })
+    }
+
+    pub fn alg(&self) -> Option<HashAlg> {
+        HashAlg::from_tag(self.alg)
+    }
+
+    /// The digest bytes, without the algorithm tag.
+    pub fn as_bytes(&self) -> &[u8] {
+        &self.digest[..self.len as usize]
     }
 
     pub fn short(&self) -> String {
-        format!("c:{}", hex::encode(&self.0[..5]))
+        format!("c:{}", hex::encode(&self.digest[..5]))
     }
 }
 
 impl fmt::Display for Cid {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "c:{}", hex::encode(self.0))
+        write!(f, "c{}:{}", self.alg, hex::encode(self.as_bytes()))
     }
 }
 
@@ -93,7 +161,11 @@ impl Enc {
         self.bytes(s.as_bytes())
     }
 
+    /// Self-describing: algorithm tag, then length, then digest. Two bytes more than a bare
+    /// hash, and the difference between a migration being possible and impossible.
     pub fn cid(&mut self, c: &Cid) -> &mut Self {
+        self.buf.push(c.alg);
+        self.buf.push(c.len);
         self.buf.extend_from_slice(c.as_bytes());
         self
     }
@@ -209,8 +281,13 @@ impl<'a> Dec<'a> {
     }
 
     pub fn cid(&mut self) -> Result<Cid, DecodeError> {
-        let b = self.take(32)?;
-        Ok(Cid(b.try_into().unwrap()))
+        let alg = self.u8()?;
+        let len = self.u8()? as usize;
+        if len > MAX_DIGEST {
+            return Err(DecodeError::Truncated);
+        }
+        let b = self.take(len)?;
+        Cid::from_parts(alg, b).ok_or(DecodeError::UnknownTag(alg))
     }
 
     pub fn addr(&mut self) -> Result<Address, DecodeError> {
@@ -364,6 +441,60 @@ impl fmt::Debug for Object {
     }
 }
 
+/// Object kind for the two halves of a key rotation.
+pub const ROTATION_KIND: &str = "karst.rotation.v1";
+
+/// A completed key rotation: the one legitimate cross-key edge in a lineage.
+///
+/// An address is the hash of a public key, so changing signature algorithm, or simply
+/// rotating a key, means a new address. Without an exception, the same-author rule that stops
+/// lineage hijacking (issue #31) also stops a legitimate rotation, and identity could never
+/// migrate.
+///
+/// **Both directions must be signed.** The old key attests to its successor and the new key
+/// attests to its predecessor. A single-sided claim proves nothing: with only the forward half
+/// a compromised old key could hand identity to an attacker, and with only the backward half
+/// anyone could claim to be anyone's successor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Rotation {
+    pub from: Address,
+    pub to: Address,
+}
+
+impl Rotation {
+    /// The old key attests that `to` succeeds it.
+    pub fn forward(old: &Identity, new_key: &[u8; 32], seq: u64) -> Result<Object, ObjectError> {
+        let new_addr = Address::from_key_bytes(new_key).map_err(|_| ObjectError::MalformedAuthorKey)?;
+        let mut e = Enc::new();
+        e.str("forward").addr(&new_addr);
+        Ok(Object::create(old, ROTATION_KIND, seq, e.finish(), None))
+    }
+
+    /// The new key attests that it succeeds `old`.
+    pub fn backward(new: &Identity, old_key: &[u8; 32], seq: u64) -> Result<Object, ObjectError> {
+        let old_addr = Address::from_key_bytes(old_key).map_err(|_| ObjectError::MalformedAuthorKey)?;
+        let mut e = Enc::new();
+        e.str("backward").addr(&old_addr);
+        Ok(Object::create(new, ROTATION_KIND, seq, e.finish(), None))
+    }
+
+    fn parse(obj: &Object) -> Option<(bool, Address, Address)> {
+        if obj.kind != ROTATION_KIND {
+            return None;
+        }
+        let signer = obj.verify().ok()?;
+        let mut d = Dec::new(&obj.payload);
+        let dir = d.str().ok()?;
+        let other = d.addr().ok()?;
+        d.end().ok()?;
+        match dir.as_str() {
+            "forward" => Some((true, signer, other)),
+            "backward" => Some((false, other, signer)),
+            _ => None,
+        }
+    }
+}
+
 /// How a version series resolves.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Resolution {
@@ -399,6 +530,8 @@ impl Resolution {
 #[derive(Default)]
 pub struct Lineage {
     objects: BTreeMap<Cid, Object>,
+    /// Half-signed rotation claims, awaiting their counterpart.
+    rotation_halves: BTreeMap<(Address, Address), (bool, bool)>,
 }
 
 impl Lineage {
@@ -407,11 +540,59 @@ impl Lineage {
     }
 
     /// Verify and store. Objects may arrive in any order and from anyone.
+    ///
+    /// Rotation halves are recorded as they arrive, and a rotation only becomes usable once
+    /// both directions are present.
     pub fn insert(&mut self, obj: Object) -> Result<Cid, ObjectError> {
         obj.verify()?;
+        if let Some((is_forward, from, to)) = Rotation::parse(&obj) {
+            let e = self.rotation_halves.entry((from, to)).or_insert((false, false));
+            if is_forward {
+                e.0 = true;
+            } else {
+                e.1 = true;
+            }
+        }
         let cid = obj.cid();
         self.objects.insert(cid, obj);
         Ok(cid)
+    }
+
+    /// Rotations with both halves present.
+    pub fn rotations(&self) -> Vec<Rotation> {
+        self.rotation_halves
+            .iter()
+            .filter(|(_, (f, b))| *f && *b)
+            .map(|((from, to), _)| Rotation {
+                from: *from,
+                to: *to,
+            })
+            .collect()
+    }
+
+    fn rotation_exists(&self, from: &Address, to: &Address) -> bool {
+        matches!(self.rotation_halves.get(&(*from, *to)), Some((true, true)))
+    }
+
+    /// Follow rotations forward from an address to the identity currently in use.
+    ///
+    /// Returns the input unchanged when there is no rotation, and stops rather than looping if
+    /// a cycle is present.
+    pub fn current_identity(&self, addr: Address) -> Address {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut cur = addr;
+        while seen.insert(cur) {
+            let next = self
+                .rotations()
+                .into_iter()
+                .find(|r| r.from == cur)
+                .map(|r| r.to);
+            match next {
+                Some(n) => cur = n,
+                None => break,
+            }
+        }
+        cur
     }
 
     pub fn get(&self, cid: &Cid) -> Option<&Object> {
@@ -434,11 +615,34 @@ impl Lineage {
     /// document, or manufacture a fork that gets attributed to them.
     ///
     /// Rules: same author, same kind, strictly increasing sequence.
+    ///
+    /// See [`Lineage::is_valid_edge_with_rotations`] for the one exception.
     pub fn is_valid_edge(predecessor: &Object, successor: &Object) -> bool {
         successor.supersedes == Some(predecessor.cid())
-            && successor.author_key == predecessor.author_key
             && successor.kind == predecessor.kind
             && successor.seq > predecessor.seq
+            && successor.author_key == predecessor.author_key
+    }
+
+    /// The same rule, with the key-rotation exception applied.
+    ///
+    /// A cross-key edge is legitimate exactly when a **fully countersigned** rotation links the
+    /// two authors. One-sided claims are refused, so neither a compromised old key nor an
+    /// opportunistic new one can move an identity alone.
+    pub fn is_valid_edge_with_rotations(&self, predecessor: &Object, successor: &Object) -> bool {
+        if successor.supersedes != Some(predecessor.cid())
+            || successor.kind != predecessor.kind
+            || successor.seq <= predecessor.seq
+        {
+            return false;
+        }
+        if successor.author_key == predecessor.author_key {
+            return true;
+        }
+        match (predecessor.author(), successor.author()) {
+            (Ok(from), Ok(to)) => self.rotation_exists(&from, &to),
+            _ => false,
+        }
     }
 
     /// Walk backwards to the original, newest first. Every entry still verifies, and
@@ -449,7 +653,7 @@ impl Lineage {
         while let Some(o) = cursor {
             out.push(o);
             cursor = match o.supersedes.and_then(|p| self.objects.get(&p)) {
-                Some(prev) if Lineage::is_valid_edge(prev, o) => Some(prev),
+                Some(prev) if self.is_valid_edge_with_rotations(prev, o) => Some(prev),
                 // Either we do not hold the predecessor, or the edge is not a legitimate
                 // same-author same-series update. Either way the walk stops here.
                 _ => None,
@@ -470,7 +674,7 @@ impl Lineage {
         let mut out: Vec<Cid> = self
             .objects
             .values()
-            .filter(|o| Lineage::is_valid_edge(pred, o))
+            .filter(|o| self.is_valid_edge_with_rotations(pred, o))
             .map(|o| o.cid())
             .collect();
         out.sort();
@@ -488,8 +692,12 @@ impl Lineage {
             .values()
             .filter(|o| o.supersedes.as_ref() == Some(cid))
             .filter_map(|o| {
-                let why = if o.author_key != pred.author_key {
-                    "different author"
+                let why = if o.author_key != pred.author_key
+                    && !matches!(
+                        (pred.author(), o.author()),
+                        (Ok(f), Ok(t)) if self.rotation_exists(&f, &t)
+                    ) {
+                    "different author, no countersigned rotation"
                 } else if o.kind != pred.kind {
                     "different kind"
                 } else if o.seq <= pred.seq {
@@ -609,6 +817,148 @@ mod tests {
     /// signed object pointing at someone else's CID and become the resolved head of their
     /// document. An edge is now an update by the same author in the same series.
     #[test]
+    fn a_content_address_says_which_hash_produced_it() {
+        let c = Cid::of(b"x");
+        assert_eq!(c.alg(), Some(HashAlg::Blake3));
+        assert_eq!(c.as_bytes().len(), 32);
+
+        let mut e = Enc::new();
+        e.cid(&c);
+        let bytes = e.finish();
+        // Algorithm tag, length, digest. Two bytes more than a bare hash.
+        assert_eq!(bytes.len(), 34);
+        assert_eq!(bytes[0], HashAlg::Blake3 as u8);
+        assert_eq!(bytes[1], 32);
+
+        let mut d = Dec::new(&bytes);
+        assert_eq!(d.cid().unwrap(), c);
+        assert!(d.end().is_ok());
+    }
+
+    #[test]
+    fn an_unknown_hash_algorithm_is_refused_rather_than_guessed() {
+        // A future digest arriving at a client that does not know the algorithm must be
+        // rejected, not silently treated as the current one.
+        let mut bytes = vec![9u8, 32];
+        bytes.extend_from_slice(&[0u8; 32]);
+        let mut d = Dec::new(&bytes);
+        assert_eq!(d.cid(), Err(DecodeError::UnknownTag(9)));
+
+        // A length that disagrees with the algorithm's own is equally refused.
+        assert!(Cid::from_parts(HashAlg::Blake3 as u8, &[0u8; 16]).is_none());
+        assert!(Cid::from_parts(HashAlg::Blake3 as u8, &[0u8; 64]).is_none());
+    }
+
+    fn rotate(old: &Identity, new: &Identity, lin: &mut Lineage) {
+        lin.insert(Rotation::forward(old, &new.key_bytes(), 0).unwrap())
+            .unwrap();
+        lin.insert(Rotation::backward(new, &old.key_bytes(), 0).unwrap())
+            .unwrap();
+    }
+
+    #[test]
+    fn a_countersigned_rotation_lets_an_identity_move() {
+        let old = Identity::generate();
+        let new = Identity::generate();
+        let mut lin = Lineage::new();
+
+        let v1 = Object::create(&old, "page", 0, b"before".to_vec(), None);
+        let c1 = lin.insert(v1).unwrap();
+
+        rotate(&old, &new, &mut lin);
+        assert_eq!(lin.rotations().len(), 1);
+        assert_eq!(lin.current_identity(old.address()), new.address());
+
+        // The new key continues the old key's series.
+        let v2 = Object::create(&new, "page", 1, b"after".to_vec(), Some(c1));
+        let c2 = lin.insert(v2).unwrap();
+
+        assert_eq!(lin.successors(&c1), vec![c2]);
+        assert_eq!(lin.resolve(&c1), Resolution::Head(c2));
+        assert_eq!(lin.history(&c2).len(), 2);
+    }
+
+    /// **Both halves are required.** A one-sided claim proves nothing, and each direction
+    /// alone enables a different attack.
+    #[test]
+    fn a_one_sided_rotation_claim_moves_nothing() {
+        let old = Identity::generate();
+        let attacker = Identity::generate();
+
+        // Forward only: a compromised old key tries to hand identity to an attacker.
+        let mut lin = Lineage::new();
+        let c1 = lin
+            .insert(Object::create(&old, "page", 0, b"before".to_vec(), None))
+            .unwrap();
+        lin.insert(Rotation::forward(&old, &attacker.key_bytes(), 0).unwrap())
+            .unwrap();
+        assert!(lin.rotations().is_empty(), "forward half alone was accepted");
+        lin.insert(Object::create(&attacker, "page", 1, b"seized".to_vec(), Some(c1)))
+            .unwrap();
+        assert!(lin.successors(&c1).is_empty());
+        assert_eq!(lin.resolve(&c1), Resolution::Head(c1));
+
+        // Backward only: anyone claims to be anyone's successor.
+        let mut lin2 = Lineage::new();
+        let d1 = lin2
+            .insert(Object::create(&old, "page", 0, b"before".to_vec(), None))
+            .unwrap();
+        lin2.insert(Rotation::backward(&attacker, &old.key_bytes(), 0).unwrap())
+            .unwrap();
+        assert!(lin2.rotations().is_empty(), "backward half alone was accepted");
+        lin2.insert(Object::create(&attacker, "page", 1, b"claimed".to_vec(), Some(d1)))
+            .unwrap();
+        assert!(lin2.successors(&d1).is_empty());
+    }
+
+    #[test]
+    fn a_rotation_between_two_other_parties_does_not_help_an_attacker() {
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let carol = Identity::generate();
+        let attacker = Identity::generate();
+        let mut lin = Lineage::new();
+
+        let c1 = lin
+            .insert(Object::create(&alice, "page", 0, b"alice".to_vec(), None))
+            .unwrap();
+        // A perfectly valid rotation, between two parties who are not Alice.
+        rotate(&bob, &carol, &mut lin);
+
+        lin.insert(Object::create(&attacker, "page", 1, b"hijack".to_vec(), Some(c1)))
+            .unwrap();
+        assert!(lin.successors(&c1).is_empty());
+        assert_eq!(
+            lin.rejected_edges(&c1)[0].1,
+            "different author, no countersigned rotation"
+        );
+    }
+
+    #[test]
+    fn rotations_chain_and_do_not_loop() {
+        let a = Identity::generate();
+        let b = Identity::generate();
+        let c = Identity::generate();
+        let mut lin = Lineage::new();
+
+        rotate(&a, &b, &mut lin);
+        rotate(&b, &c, &mut lin);
+        assert_eq!(lin.current_identity(a.address()), c.address());
+        assert_eq!(lin.current_identity(c.address()), c.address());
+
+        // A cycle terminates rather than hanging.
+        rotate(&c, &a, &mut lin);
+        let _ = lin.current_identity(a.address());
+    }
+
+    #[test]
+    fn an_address_with_no_rotation_resolves_to_itself() {
+        let a = Identity::generate();
+        let lin = Lineage::new();
+        assert_eq!(lin.current_identity(a.address()), a.address());
+    }
+
+    #[test]
     fn a_stranger_cannot_hijack_someone_elses_version_series() {
         let alice = Identity::generate();
         let bob = Identity::generate();
@@ -630,7 +980,10 @@ mod tests {
         assert!(lin.equivocations().is_empty(), "Alice was blamed for Bob's object");
 
         // The attempt is visible rather than silently discarded.
-        assert_eq!(lin.rejected_edges(&c1), vec![(hijack_cid, "different author")]);
+        assert_eq!(
+            lin.rejected_edges(&c1),
+            vec![(hijack_cid, "different author, no countersigned rotation")]
+        );
     }
 
     #[test]

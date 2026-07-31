@@ -256,9 +256,12 @@ Everything is self certifying: given a public key you derive its address and che
 matches, with no directory and no lookup. That property is what lets capability chains at
 L9 verify entirely offline.
 
-**Open.** Key rotation and recovery without reintroducing an authority. Hash-of-key
-addresses are unreadable by humans, so a petname layer is mandatory, and every petname
-layer in recorded history has recentralised into a registry.
+**Key rotation** is a countersigned cross-key lineage edge: the old key attests to its successor
+and the new key to its predecessor, so neither a compromised old key nor an opportunistic new one
+can move an identity alone. Implemented in `karst-object`.
+
+**Open.** Hash-of-key addresses are unreadable by humans, so a petname layer is mandatory, and
+every petname layer in recorded history has recentralised into a registry.
 
 ---
 

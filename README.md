@@ -33,7 +33,7 @@ list of everything the design makes worse.
 > [`docs/05-anonymity.md`](docs/05-anonymity.md).
 
 ```bash
-cargo test          # 173 tests
+cargo test          # 180 tests
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
 cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?

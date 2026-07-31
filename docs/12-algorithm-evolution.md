@@ -66,9 +66,12 @@ directions, so neither key alone can claim the other. Anyone holding the pair ca
 old reference to a current identity, exactly as `Lineage` already follows a superseded
 document to its head.
 
-The same-author rule on lineage edges needs an explicit exception here: a key rotation is the
-one legitimate cross-key edge, and it must be recognised as such rather than rejected as a
-hijack.
+The same-author rule on lineage edges has an explicit exception for this: a key rotation is the
+one legitimate cross-key edge. `Rotation` in `karst-object` implements it, and **both halves are
+required**. The old key attests to its successor and the new key attests to its predecessor,
+because each direction alone enables a different attack: forward-only lets a compromised old key
+hand identity to an attacker, backward-only lets anyone claim to be anyone's successor. A
+one-sided claim moves nothing.
 
 ### Hashes are the harder problem, and they are worse
 
@@ -80,7 +83,10 @@ now collide, and there is no migration that preserves the references, because th
 Realistic mitigations, none of them good:
 
 - **Multihash-style self-describing digests**, so a v2 hash is distinguishable rather than
-  ambiguous. Cheap, worth doing now, and does not save existing references.
+  ambiguous. **Implemented.** A `Cid` carries an algorithm tag and a digest length, both inside
+  the canonical encoding, and a decoder rejects an unknown algorithm rather than assuming the
+  current one. Two bytes per reference. It does not save existing references, which is exactly
+  why it had to exist before there were any.
 - **Re-anchoring**: a signed statement that old-hash *X* and new-hash *Y* name the same bytes,
   which is only trustworthy if published before the break.
 - **Accept that pre-break content becomes advisory** rather than verifiable.
@@ -133,11 +139,14 @@ Nothing changes in the wire format. Two things follow:
 
 1. **The TPM objection is scoped.** It targets a *permanent concurrent* second suite selected
    by hardware ownership, which is negotiation. It is not an objection to changing algorithms.
-2. **Migration is a design requirement, not a future problem.** Version strings sit inside the
-   signed bytes and the lineage machinery exists. Missing: a cross-key rotation exception to
-   the same-author rule on lineage edges, and a self-describing digest format for hashes.
+2. **Migration groundwork is in place.** Version strings sit inside the signed bytes, the
+   lineage machinery exists, key rotation is a countersigned cross-key edge, and digests are
+   self-describing.
 
-Tracked as issues.
+What remains is the hard part rather than the preparation: choosing a successor suite, and the
+hash problem in §2, which self-description makes *navigable* rather than solved. A future
+verifier can tell an old digest from a new one; it still cannot verify content named under a
+broken hash.
 
 ---
 
