@@ -159,7 +159,72 @@ suits.
 
 ---
 
-## 7. Implementation status
+## 7. Simulated results, including one we did not expect
+
+`crates/karst-mix` implements the packet format and a global passive adversary simulator.
+200 clients, 3 mix layers, 1500 ticks, 0.5% duty cycle. The adversary observes every link,
+knows the delay distribution, and computes the set of clients it cannot rule out as the
+sender of each delivered message.
+
+| Configuration | Volume leak | Anonymity set | Adversary gain | Bandwidth |
+|---|---|---|---|---|
+| Onion routing (no cover, no delay) | 0.356 | 2.0 | **126.6x** | 1x |
+| Mixing only (no cover) | 0.333 | 64.9 | **3.2x** | 1x |
+| Cover only (no delay) | 0.000 | 200.0 | 1.0x | 199x |
+| KARST (cover + mixing) | 0.000 | 200.0 | 1.0x | 193x |
+
+*Adversary gain of 1.0x means the attacker does no better than guessing at random.*
+
+**Onion routing is trivially broken here**, which is not news since Tor documents the gap
+itself. Volume alone narrows the sender to two candidates out of two hundred.
+
+**Constant rate cover is the mechanism doing the work.** Poisson delay on its own still
+leaves a 3.2x advantage, because without cover only the clients who were actually talking
+transmit at all, and that set is small.
+
+### The negative result
+
+**Cover alone scores identically to cover plus delay.** Uniform emission at every tick is
+effectively a synchronous batch mix, and a batch mix is strong against an observer who only
+watches. So **this harness does not justify the Poisson delay mechanism at all.**
+
+Loopix's case for continuous-time mixing rests on two things this simulator does not model:
+resistance to active n-1 and flooding attacks, and not requiring the global clock
+synchronisation that a synchronous batch mix needs. Both are real and both are good reasons.
+Neither is evidence we have produced. Until the active-adversary simulation exists, the delay
+layer is taken on the paper's authority rather than on our own, and it should be described
+that way.
+
+The first version of this harness gave every configuration a clean bill of health, because
+the adversary's timing window was 480 ticks against a 24 tick mean latency. Tightening it to
+mean plus four standard deviations produced the table above. Overstating your own defences is
+the failure this harness exists to prevent, and it caught itself once already.
+
+### The delay knob, with cover off
+
+Delay only has measurable value when cover is absent, since with cover the candidate set is
+already every client:
+
+| Mean delay | Anonymity set | Adversary gain |
+|---|---|---|
+| 1 tick | 8.9 | 25.6x |
+| 4 ticks | 35.6 | 5.8x |
+| 16 ticks | 107.4 | 1.9x |
+| 32 ticks | 154.2 | 1.3x |
+
+Buying anonymity with latency, at a visible exchange rate.
+
+### The cost
+
+**Roughly 200x bandwidth at this duty cycle.** Constant rate emission means every client
+transmits every tick forever whether or not it has anything to say. That is charged
+continuously, to everyone, including everyone who never needed it, and it is why the device
+profile is exempt and therefore not anonymous (§5.5). Any presentation of this design that
+omits that number is selling something.
+
+---
+
+## 8. Implementation status
 
 Nothing in this document is built. The PoC in `crates/` covers identity, objects,
 capabilities and affordances, which are the layers above this one. L4 is specified

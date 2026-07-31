@@ -24,13 +24,15 @@ none of them.
 Research project. Working code for eight layers, a specification for the rest, and an itemised
 list of everything the design makes worse.
 
-> **Nothing built so far is private.** Everything below assumes a network that does not yet
-> protect who is talking to whom. L4 Mixing is Phase 1 and it is the precondition for the rest
-> being worth anything.
+> **L4 mixing now has a packet format and a simulator, not a network.** The simulator holds a
+> whole-network observer to chance, at roughly 200x bandwidth. It also produced a negative
+> result: cover traffic is doing all the work, and Poisson delay is not justified by any
+> evidence we have produced. See [`docs/05-anonymity.md`](docs/05-anonymity.md) §7.
 
 ```bash
-cargo test          # 60 tests
+cargo test          # 78 tests
 cargo run -p karst-demo
+cargo run -p karst-mix --bin karst-mixsim   # anonymity vs a whole-network observer
 ```
 
 | Crate | Layer | What it does |
@@ -42,6 +44,7 @@ cargo run -p karst-demo
 | [`karst-cap`](crates/karst-cap) | L9 Authority | Capability chains that can only ever narrow, verifiable with no directory. |
 | [`karst-attest`](crates/karst-attest) | L13.1 | Human or machine authorship, declared and where possible verified. |
 | [`karst-afford`](crates/karst-afford) | L11 Affordance | Typed, priced machine operations inside the signed object. |
+| [`karst-mix`](crates/karst-mix) | L4 Mixing | Fixed-size unlinkable packets, Poisson delay, and a global passive adversary simulator. |
 | [`karst-thread`](crates/karst-thread) | Applications | Threads assembled from backlinks, boards as views, no host. |
 
 ## What the demo actually proves

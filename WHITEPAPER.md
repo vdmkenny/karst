@@ -260,7 +260,8 @@ some are.
 
 ### L4 Mixing
 
-*Fixes error 02. Status: specified, unbuilt. The largest remaining piece of work.*
+*Fixes error 02. Status: **packet format and adversary simulator built** (`karst-mix`);
+production format and active-adversary modelling open.*
 
 **Adversary.** B, the global passive adversary. This layer exists to defeat the attack
 onion routing declines to attempt.
@@ -309,6 +310,29 @@ of choice rather than in documentation.
 anonymity set is small, so using it is itself a signal. If the anonymous path is a special
 slow mode, only those who badly need it turn it on, and turning it on marks them. Here
 everyone routes the same way and the anonymity set is every user.
+
+**Simulated results.** `karst-mix` includes a global passive adversary simulator. 200 clients,
+3 mix layers, 0.5% duty cycle, adversary observing every link and knowing the delay
+distribution:
+
+| Configuration | Anonymity set | Adversary gain | Bandwidth |
+|---|---|---|---|
+| Onion routing (no cover, no delay) | 2.0 / 200 | **126.6x** | 1x |
+| Mixing only (no cover) | 64.9 / 200 | **3.2x** | 1x |
+| Cover only (no delay) | 200 / 200 | 1.0x | 199x |
+| KARST (cover + mixing) | 200 / 200 | 1.0x | 193x |
+
+**A negative result worth stating plainly.** Constant rate cover is the mechanism doing the
+work. Poisson delay alone leaves a 3.2x advantage, and **cover alone scores identically to
+cover plus delay**, because uniform emission every tick is effectively a synchronous batch
+mix and a batch mix is strong against an observer who only watches. Loopix's case for
+continuous-time mixing rests on resistance to active n-1 and flooding attacks, and on not
+requiring the global clock synchronisation a batch mix needs. Both are good reasons; neither
+is evidence we have produced. Until the active-adversary simulation exists, the delay layer
+stands on the paper's authority rather than on ours.
+
+**The cost is roughly 200x bandwidth at that duty cycle**, charged continuously to everyone
+including everyone who never needed it.
 
 **Open.** The device profile is exempt from constant rate cover, because a battery powered
 sensor cannot emit continuously, and **exempt devices are therefore not anonymous**. That

@@ -1,0 +1,17 @@
+[package]
+name = "karst-mix"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "KARST L4 Mixing: layered packets, Poisson delay, constant-rate cover, and a global passive adversary simulator"
+
+[[bin]]
+name = "karst-mixsim"
+path = "src/bin/mixsim.rs"
+
+[dependencies]
+karst-id.workspace = true
+karst-object.workspace = true
+blake3.workspace = true
+rand.workspace = true
+x25519-dalek = { version = "2", features = ["static_secrets"] }
