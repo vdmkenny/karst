@@ -21,10 +21,18 @@
 //!
 //! # Status
 //!
-//! Proof of concept. The packet format is Sphinx-shaped but is not Sphinx and lacks its
-//! proven tagging resistance (issue #1). The simulator models the design rather than an
-//! implementation, and does not cover active adversaries, node compromise, or long-run
-//! intersection attacks. Passing here is necessary and nowhere near sufficient.
+//! The packet format implements the Sphinx construction: a per-hop header MAC verified before
+//! any processing, a wide-block payload cipher so modification randomises rather than marks,
+//! constant-length headers with proper filler, and replay tags. That closes the tagging attack
+//! class the 2014 CMU/CERT campaign against Tor exploited.
+//!
+//! Two deviations remain and are documented in [`packet`]: the group element is re-derived
+//! rather than blinded, because X25519 clamping does not compose the way the proof assumes,
+//! and the primitives are BLAKE3-based rather than the paper's. It is not a reviewed
+//! implementation.
+//!
+//! The simulators model the design rather than an implementation. Passing here is necessary
+//! and nowhere near sufficient.
 
 pub mod active;
 pub mod exposure;
@@ -37,7 +45,7 @@ pub mod sim;
 pub use active::{
     batch_under_skew, drain_cost, n_minus_one, ActiveConfig, ActiveResult, Discipline, SkewResult,
 };
-pub use packet::{Hop, MixError, MixKey, Packet, Peeled, PACKET_BYTES, MAX_HOPS};
+pub use packet::{Hop, MixError, MixKey, Packet, Peeled, SeenTags, PACKET_BYTES, MAX_HOPS};
 pub use sim::{run, SimConfig, SimResult};
 
 /// Traffic classes, per `docs/05-anonymity.md` section 4.

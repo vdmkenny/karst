@@ -286,8 +286,8 @@ some are.
 
 ### L4 Mixing
 
-*Fixes error 02. Status: **packet format and adversary simulator built** (`karst-mix`);
-production format and active-adversary modelling open.*
+*Fixes error 02. Status: **Sphinx packet format and four adversary simulators built**
+(`karst-mix`); network unbuilt.*
 
 **Adversary.** B, the global passive adversary. This layer exists to defeat the attack
 onion routing declines to attempt.

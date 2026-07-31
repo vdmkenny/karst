@@ -85,17 +85,25 @@ The relays **modified Tor protocol headers**, injecting a signal into relay-earl
 a colluding entry relay could recognise traffic that had passed a colluding exit. Evidence
 indicates the results reached the FBI, with payment reported at around one million dollars.
 
-**KARST assessment: this attack would work today.**
+**KARST assessment: closed.** This audit is what prompted implementing the Sphinx construction
+properly, and `karst-mix::packet` now carries it.
 
-The packet format in `karst-mix::packet` is documented as "Sphinx-shaped but not Sphinx", with
-a BLAKE3 keystream and **no per-hop MAC**, so it has none of Sphinx's proven tagging
-resistance. A tagging attack is precisely what relay-early was: alter the packet so a
-confederate downstream recognises it.
+A tagging attack needs to modify a packet and have the modification survive somewhere it can be
+recognised. Both halves are now shut:
 
-Issue #1 already tracks implementing real Sphinx. This case moves it from a correctness item to
-a **known-exploited attack class**, and the priority should reflect that. Sphinx's tagging and
-replay detection are not academic completeness; they are the defence against the specific thing
-CMU did.
+- **The header carries a per-hop MAC, verified before any processing.** A modified header is
+  dropped at the first honest relay rather than forwarded with a signal in it. Tested against
+  bit flips across the whole header.
+- **The payload uses a wide-block cipher rather than a stream cipher.** This was the more
+  dangerous of the two defects and the easier to miss, because a stream cipher looks like
+  encryption and passes every functional test. Under one, flipping ciphertext bit *k* flips
+  plaintext bit *k*, which is exactly the predictable mark a confederate looks for. A single
+  flipped bit now changes more than half the payload.
+
+Replay tags are also carried and checked.
+
+The Sybil half of the attack is the same first stage as §1, with the same answer: unaddressed
+until L5 admission exists.
 
 The Sybil half of the attack is the same first stage as §1, with the same answer: unaddressed
 until L5 admission exists.

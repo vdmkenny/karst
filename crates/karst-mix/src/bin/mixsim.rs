@@ -4,7 +4,7 @@
 
 use karst_mix::active::{batch_under_skew, drain_cost, n_minus_one, ActiveConfig, Discipline};
 use karst_mix::sim::{run, SimConfig};
-use karst_mix::{Hop, MixKey, Packet, Peeled, PACKET_BYTES};
+use karst_mix::{Hop, MixKey, Packet, Peeled, SeenTags, PACKET_BYTES};
 
 fn main() {
     println!("\n\x1b[1mKARST L4: mixing against a global passive adversary\x1b[0m");
@@ -27,17 +27,18 @@ fn main() {
         .collect();
 
     let p = Packet::wrap(&route, b"meet me at the usual place", [42u8; 32]).unwrap();
+    let mut seen: Vec<SeenTags> = (0..3).map(|_| SeenTags::new()).collect();
     let mut wire = vec![p.to_bytes()];
     let mut cur = p;
-    for k in keys.iter().take(2) {
-        let Peeled::Forward { packet, next, delay_ms } = cur.peel(k).unwrap() else {
+    for (i, k) in keys.iter().take(2).enumerate() {
+        let Peeled::Forward { packet, next, delay_ms } = cur.peel(k, &mut seen[i]).unwrap() else {
             unreachable!()
         };
         println!("  hop -> {next}, hold {delay_ms}ms, still {PACKET_BYTES} bytes");
         wire.push(packet.to_bytes());
         cur = packet;
     }
-    match cur.peel(&keys[2]).unwrap() {
+    match cur.peel(&keys[2], &mut seen[2]).unwrap() {
         Peeled::Deliver { payload, .. } => {
             println!("  delivered: {:?}", String::from_utf8_lossy(&payload))
         }
