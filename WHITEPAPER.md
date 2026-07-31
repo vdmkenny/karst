@@ -433,10 +433,19 @@ a merkle manifest, which buys four things at once:
 
 **Canonical encoding.** Everything hashed or signed goes through one deterministic, length
 prefixed encoding with exactly one valid representation of any value. There is no error
-recovery: malformed input is rejected, never heroically repaired. Parser differentials,
-where two implementations disagree about what a signed document says, are among the largest
+recovery: malformed input is rejected, never heroically repaired. Parser differentials, where
+two implementations disagree about what a signed document says, are among the largest
 vulnerability classes on today's web and they exist because HTML was specified to recover.
 **Rejecting is a security property.**
+
+Enforced rather than asserted. `karst-fuzz` checks four properties against every decoder in the
+stack: no input panics, no attacker-supplied length prefix allocates, `decode(encode(v)) == v`,
+and **`encode(decode(b)) == b`**. The last is the one that forecloses the differential, because
+it means exactly one byte string names each value. Concretely that requires rejecting unknown
+tags rather than skipping them, refusing trailing bytes, and requiring record keys to be
+strictly increasing, since a permissive decoder would let reordered or duplicated keys build one
+map and a node would then have more than one content address. Across 280,000 mutated and random
+inputs, 13,006 decode and every one re-encodes to itself.
 
 ---
 

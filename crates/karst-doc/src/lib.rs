@@ -23,7 +23,7 @@
 
 use std::collections::BTreeMap;
 
-use karst_object::{Cid, Enc};
+use karst_object::{Cid, Dec, DecodeError, Enc};
 
 /// A typed scalar. This is what makes the document machine-readable without scraping:
 /// an agent reads a value, it does not parse a string and hope.
@@ -64,6 +64,21 @@ impl Value {
         }
     }
 
+    pub fn decode(d: &mut Dec<'_>) -> Result<Value, DecodeError> {
+        match d.u8()? {
+            0 => Ok(Value::Text(d.str()?)),
+            1 => Ok(Value::Int(d.i64()?)),
+            2 => Ok(Value::Bool(d.bool()?)),
+            3 => Ok(Value::Money {
+                minor: d.i64()?,
+                currency: d.str()?,
+            }),
+            4 => Ok(Value::Instant(d.u64()?)),
+            5 => Ok(Value::Ref(d.cid()?)),
+            t => Err(DecodeError::UnknownTag(t)),
+        }
+    }
+
     /// Plain rendering, for a text client. Any other client may do something else
     /// entirely, which is the point of L12.
     pub fn render(&self) -> String {
@@ -88,6 +103,21 @@ pub enum Emphasis {
     Strong,
     Stress,
     Literal,
+}
+
+impl Emphasis {
+    /// Reject any tag outside the closed set. A permissive mapping would make several byte
+    /// strings decode to the same node, which is the parser differential this format exists
+    /// to avoid.
+    pub fn from_tag(t: u8) -> Result<Emphasis, DecodeError> {
+        match t {
+            0 => Ok(Emphasis::Plain),
+            1 => Ok(Emphasis::Strong),
+            2 => Ok(Emphasis::Stress),
+            3 => Ok(Emphasis::Literal),
+            t => Err(DecodeError::UnknownTag(t)),
+        }
+    }
 }
 
 /// A run of text with one emphasis and an optional outbound reference.
@@ -134,6 +164,21 @@ impl Run {
                 e.u8(0);
             }
         }
+    }
+
+    pub fn decode(d: &mut Dec<'_>) -> Result<Run, DecodeError> {
+        let text = d.str()?;
+        let emphasis = Emphasis::from_tag(d.u8()?)?;
+        let link = match d.u8()? {
+            0 => None,
+            1 => Some(d.cid()?),
+            t => return Err(DecodeError::UnknownTag(t)),
+        };
+        Ok(Run {
+            text,
+            emphasis,
+            link,
+        })
     }
 }
 
@@ -222,6 +267,120 @@ impl Node {
             }
         }
         e.finish()
+    }
+
+    /// Upper bound on any repeated element, so an attacker-supplied count cannot make a
+    /// decoder allocate. The length prefix is read before the elements exist, so without a
+    /// cap a four byte count reserves gigabytes.
+    pub const MAX_ELEMENTS: usize = 4096;
+
+    /// Decode a node, rejecting anything that is not the exact canonical encoding.
+    ///
+    /// Three rules make this stricter than "parses successfully", and all three exist to
+    /// guarantee **one byte string per value**:
+    ///
+    /// 1. Unknown tags are refused rather than skipped, for node kinds, value kinds,
+    ///    emphasis, and option discriminants.
+    /// 2. `Record` keys must be **strictly increasing**. A permissive decoder would accept
+    ///    reordered or duplicated keys and build the same `BTreeMap`, so several byte strings
+    ///    would name one value and the content address would stop being a function of it.
+    /// 3. Trailing bytes are an error, enforced by the caller through [`Dec::end`].
+    ///
+    /// Together these mean `decode(encode(v)) == v` and `encode(decode(b)) == b`, which is
+    /// what makes a parser differential impossible rather than merely unlikely.
+    pub fn decode(d: &mut Dec<'_>) -> Result<Node, DecodeError> {
+        if d.str()? != "karst.node.v1" {
+            return Err(DecodeError::UnknownTag(0));
+        }
+
+        fn count(d: &mut Dec<'_>) -> Result<usize, DecodeError> {
+            let n = d.u64()?;
+            if n > Node::MAX_ELEMENTS as u64 {
+                return Err(DecodeError::Truncated);
+            }
+            Ok(n as usize)
+        }
+
+        match d.u8()? {
+            0 => {
+                let n = count(d)?;
+                let mut runs = Vec::with_capacity(n);
+                for _ in 0..n {
+                    runs.push(Run::decode(d)?);
+                }
+                Ok(Node::Prose { runs })
+            }
+            1 => Ok(Node::Heading {
+                rank: d.u8()?,
+                text: d.str()?,
+            }),
+            2 => {
+                let ordered = d.bool()?;
+                let n = count(d)?;
+                let mut items = Vec::with_capacity(n);
+                for _ in 0..n {
+                    items.push(d.cid()?);
+                }
+                Ok(Node::List { ordered, items })
+            }
+            3 => {
+                let schema = d.str()?;
+                let n = count(d)?;
+                let mut fields = BTreeMap::new();
+                let mut previous: Option<String> = None;
+                for _ in 0..n {
+                    let k = d.str()?;
+                    // Strictly increasing. Equal or descending keys would let two encodings
+                    // produce one map.
+                    if let Some(prev) = &previous {
+                        if &k <= prev {
+                            return Err(DecodeError::TrailingBytes);
+                        }
+                    }
+                    previous = Some(k.clone());
+                    fields.insert(k, Value::decode(d)?);
+                }
+                Ok(Node::Record { schema, fields })
+            }
+            4 => {
+                let mime = d.str()?;
+                let source = d.cid()?;
+                let description = d.str()?;
+                let duration_ms = match d.u8()? {
+                    0 => None,
+                    1 => Some(d.u64()?),
+                    t => return Err(DecodeError::UnknownTag(t)),
+                };
+                Ok(Node::Media {
+                    mime,
+                    source,
+                    description,
+                    duration_ms,
+                })
+            }
+            5 => Ok(Node::Quote {
+                source: d.cid()?,
+                comment: d.str()?,
+            }),
+            6 => {
+                let title = d.str()?;
+                let n = count(d)?;
+                let mut children = Vec::with_capacity(n);
+                for _ in 0..n {
+                    children.push(d.cid()?);
+                }
+                Ok(Node::Section { title, children })
+            }
+            t => Err(DecodeError::UnknownTag(t)),
+        }
+    }
+
+    /// Decode from a complete byte string, rejecting trailing bytes.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Node, DecodeError> {
+        let mut d = Dec::new(bytes);
+        let node = Node::decode(&mut d)?;
+        d.end()?;
+        Ok(node)
     }
 
     /// A node's name is the hash of its content, so every paragraph in every document

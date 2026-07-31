@@ -65,6 +65,11 @@ impl Caveat {
         }
     }
 
+    /// Canonical encoding, public so the decoder can be property-tested against it.
+    pub fn encode_public(&self, e: &mut Enc) {
+        self.encode(e);
+    }
+
     pub fn decode(d: &mut Dec<'_>) -> Result<Caveat, DecodeError> {
         match d.u8()? {
             0 => Ok(Caveat::Operation(d.str()?)),
