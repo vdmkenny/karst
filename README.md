@@ -33,7 +33,7 @@ list of everything the design makes worse.
 > [`docs/05-anonymity.md`](docs/05-anonymity.md).
 
 ```bash
-cargo test          # 167 tests
+cargo test          # 173 tests
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
 cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?
@@ -48,7 +48,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`karst-cap`](crates/karst-cap) | L9 Authority | Capability chains that can only ever narrow, verifiable with no directory. |
 | [`karst-attest`](crates/karst-attest) | L13.1 | Human or machine authorship, declared and where possible verified. |
 | [`karst-afford`](crates/karst-afford) | L11 Affordance | Typed, priced machine operations inside the signed object. |
-| [`karst-mix`](crates/karst-mix) | L4 Mixing | Fixed-size unlinkable packets, Poisson delay, and passive plus active adversary simulators. |
+| [`karst-mix`](crates/karst-mix) | L4 Mixing | Sphinx packets with per-hop MAC and wide-block payload, plus four adversary simulators. |
 | [`karst-symmetry`](crates/karst-symmetry) | L16 Symmetry | Does flattening returns to scale actually prevent capture? Partly. |
 | [`karst-value`](crates/karst-value) | L14 Value | Capacity credentials, earned by relaying and spent unlinkably. No bank. |
 | [`karst-fuzz`](crates/karst-fuzz) | commitment 4 | Property tests for reject-never-recover across every decoder. |

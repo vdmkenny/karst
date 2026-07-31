@@ -90,14 +90,15 @@ rate makes you conspicuous to the one observer who knows your name.
 
 Ordered by value. All of these have a settled design and need only code.
 
-### 4.1 Real Sphinx (#1) — highest value
+### 4.1 Real Sphinx (#1) — done
 
-The packet format is documented as Sphinx-shaped with no per-hop MAC and no tagging resistance.
-The 2014 CMU/CERT attack on Tor was a tagging attack, and it worked, and evidence indicates the
-results reached the FBI. **This is a known-exploited attack class against a component labelled
-proof-of-concept and never revisited.**
+Implemented. Per-hop header MAC verified before processing, wide-block payload cipher, constant
+length headers with proper filler, replay tags. The tagging attack class the 2014 CMU/CERT
+campaign exploited is closed.
 
-The design needs no decisions: the paper specifies it. Everything else at L4 sits on top.
+Two deviations remain documented rather than hidden: the group element is re-derived rather than
+blinded, since X25519 clamping does not compose as the proof assumes, and the primitives are
+BLAKE3-based. It is not a reviewed implementation.
 
 ### 4.2 Migration groundwork (#41)
 
