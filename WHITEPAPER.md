@@ -322,14 +322,32 @@ distribution:
 | Cover only (no delay) | 200 / 200 | 1.0x | 199x |
 | KARST (cover + mixing) | 200 / 200 | 1.0x | 193x |
 
-**A negative result worth stating plainly.** Constant rate cover is the mechanism doing the
-work. Poisson delay alone leaves a 3.2x advantage, and **cover alone scores identically to
-cover plus delay**, because uniform emission every tick is effectively a synchronous batch
-mix and a batch mix is strong against an observer who only watches. Loopix's case for
-continuous-time mixing rests on resistance to active n-1 and flooding attacks, and on not
-requiring the global clock synchronisation a batch mix needs. Both are good reasons; neither
-is evidence we have produced. Until the active-adversary simulation exists, the delay layer
-stands on the paper's authority rather than on ours.
+**Against a passive adversary, cover traffic does all the work.** Poisson delay alone leaves a
+3.2x advantage, and cover alone scores identically to cover plus delay, because uniform
+emission every tick is effectively a synchronous batch mix and a batch mix is strong against
+an observer who only watches. On that evidence the delay layer looked unjustified, and for one
+commit this document said so.
+
+**The active adversary reverses it.** An attacker who can suppress traffic mounts the n-1
+attack: block every other honest packet entering a mix, inject packets it recognises, and
+anything else departing is the target.
+
+| Discipline | Anonymity set | Target isolated | Packets suppressed | Detected by loops |
+|---|---|---|---|---|
+| Batch mix | 1.7 | **51.7%** | 10 | 65.1% |
+| Poisson mix | 38.5 | 0.7% | 81 | **100.0%** |
+
+A batch mix has a moment when it is empty but for the target: the flush. Ten suppressed
+packets isolate the target half the time. A Poisson mix has no such moment, because
+exponential residuals are memoryless, so the backlog never ages out and only drains. Draining
+it costs 351 suppressed packets, which loop cover traffic detects with certainty. Separately,
+batching needs a synchronised clock: at one tick of skew a third of batches hold fewer than
+three packets and the worst holds none, while continuous time has no round boundary to
+disagree about.
+
+**Both mechanisms are load bearing, against different adversaries.** Cover defeats the passive
+observer, delay defeats the active one. The passive measurement alone would have led us to
+drop the wrong one.
 
 **The cost is roughly 200x bandwidth at that duty cycle**, charged continuously to everyone
 including everyone who never needed it.

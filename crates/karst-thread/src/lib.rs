@@ -293,9 +293,10 @@ impl Board {
         let mark = match &post.agency {
             Agency::Direct => String::new(),
             Agency::Assisted { tool } => format!(" [assisted: {tool}]"),
-            Agency::Delegated { principal, .. } => {
-                format!(" [agent for {}]", principal.short())
-            }
+            Agency::Delegated { .. } => match post.agency.delegator() {
+                Some(d) => format!(" [agent for {}]", d.short()),
+                None => " [agent, malformed chain]".to_string(),
+            },
             Agency::Autonomous { .. } => " [autonomous agent]".to_string(),
         };
         format!("{}{} {}", post.author.short(), mark, post.body)
@@ -374,7 +375,12 @@ mod tests {
         let post = Post::from_object(&obj).unwrap();
 
         assert!(post.agency.is_machine());
-        assert_eq!(post.accountable(), owner.address());
+        assert!(post.agency.is_verifiable());
+        // The person handed authority to this agent, so the person answers for it. The
+        // owner at the root of the chain never met the agent and is not on the hook.
+        assert_eq!(post.accountable(), person.address());
+        assert_eq!(post.agency.principal(), Some(owner.address()));
+        assert_eq!(post.agency.chain().len(), 2);
     }
 
     #[test]
@@ -382,14 +388,18 @@ mod tests {
         let victim = Identity::generate();
         let liar = Identity::generate();
 
+        // The attack from issue #28: name a victim you never got a grant from. The only
+        // way to express a delegation now is to carry a real capability, and the liar can
+        // only produce one rooted at themselves.
+        let self_issued = Capability::issue(&liar, ObjCid::of(b"board"), liar.address(), vec![]);
         let obj = Post::create(
             &liar,
             0,
             "acting on behalf of someone who never said so",
             None,
             Agency::Delegated {
-                principal: victim.address(),
-                chain: vec![(liar.address(), liar.address())],
+                resource_owner: victim.address(),
+                capability: self_issued,
             },
         );
         assert!(matches!(

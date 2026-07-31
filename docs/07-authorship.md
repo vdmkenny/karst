@@ -75,13 +75,23 @@ Four classes, declared in the signed object:
 |---|---|---|
 | `Direct` | The signing key composed this itself. | **No.** Unfalsifiable claim. See §4. |
 | `Assisted` | A person composed it with a named tool and signs it personally. | No, but the person's key is on it. |
-| `Delegated` | An agent acted under a specific principal's authority. | **Yes.** The chain verifies to the principal. |
-| `Autonomous` | An agent acting on its own standing, no principal for this act. | **Yes**, as to which operator runs it. |
+| `Delegated` | An agent acted under a specific principal's authority. | **Yes.** Carries the signed capability, verified in full. |
+| `Autonomous` | An agent acting on its own standing, no principal for this act. | **No.** Nothing proves the named operator runs it. |
 
-`Delegated` and `Autonomous` are cryptographically checkable: the delegation chain must be
-continuous, must begin at the claimed principal, and must terminate at the key that signed
-the object. A forged claim of delegation fails verification, so you cannot falsely claim to
-be *authorised by* someone.
+`Delegated` is cryptographically checkable, because the claim **carries the actual signed
+capability** rather than a summary of it. Verification checks every grant signature, chain
+continuity, that authority only ever narrowed, that the root grant came from the declared
+resource owner, and that the final audience is the key that signed the object. A forged
+claim fails, so you cannot falsely claim to be *authorised by* someone.
+
+An earlier version of this stored only `(issuer, audience)` address pairs and checked that
+they lined up, which meant an attacker could name any victim as their principal and have a
+post attributed to them. That was reported as issue #28 and it was a total forgery of the
+one property this layer exists to provide. The evidence now travels with the claim.
+
+`Autonomous` is **not** checkable, and no longer says it is. Nothing in it proves the named
+operator runs the agent, so it is a bare claim exactly like `Direct`, and responsibility
+falls on whoever signed it rather than on the operator they named.
 
 `Direct` is not checkable and never will be. That is the whole difficulty and this document
 will not pretend otherwise.

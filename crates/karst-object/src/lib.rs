@@ -376,6 +376,15 @@ pub enum Resolution {
     Unknown,
 }
 
+impl Resolution {
+    pub fn head(&self) -> Option<Cid> {
+        match self {
+            Resolution::Head(c) => Some(*c),
+            _ => None,
+        }
+    }
+}
+
 /// A version history: immutable objects linked by `supersedes`.
 ///
 /// This is the answer to "can content be updated while old versions survive". Editing
@@ -417,33 +426,80 @@ impl Lineage {
         self.objects.is_empty()
     }
 
-    /// Walk backwards to the original, newest first. Every entry still verifies.
+    /// Is `successor` a legitimate next version of `predecessor`?
+    ///
+    /// A lineage edge is an update by the same author within the same series, not merely
+    /// an arbitrary signed backlink. Without this, anyone can publish a validly signed
+    /// object pointing at somebody else's CID and become the resolved head of their
+    /// document, or manufacture a fork that gets attributed to them.
+    ///
+    /// Rules: same author, same kind, strictly increasing sequence.
+    pub fn is_valid_edge(predecessor: &Object, successor: &Object) -> bool {
+        successor.supersedes == Some(predecessor.cid())
+            && successor.author_key == predecessor.author_key
+            && successor.kind == predecessor.kind
+            && successor.seq > predecessor.seq
+    }
+
+    /// Walk backwards to the original, newest first. Every entry still verifies, and
+    /// every step is a valid edge. A history stops at the first edge that is not.
     pub fn history(&self, cid: &Cid) -> Vec<&Object> {
         let mut out = Vec::new();
-        let mut cursor = Some(*cid);
-        while let Some(c) = cursor {
-            match self.objects.get(&c) {
-                Some(o) => {
-                    out.push(o);
-                    cursor = o.supersedes;
-                }
-                None => break,
-            }
+        let mut cursor = self.objects.get(cid);
+        while let Some(o) = cursor {
+            out.push(o);
+            cursor = match o.supersedes.and_then(|p| self.objects.get(&p)) {
+                Some(prev) if Lineage::is_valid_edge(prev, o) => Some(prev),
+                // Either we do not hold the predecessor, or the edge is not a legitimate
+                // same-author same-series update. Either way the walk stops here.
+                _ => None,
+            };
         }
         out
     }
 
-    /// Versions that declare this one as their predecessor. More than one means the
-    /// author equivocated, or a fork was intentional.
+    /// Versions that legitimately supersede this one. More than one means the author
+    /// equivocated, or a fork was intentional.
+    ///
+    /// Objects from other authors that merely point at this CID are not successors and
+    /// never appear here.
     pub fn successors(&self, cid: &Cid) -> Vec<Cid> {
+        let Some(pred) = self.objects.get(cid) else {
+            return Vec::new();
+        };
         let mut out: Vec<Cid> = self
             .objects
             .values()
-            .filter(|o| o.supersedes.as_ref() == Some(cid))
+            .filter(|o| Lineage::is_valid_edge(pred, o))
             .map(|o| o.cid())
             .collect();
         out.sort();
         out
+    }
+
+    /// Objects we hold that claim to supersede `cid` but are not entitled to, with the
+    /// reason. Surfaced rather than silently dropped, because someone attempting to hijack
+    /// a version series is worth seeing.
+    pub fn rejected_edges(&self, cid: &Cid) -> Vec<(Cid, &'static str)> {
+        let Some(pred) = self.objects.get(cid) else {
+            return Vec::new();
+        };
+        self.objects
+            .values()
+            .filter(|o| o.supersedes.as_ref() == Some(cid))
+            .filter_map(|o| {
+                let why = if o.author_key != pred.author_key {
+                    "different author"
+                } else if o.kind != pred.kind {
+                    "different kind"
+                } else if o.seq <= pred.seq {
+                    "sequence did not advance"
+                } else {
+                    return None;
+                };
+                Some((o.cid(), why))
+            })
+            .collect()
     }
 
     /// Follow the chain forward from any version to the current one.
@@ -545,6 +601,83 @@ mod tests {
         assert_eq!(lin.resolve(&c1), Resolution::Head(c3));
         assert_eq!(lin.history(&c3).len(), 3);
         assert_eq!(lin.history(&c3)[2].payload, b"the original claim");
+    }
+
+    /// Regression for issue #31, reported by @matthiasantierens.
+    ///
+    /// `successors` used to match on `supersedes` alone, so anyone could publish a validly
+    /// signed object pointing at someone else's CID and become the resolved head of their
+    /// document. An edge is now an update by the same author in the same series.
+    #[test]
+    fn a_stranger_cannot_hijack_someone_elses_version_series() {
+        let alice = Identity::generate();
+        let bob = Identity::generate();
+        let mut lin = Lineage::new();
+
+        let v1 = Object::create(&alice, "page", 0, b"alice's page".to_vec(), None);
+        let c1 = lin.insert(v1).unwrap();
+
+        // Bob signs a perfectly valid object claiming to supersede Alice's.
+        let hijack = Object::create(&bob, "page", 1, b"bob's replacement".to_vec(), Some(c1));
+        let hijack_cid = lin.insert(hijack).unwrap();
+
+        assert!(lin.successors(&c1).is_empty(), "hijack became a successor");
+        assert_eq!(
+            lin.resolve(&c1),
+            Resolution::Head(c1),
+            "Alice's page is still the head of her own series"
+        );
+        assert!(lin.equivocations().is_empty(), "Alice was blamed for Bob's object");
+
+        // The attempt is visible rather than silently discarded.
+        assert_eq!(lin.rejected_edges(&c1), vec![(hijack_cid, "different author")]);
+    }
+
+    #[test]
+    fn edges_must_stay_in_the_same_series_and_advance() {
+        let alice = Identity::generate();
+        let mut lin = Lineage::new();
+        let v1 = Object::create(&alice, "page", 5, b"v1".to_vec(), None);
+        let c1 = lin.insert(v1).unwrap();
+
+        // Same author, different kind.
+        lin.insert(Object::create(&alice, "note", 6, b"x".to_vec(), Some(c1)))
+            .unwrap();
+        // Same author, same kind, sequence went backwards.
+        lin.insert(Object::create(&alice, "page", 4, b"y".to_vec(), Some(c1)))
+            .unwrap();
+        // Same author, same kind, sequence did not move.
+        lin.insert(Object::create(&alice, "page", 5, b"z".to_vec(), Some(c1)))
+            .unwrap();
+
+        assert!(lin.successors(&c1).is_empty());
+        assert_eq!(lin.rejected_edges(&c1).len(), 3);
+
+        // A legitimate update is still accepted.
+        let good = Object::create(&alice, "page", 6, b"real v2".to_vec(), Some(c1));
+        let c2 = lin.insert(good).unwrap();
+        assert_eq!(lin.successors(&c1), vec![c2]);
+        assert_eq!(lin.resolve(&c1), Resolution::Head(c2));
+    }
+
+    #[test]
+    fn out_of_order_arrival_still_assembles_the_history() {
+        let alice = Identity::generate();
+        let mut lin = Lineage::new();
+
+        let v1 = Object::create(&alice, "page", 0, b"one".to_vec(), None);
+        let c1 = v1.cid();
+        let v2 = Object::create(&alice, "page", 1, b"two".to_vec(), Some(c1));
+        let c2 = v2.cid();
+        let v3 = Object::create(&alice, "page", 2, b"three".to_vec(), Some(c2));
+
+        // Arrive backwards, as they would from a swarm.
+        lin.insert(v3).unwrap();
+        lin.insert(v2).unwrap();
+        lin.insert(v1).unwrap();
+
+        assert_eq!(lin.history(&lin.resolve(&c1).head().unwrap()).len(), 3);
+        assert_eq!(lin.successors(&c1), vec![c2]);
     }
 
     #[test]

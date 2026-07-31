@@ -18,9 +18,10 @@
 //! though every signature in it is valid.
 
 use core::fmt;
+use std::collections::{BTreeMap, BTreeSet};
 
 use karst_id::{Address, Identity, Peer, Signature};
-use karst_object::{Cid, Enc};
+use karst_object::{Cid, Dec, DecodeError, Enc};
 
 /// A restriction. Absent means unrestricted, so a root grant with no caveats is full
 /// authority over the resource and every delegation from it can only subtract.
@@ -61,6 +62,21 @@ impl Caveat {
             Caveat::MaxUses(v) => {
                 e.u64(*v as u64);
             }
+        }
+    }
+
+    pub fn decode(d: &mut Dec<'_>) -> Result<Caveat, DecodeError> {
+        match d.u8()? {
+            0 => Ok(Caveat::Operation(d.str()?)),
+            1 => Ok(Caveat::MaxAmount(d.u64()?)),
+            2 => Ok(Caveat::ExpiresAt(d.u64()?)),
+            3 => {
+                let v = d.u64()?;
+                Ok(Caveat::MaxUses(
+                    u32::try_from(v).map_err(|_| DecodeError::Truncated)?,
+                ))
+            }
+            t => Err(DecodeError::UnknownTag(t)),
         }
     }
 
@@ -121,6 +137,10 @@ pub enum CapError {
     WidenedAuthority,
     BadSignature,
     MalformedKey,
+    /// The presenter is not the party this capability was delegated to.
+    NotTheHolder,
+    /// This nonce has already been retired by the verifier.
+    Replayed,
     /// Invocation was refused by a caveat.
     Refused(String),
 }
@@ -136,6 +156,10 @@ impl fmt::Display for CapError {
             }
             CapError::BadSignature => write!(f, "grant signature did not verify"),
             CapError::MalformedKey => write!(f, "malformed issuer key"),
+            CapError::NotTheHolder => {
+                write!(f, "presenter does not hold the key this was delegated to")
+            }
+            CapError::Replayed => write!(f, "invocation nonce has already been used"),
             CapError::Refused(why) => write!(f, "refused: {why}"),
         }
     }
@@ -144,7 +168,7 @@ impl fmt::Display for CapError {
 impl std::error::Error for CapError {}
 
 /// One link in a delegation chain.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Grant {
     /// The issuer's public key travels with the grant, so its address is derivable and
     /// the whole thing verifies with no lookup.
@@ -180,10 +204,46 @@ impl Grant {
     pub fn issuer(&self) -> Result<Address, CapError> {
         Address::from_key_bytes(&self.issuer_key).map_err(|_| CapError::MalformedKey)
     }
+
+    fn encode(&self, e: &mut Enc) {
+        e.bytes(&self.issuer_key)
+            .addr(&self.audience)
+            .u64(self.caveats.len() as u64);
+        for c in &self.caveats {
+            c.encode(e);
+        }
+        e.bytes(&self.signature);
+    }
+
+    fn decode(d: &mut Dec<'_>) -> Result<Grant, DecodeError> {
+        let issuer_key: [u8; 32] = d
+            .bytes()?
+            .try_into()
+            .map_err(|_| DecodeError::Truncated)?;
+        let audience = d.addr()?;
+        let n = d.u64()? as usize;
+        if n > 64 {
+            return Err(DecodeError::UnknownTag(0));
+        }
+        let mut caveats = Vec::with_capacity(n);
+        for _ in 0..n {
+            caveats.push(Caveat::decode(d)?);
+        }
+        let signature: [u8; 64] = d
+            .bytes()?
+            .try_into()
+            .map_err(|_| DecodeError::Truncated)?;
+        Ok(Grant {
+            issuer_key,
+            audience,
+            caveats,
+            signature,
+        })
+    }
 }
 
 /// A capability: a resource plus the chain of grants that leads to its current holder.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Capability {
     pub resource: Cid,
     pub chain: Vec<Grant>,
@@ -318,6 +378,44 @@ impl Capability {
         Ok(effective)
     }
 
+    /// A stable name for this exact capability, used to key verifier-side usage state and
+    /// to bind a signed invocation to the credential it exercises.
+    pub fn id(&self) -> Cid {
+        let mut e = Enc::new();
+        e.str("karst.capability.v1")
+            .cid(&self.resource)
+            .u64(self.chain.len() as u64);
+        for g in &self.chain {
+            g.encode(&mut e);
+        }
+        e.hash()
+    }
+
+    /// Serialise, signatures and all, so a capability can travel inside another object.
+    ///
+    /// This is what makes an authorship claim checkable rather than merely asserted: the
+    /// evidence goes with the claim instead of being reduced to a list of addresses
+    /// anyone could type out (issue #28).
+    pub fn encode(&self, e: &mut Enc) {
+        e.cid(&self.resource).u64(self.chain.len() as u64);
+        for g in &self.chain {
+            g.encode(e);
+        }
+    }
+
+    pub fn decode(d: &mut Dec<'_>) -> Result<Capability, DecodeError> {
+        let resource = d.cid()?;
+        let n = d.u64()? as usize;
+        if n > 64 {
+            return Err(DecodeError::UnknownTag(0));
+        }
+        let mut chain = Vec::with_capacity(n);
+        for _ in 0..n {
+            chain.push(Grant::decode(d)?);
+        }
+        Ok(Capability { resource, chain })
+    }
+
     /// Who currently holds this capability.
     pub fn holder(&self) -> Option<Address> {
         self.chain.last().map(|g| g.audience)
@@ -333,15 +431,149 @@ impl Capability {
 }
 
 /// A concrete attempt to use a capability.
+///
+/// Note the absence of a use counter. An earlier version took one from the caller, which
+/// meant a one-use capability could be replayed forever by always sending index zero
+/// (issue #29). Usage is now counted by the verifier in a [`UseLedger`], where the caller
+/// cannot reach it.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Request {
     pub operation: String,
     pub amount: u64,
     pub at: u64,
-    pub use_index: u32,
+    /// Replay protection. The verifier refuses a nonce it has already retired.
+    pub nonce: [u8; 16],
+    /// Binds the invocation to its exact arguments, so a signature over this request
+    /// cannot be reused with different ones.
+    pub args_digest: Cid,
 }
 
-/// Check a request against effective caveats.
-pub fn authorize(effective: &[Caveat], req: &Request) -> Result<(), CapError> {
+impl Request {
+    fn signing_bytes(&self, cap_id: &Cid, resource: &Cid) -> Vec<u8> {
+        let mut e = Enc::new();
+        e.str("karst.invoke.v1")
+            .cid(cap_id)
+            .cid(resource)
+            .str(&self.operation)
+            .u64(self.amount)
+            .u64(self.at)
+            .bytes(&self.nonce)
+            .cid(&self.args_digest);
+        e.finish()
+    }
+}
+
+/// An invocation signed by the capability holder.
+///
+/// A capability on its own is a bearer token: anyone who copies it can spend it (issue
+/// #30). Requiring the holder to sign the request, and checking that signature against the
+/// final grant's audience, means possession of the token is not enough. You need the key it
+/// was issued to.
+#[derive(Clone)]
+pub struct SignedInvocation {
+    pub request: Request,
+    /// The presenter's public key. Its hash must equal the capability's final audience.
+    pub invoker_key: [u8; 32],
+    signature: [u8; 64],
+}
+
+impl SignedInvocation {
+    pub fn sign(holder: &Identity, cap: &Capability, request: Request) -> Self {
+        let msg = request.signing_bytes(&cap.id(), &cap.resource);
+        let sig = holder.sign(&msg);
+        SignedInvocation {
+            request,
+            invoker_key: holder.key_bytes(),
+            signature: sig.to_bytes(),
+        }
+    }
+
+    /// Prove the presenter holds the key this capability was delegated to.
+    ///
+    /// Returns the verified presenter's address, which is what a receipt should attribute
+    /// the action to, rather than whoever the capability merely names.
+    pub fn verify_possession(&self, cap: &Capability) -> Result<Address, CapError> {
+        let peer =
+            Peer::from_key_bytes(&self.invoker_key).map_err(|_| CapError::MalformedKey)?;
+
+        let audience = cap.holder().ok_or(CapError::EmptyChain)?;
+        if peer.address() != audience {
+            return Err(CapError::NotTheHolder);
+        }
+
+        let msg = self.request.signing_bytes(&cap.id(), &cap.resource);
+        peer.verify(&msg, &Signature::from_bytes(&self.signature))
+            .map_err(|_| CapError::BadSignature)?;
+        Ok(peer.address())
+    }
+}
+
+/// Verifier-owned usage state.
+///
+/// The caller never sees this and cannot assert anything about it, which is the entire
+/// point. `&mut self` makes consumption atomic for a single verifier.
+///
+/// **The honest limit.** This enforces a use count *at one verifier*. A capability
+/// presented to two disconnected offline verifiers will be accepted by both, because
+/// neither can know about the other without talking to it, and requiring them to talk
+/// reintroduces exactly the always-online authority this stack exists to remove. So
+/// [`Caveat::MaxUses`] means "at most n times per verifier", not "at most n times in the
+/// universe", and anything that needs the stronger guarantee has to name a single verifier
+/// or accept consensus latency. Documented rather than papered over.
+#[derive(Default)]
+pub struct UseLedger {
+    consumed: BTreeMap<Cid, u32>,
+    retired_nonces: BTreeSet<[u8; 16]>,
+}
+
+impl UseLedger {
+    pub fn new() -> Self {
+        UseLedger::default()
+    }
+
+    /// How many times this verifier has seen this capability used.
+    pub fn uses(&self, cap_id: &Cid) -> u32 {
+        self.consumed.get(cap_id).copied().unwrap_or(0)
+    }
+
+    /// Retire a nonce and take one use, or refuse. Atomic: nothing is recorded unless the
+    /// whole thing succeeds.
+    pub fn consume(
+        &mut self,
+        cap_id: Cid,
+        nonce: [u8; 16],
+        max_uses: Option<u32>,
+    ) -> Result<u32, CapError> {
+        if self.retired_nonces.contains(&nonce) {
+            return Err(CapError::Replayed);
+        }
+        let used = self.uses(&cap_id);
+        if let Some(max) = max_uses {
+            if used >= max {
+                return Err(CapError::Refused(format!(
+                    "already used {used} of {max} permitted time(s)"
+                )));
+            }
+        }
+        self.retired_nonces.insert(nonce);
+        let now = used + 1;
+        self.consumed.insert(cap_id, now);
+        Ok(now)
+    }
+}
+
+/// Check a request against effective caveats and consume one use.
+///
+/// Takes the ledger by mutable reference because authorising and consuming must be one
+/// step. Checking first and consuming later is where replay windows come from.
+pub fn authorize(
+    effective: &[Caveat],
+    req: &Request,
+    cap_id: Cid,
+    ledger: &mut UseLedger,
+) -> Result<(), CapError> {
+    let mut max_uses = None;
+
     for c in effective {
         match c {
             Caveat::Operation(op) if *op != req.operation => {
@@ -365,14 +597,12 @@ pub fn authorize(effective: &[Caveat], req: &Request) -> Result<(), CapError> {
                     req.at
                 )));
             }
-            Caveat::MaxUses(n) if req.use_index >= *n => {
-                return Err(CapError::Refused(format!(
-                    "already used {n} time(s), which was the limit"
-                )));
-            }
+            Caveat::MaxUses(n) => max_uses = Some(*n),
             _ => {}
         }
     }
+
+    ledger.consume(cap_id, req.nonce, max_uses)?;
     Ok(())
 }
 
@@ -461,6 +691,16 @@ mod tests {
         );
     }
 
+    fn req(op: &str, amount: u64, at: u64, nonce: u8) -> Request {
+        Request {
+            operation: op.into(),
+            amount,
+            at,
+            nonce: [nonce; 16],
+            args_digest: Cid::of(b"args"),
+        }
+    }
+
     #[test]
     fn a_stolen_capability_is_still_bounded() {
         let (clinic, person, agent, res) = setup();
@@ -475,63 +715,182 @@ mod tests {
 
         // Even fully compromised, the caveats travel with the credential.
         let eff = scoped.verify(clinic.address()).unwrap();
-        let over = Request {
-            operation: "book".into(),
-            amount: 900_000,
-            at: 0,
-            use_index: 0,
-        };
+        let mut ledger = UseLedger::new();
         assert!(matches!(
-            authorize(&eff, &over),
+            authorize(&eff, &req("book", 900_000, 0, 1), scoped.id(), &mut ledger),
             Err(CapError::Refused(_))
         ));
     }
 
     #[test]
-    fn caveats_are_enforced_on_operation_amount_expiry_and_uses() {
+    fn caveats_are_enforced_on_operation_amount_and_expiry() {
         let eff = vec![
             Caveat::Operation("book".into()),
             Caveat::MaxAmount(5000),
             Caveat::ExpiresAt(100),
-            Caveat::MaxUses(1),
         ];
+        let id = Cid::of(b"cap");
 
-        let ok = Request {
-            operation: "book".into(),
-            amount: 4500,
-            at: 50,
-            use_index: 0,
-        };
-        assert!(authorize(&eff, &ok).is_ok());
+        let mut l = UseLedger::new();
+        assert!(authorize(&eff, &req("book", 4500, 50, 0), id, &mut l).is_ok());
 
-        for bad in [
-            Request {
-                operation: "cancel".into(),
-                amount: 0,
-                at: 50,
-                use_index: 0,
-            },
-            Request {
-                operation: "book".into(),
-                amount: 20_000,
-                at: 50,
-                use_index: 0,
-            },
-            Request {
-                operation: "book".into(),
-                amount: 100,
-                at: 100,
-                use_index: 0,
-            },
-            Request {
-                operation: "book".into(),
-                amount: 100,
-                at: 50,
-                use_index: 1,
-            },
-        ] {
-            assert!(authorize(&eff, &bad).is_err());
+        for (i, bad) in [
+            req("cancel", 0, 50, 10),
+            req("book", 20_000, 50, 11),
+            req("book", 100, 100, 12),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut l = UseLedger::new();
+            assert!(
+                authorize(&eff, &bad, id, &mut l).is_err(),
+                "case {i} should have been refused"
+            );
         }
+    }
+
+    /// Regression for issue #29, reported by @matthiasantierens.
+    ///
+    /// `MaxUses` was checked against a `use_index` the caller supplied, so a one-use
+    /// capability could be spent forever by always sending zero. Usage now lives in a
+    /// ledger the caller cannot reach.
+    #[test]
+    fn a_one_use_capability_cannot_be_replayed_by_a_lying_caller() {
+        let eff = vec![Caveat::MaxUses(1)];
+        let id = Cid::of(b"cap");
+        let mut ledger = UseLedger::new();
+
+        assert!(authorize(&eff, &req("book", 0, 0, 1), id, &mut ledger).is_ok());
+
+        // The adversarial client repeats the call with a fresh nonce and no memory of
+        // having spent anything. There is no field it can lie about that helps.
+        for n in 2..6u8 {
+            assert!(
+                authorize(&eff, &req("book", 0, 0, n), id, &mut ledger).is_err(),
+                "replay {n} was accepted"
+            );
+        }
+        assert_eq!(ledger.uses(&id), 1);
+    }
+
+    #[test]
+    fn an_identical_invocation_is_rejected_as_a_replay() {
+        let eff = vec![Caveat::MaxUses(10)];
+        let id = Cid::of(b"cap");
+        let mut ledger = UseLedger::new();
+
+        let r = req("book", 0, 0, 7);
+        assert!(authorize(&eff, &r, id, &mut ledger).is_ok());
+        assert_eq!(
+            authorize(&eff, &r, id, &mut ledger),
+            Err(CapError::Replayed)
+        );
+        // A refused call consumes nothing.
+        assert_eq!(ledger.uses(&id), 1);
+    }
+
+    #[test]
+    fn a_refused_invocation_does_not_burn_a_use() {
+        let eff = vec![Caveat::Operation("book".into()), Caveat::MaxUses(1)];
+        let id = Cid::of(b"cap");
+        let mut ledger = UseLedger::new();
+
+        assert!(authorize(&eff, &req("cancel", 0, 0, 1), id, &mut ledger).is_err());
+        assert_eq!(ledger.uses(&id), 0, "a rejected call must be free");
+        assert!(authorize(&eff, &req("book", 0, 0, 2), id, &mut ledger).is_ok());
+    }
+
+    #[test]
+    fn ledgers_are_per_verifier_and_the_docs_say_so() {
+        // Two disconnected verifiers each accept the same one-use capability. This is a
+        // real limit of offline verification, not an oversight, and UseLedger documents it.
+        let eff = vec![Caveat::MaxUses(1)];
+        let id = Cid::of(b"cap");
+        let mut a = UseLedger::new();
+        let mut b = UseLedger::new();
+
+        assert!(authorize(&eff, &req("book", 0, 0, 1), id, &mut a).is_ok());
+        assert!(authorize(&eff, &req("book", 0, 0, 1), id, &mut b).is_ok());
+    }
+
+    /// Regression for issue #30, reported by @matthiasantierens.
+    ///
+    /// A capability was a pure bearer token: copying it was enough to spend it. The holder
+    /// now signs the request, and the signature is checked against the final audience.
+    #[test]
+    fn a_copied_capability_is_useless_without_the_holders_key() {
+        let (clinic, person, agent, res) = setup();
+        let thief = Identity::generate();
+
+        let root = Capability::issue(&clinic, res, person.address(), vec![]);
+        let scoped = root
+            .attenuate(&person, agent.address(), vec![Caveat::MaxUses(5)])
+            .unwrap();
+
+        // The rightful holder can exercise it.
+        let good = SignedInvocation::sign(&agent, &scoped, req("book", 100, 0, 1));
+        assert_eq!(good.verify_possession(&scoped).unwrap(), agent.address());
+
+        // Someone who copied the bytes cannot.
+        let stolen = SignedInvocation::sign(&thief, &scoped, req("book", 100, 0, 2));
+        assert_eq!(
+            stolen.verify_possession(&scoped),
+            Err(CapError::NotTheHolder)
+        );
+    }
+
+    #[test]
+    fn a_signed_invocation_cannot_be_moved_to_another_capability_or_argument_set() {
+        let (clinic, person, agent, res) = setup();
+        let root = Capability::issue(&clinic, res, person.address(), vec![]);
+        let a = root
+            .attenuate(&person, agent.address(), vec![Caveat::MaxUses(5)])
+            .unwrap();
+        let b = root
+            .attenuate(&person, agent.address(), vec![Caveat::MaxUses(1)])
+            .unwrap();
+        assert_ne!(a.id(), b.id());
+
+        let signed = SignedInvocation::sign(&agent, &a, req("book", 100, 0, 1));
+        assert!(signed.verify_possession(&a).is_ok());
+        assert_eq!(
+            signed.verify_possession(&b),
+            Err(CapError::BadSignature),
+            "a signature bound to one capability must not travel to another"
+        );
+
+        // Swapping the arguments out from under a valid signature also fails.
+        let mut tampered = signed.clone();
+        tampered.request.args_digest = Cid::of(b"different args");
+        assert_eq!(
+            tampered.verify_possession(&a),
+            Err(CapError::BadSignature)
+        );
+    }
+
+    #[test]
+    fn a_capability_round_trips_through_the_canonical_encoding() {
+        let (clinic, person, agent, res) = setup();
+        let root = Capability::issue(&clinic, res, person.address(), vec![]);
+        let scoped = root
+            .attenuate(
+                &person,
+                agent.address(),
+                vec![Caveat::Operation("book".into()), Caveat::MaxAmount(5000)],
+            )
+            .unwrap();
+
+        let mut e = Enc::new();
+        scoped.encode(&mut e);
+        let bytes = e.finish();
+
+        let mut d = Dec::new(&bytes);
+        let back = Capability::decode(&mut d).unwrap();
+        d.end().unwrap();
+
+        assert_eq!(back.id(), scoped.id());
+        assert_eq!(back.verify(clinic.address()).unwrap(), scoped.verify(clinic.address()).unwrap());
     }
 
     #[test]

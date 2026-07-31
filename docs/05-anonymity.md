@@ -182,23 +182,66 @@ itself. Volume alone narrows the sender to two candidates out of two hundred.
 leaves a 3.2x advantage, because without cover only the clients who were actually talking
 transmit at all, and that set is small.
 
-### The negative result
+### The negative result, and its reversal
 
 **Cover alone scores identically to cover plus delay.** Uniform emission at every tick is
 effectively a synchronous batch mix, and a batch mix is strong against an observer who only
-watches. So **this harness does not justify the Poisson delay mechanism at all.**
-
-Loopix's case for continuous-time mixing rests on two things this simulator does not model:
-resistance to active n-1 and flooding attacks, and not requiring the global clock
-synchronisation that a synchronous batch mix needs. Both are real and both are good reasons.
-Neither is evidence we have produced. Until the active-adversary simulation exists, the delay
-layer is taken on the paper's authority rather than on our own, and it should be described
-that way.
+watches. On the passive evidence alone, the Poisson delay mechanism looked unjustified, and
+for one commit this project said exactly that.
 
 The first version of this harness gave every configuration a clean bill of health, because
 the adversary's timing window was 480 ticks against a 24 tick mean latency. Tightening it to
 mean plus four standard deviations produced the table above. Overstating your own defences is
 the failure this harness exists to prevent, and it caught itself once already.
+
+## 8. The active adversary
+
+An adversary who can suppress traffic, not merely observe it. `karst-mix::active` mounts the
+n-1 attack: block every other honest packet entering a mix, inject packets you can recognise,
+and anything else departing is the target.
+
+| Discipline | Anonymity set | Target isolated | Packets suppressed | Detected by loops |
+|---|---|---|---|---|
+| Batch mix (round 1) | 1.7 | **51.7%** | 10 | 65.1% |
+| Poisson mix | 38.5 | 0.7% | 81 | **100.0%** |
+
+**This reverses the passive conclusion.** A batch mix has a moment when it is empty but for
+the target: the flush. Suppress one round of arrivals, ten packets, and the target walks out
+alone half the time, cheaply and fairly quietly.
+
+A Poisson mix has no such moment. Exponential residuals are **memoryless**, so the backlog
+never ages out, it only drains. Draining from steady state to a single packet takes 35 ticks
+and costs 351 suppressed packets, and loop cover traffic detects suppression at that volume
+with certainty. The security property is not that the attack is impossible, it is that the
+attack is expensive and loud.
+
+Note the residual: isolation is 0.7% rather than zero. If the target draws a long delay and
+every resident happens to leave first, it walks out alone. That is roughly one message in a
+hundred and fifty, it is inherent to a probabilistic defence, and rounding it to "never" would
+repeat the overclaiming the harness already caught once.
+
+### Batching needs a clock, and continuous time does not
+
+A synchronous batch mix requires every node to agree where a round begins. Under skew the
+batches fragment, and a fragmented batch is a small anonymity set.
+
+| Clock skew | Mean batch | Worst batch | Batches under 3 |
+|---|---|---|---|
+| 0 ticks | 10.0 | 2 | 0.5% |
+| 0.5 ticks | 7.6 | 1 | 3.0% |
+| 1 tick | 5.0 | **0** | **30.8%** |
+| 2 ticks | 2.6 | 0 | 64.1% |
+
+A Poisson mix has no row in that table, because it has no round boundary for anyone to
+disagree about. A mechanism you cannot misconfigure is worth something that never shows up in
+a passive measurement.
+
+### Conclusion
+
+Both mechanisms are load bearing, against different adversaries. Cover traffic defeats the
+passive observer; Poisson delay defeats the active one and removes the synchronisation
+requirement. Neither is redundant, and the passive harness alone would have led us to drop the
+wrong one.
 
 ### The delay knob, with cover off
 

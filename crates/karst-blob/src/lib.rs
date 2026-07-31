@@ -54,19 +54,42 @@ fn merkle_root(leaves: &[Cid]) -> Cid {
 }
 
 /// A merkle inclusion proof for one chunk.
+///
+/// Carries **only** sibling hashes. It deliberately does not carry the leaf index or the
+/// left/right directions, because a proof that describes its own position is a proof an
+/// attacker can relabel. Position is derived by the verifier from the index it asked
+/// about and the manifest's leaf count, so a proof for chunk 0 cannot be presented as a
+/// proof for chunk 7.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Proof {
-    pub index: usize,
-    /// `(sibling_is_on_the_right, sibling_hash)` from leaf upward.
-    pub siblings: Vec<(bool, Cid)>,
+    pub siblings: Vec<Cid>,
 }
 
 impl Proof {
-    /// Bytes on the wire for this proof. Logarithmic in file size: a 4 GiB file needs
-    /// 16 sibling hashes, which is 512 bytes, to verify any 64 KiB chunk.
+    /// Bytes on the wire. Logarithmic in file size: a 4 GiB file needs 16 sibling hashes,
+    /// which is 512 bytes, to verify any 64 KiB chunk. This is the whole wire cost,
+    /// because there is no direction or index metadata to serialise.
     pub fn wire_len(&self) -> usize {
         self.siblings.len() * 32
     }
+}
+
+/// Walk from a leaf index to the root, yielding `(sibling_is_on_the_right, level_index)`
+/// for each level that actually has a sibling. Odd nodes are promoted without one.
+///
+/// Both proof generation and verification derive their path from this single function, so
+/// they cannot disagree about tree shape.
+fn path_steps(mut idx: usize, mut width: usize) -> Vec<(bool, usize, usize)> {
+    let mut steps = Vec::new();
+    while width > 1 {
+        let sibling = idx ^ 1;
+        if sibling < width {
+            steps.push((idx % 2 == 0, sibling, width));
+        }
+        idx /= 2;
+        width = width.div_ceil(2);
+    }
+    steps
 }
 
 /// The description of a file: its chunk list and the merkle root over them.
@@ -135,40 +158,59 @@ impl Manifest {
         if index >= self.chunks.len() {
             return None;
         }
-        let mut siblings = Vec::new();
         let mut level = self.chunks.clone();
         let mut idx = index;
+        let mut siblings = Vec::new();
 
+        // Every level is climbed, but only levels where this node actually has a sibling
+        // contribute a hash. Promoted odd nodes climb without one, which is exactly what
+        // `path_steps` encodes for the verifier.
         while level.len() > 1 {
+            let sibling = idx ^ 1;
+            if sibling < level.len() {
+                siblings.push(level[sibling]);
+            }
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
-            for (i, pair) in level.chunks(2).enumerate() {
-                if pair.len() == 2 {
-                    if i * 2 == idx {
-                        siblings.push((true, pair[1]));
-                    } else if i * 2 + 1 == idx {
-                        siblings.push((false, pair[0]));
-                    }
-                    next.push(hash_pair(&pair[0], &pair[1]));
+            for pair in level.chunks(2) {
+                next.push(if pair.len() == 2 {
+                    hash_pair(&pair[0], &pair[1])
                 } else {
-                    next.push(pair[0]);
-                }
+                    pair[0]
+                });
             }
             idx /= 2;
             level = next;
         }
-        Some(Proof { index, siblings })
+        Some(Proof { siblings })
     }
 
     /// Verify one chunk against the root without holding any other chunk.
     ///
     /// This is what lets you trust a stranger who hands you the middle of a film.
+    ///
+    /// Every path direction is derived from `index` and the manifest's leaf count, never
+    /// taken from the proof, so a valid proof for one chunk cannot be relabelled as a
+    /// proof for another. The proof length is checked against the expected depth, and the
+    /// leaf is checked against the manifest's own chunk list, so all three of the leaf
+    /// bytes, the position, and the tree shape are authenticated.
     pub fn verify_chunk(&self, index: usize, data: &[u8], proof: &Proof) -> bool {
-        if proof.index != index || index >= self.chunks.len() {
+        if index >= self.chunks.len() {
             return false;
         }
-        let mut acc = Cid::of(data);
-        for (sibling_on_right, sib) in &proof.siblings {
-            acc = if *sibling_on_right {
+        // The bytes must be the leaf the manifest names at this exact position.
+        let leaf = Cid::of(data);
+        if leaf != self.chunks[index] {
+            return false;
+        }
+
+        let steps = path_steps(index, self.chunks.len());
+        if steps.len() != proof.siblings.len() {
+            return false;
+        }
+
+        let mut acc = leaf;
+        for ((on_right, _sib_idx, _width), sib) in steps.iter().zip(proof.siblings.iter()) {
+            acc = if *on_right {
                 hash_pair(&acc, sib)
             } else {
                 hash_pair(sib, &acc)
@@ -440,6 +482,62 @@ mod tests {
         let (m, bodies) = Manifest::build_with_chunk_size("f", "b", &data, 1024);
         let p0 = m.proof(0).unwrap();
         assert!(!m.verify_chunk(1, &bodies[1], &p0));
+    }
+
+    /// Regression for issue #32, reported by @matthiasantierens.
+    ///
+    /// The proof used to carry its own index and its own left/right directions, and
+    /// verification trusted both. Relabelling a valid proof for chunk 0 and presenting
+    /// chunk 0's bytes for another index therefore reconstructed the root and was
+    /// accepted. Position is now derived from the requested index, never read from the
+    /// proof, and there is no index field left to mutate.
+    #[test]
+    fn chunk_zero_cannot_be_passed_off_as_another_chunk() {
+        let data = data_of(9_000, 5);
+        let (m, bodies) = Manifest::build_with_chunk_size("f", "b", &data, 1024);
+        let p0 = m.proof(0).unwrap();
+
+        // Chunk 0's data and chunk 0's siblings, offered at every other position.
+        for index in 1..m.chunks.len() {
+            assert!(
+                !m.verify_chunk(index, &bodies[0], &p0),
+                "chunk 0 was accepted at index {index}"
+            );
+        }
+        // And it still verifies where it actually belongs.
+        assert!(m.verify_chunk(0, &bodies[0], &p0));
+    }
+
+    #[test]
+    fn a_proof_of_the_wrong_length_is_rejected() {
+        let data = data_of(9_000, 5);
+        let (m, bodies) = Manifest::build_with_chunk_size("f", "b", &data, 1024);
+        let mut p = m.proof(3).unwrap();
+
+        p.siblings.pop();
+        assert!(!m.verify_chunk(3, &bodies[3], &p), "short proof accepted");
+
+        let mut p2 = m.proof(3).unwrap();
+        p2.siblings.push(Cid::of(b"extra"));
+        assert!(!m.verify_chunk(3, &bodies[3], &p2), "long proof accepted");
+    }
+
+    #[test]
+    fn odd_leaf_counts_produce_consistent_paths_at_every_index() {
+        // Promotion of odd nodes is where hand-rolled merkle code usually diverges
+        // between prover and verifier. Both now derive the path from one function.
+        for chunks in 1..=17usize {
+            let data = data_of(chunks * 1024, 21);
+            let (m, bodies) = Manifest::build_with_chunk_size("f", "b", &data, 1024);
+            assert_eq!(m.chunks.len(), chunks);
+            for i in 0..chunks {
+                let p = m.proof(i).unwrap();
+                assert!(
+                    m.verify_chunk(i, &bodies[i], &p),
+                    "{chunks} chunks, index {i} failed"
+                );
+            }
+        }
     }
 
     #[test]

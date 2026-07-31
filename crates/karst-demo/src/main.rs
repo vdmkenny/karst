@@ -4,10 +4,10 @@
 
 use std::collections::BTreeMap;
 
-use karst_afford::{agent_budget, Affordance, Invocation, Param, ParamType, Resource};
+use karst_afford::{agent_budget, request_for, Affordance, Param, ParamType, Resource};
 use karst_attest::{Agency, Policy};
 use karst_blob::{BlobStore, Manifest, Swarm};
-use karst_cap::{Capability, Caveat};
+use karst_cap::{Capability, Caveat, SignedInvocation, UseLedger};
 use karst_doc::{Doc, Node, Run, Value};
 use karst_id::Identity;
 use karst_object::Object;
@@ -189,16 +189,12 @@ fn main() {
     let mut args = BTreeMap::new();
     args.insert("slot".to_string(), Value::Instant(42));
 
+    let mut ledger = UseLedger::new();
+
     println!("\n  agent books within budget:");
-    match resource.invoke(
-        &agent_cap,
-        Invocation {
-            operation: "book",
-            args: &args,
-            at: 10,
-            use_index: 0,
-        },
-    ) {
+    let inv1 = SignedInvocation::sign(
+        &agent, &agent_cap, request_for("book", 4500, 10, [1; 16], &args));
+    match resource.invoke(&agent_cap, &inv1, &args, &mut ledger) {
         Ok(r) => {
             for line in r.describe().lines() {
                 println!("    {line}");
@@ -210,29 +206,26 @@ fn main() {
     println!("  agent tries an operation it was never given:");
     let mut cargs = BTreeMap::new();
     cargs.insert("booking".to_string(), Value::Ref(resource.cid()));
-    match resource.invoke(
-        &agent_cap,
-        Invocation {
-            operation: "cancel",
-            args: &cargs,
-            at: 10,
-            use_index: 0,
-        },
-    ) {
+    let inv2 = SignedInvocation::sign(
+        &agent, &agent_cap, request_for("cancel", 0, 10, [2; 16], &cargs));
+    match resource.invoke(&agent_cap, &inv2, &cargs, &mut ledger) {
         Ok(_) => println!("    ALLOWED  <- this would be a bug"),
         Err(e) => println!("    {e}"),
     }
 
-    println!("  agent tries to use it a second time:");
-    match resource.invoke(
-        &agent_cap,
-        Invocation {
-            operation: "book",
-            args: &args,
-            at: 10,
-            use_index: 1,
-        },
-    ) {
+    println!("  agent tries to use it a second time, with a fresh nonce:");
+    let inv3 = SignedInvocation::sign(
+        &agent, &agent_cap, request_for("book", 4500, 10, [3; 16], &args));
+    match resource.invoke(&agent_cap, &inv3, &args, &mut ledger) {
+        Ok(_) => println!("    ALLOWED  <- this would be a bug"),
+        Err(e) => println!("    {e}"),
+    }
+
+    println!("  someone who copied the capability tries to spend it:");
+    let thief = Identity::generate();
+    let stolen = SignedInvocation::sign(
+        &thief, &agent_cap, request_for("book", 4500, 10, [4; 16], &args));
+    match resource.invoke(&agent_cap, &stolen, &args, &mut ledger) {
         Ok(_) => println!("    ALLOWED  <- this would be a bug"),
         Err(e) => println!("    {e}"),
     }
@@ -332,8 +325,9 @@ fn main() {
         "on behalf of the clinic",
         None,
         Agency::Delegated {
-            principal: clinic.address(),
-            chain: vec![(troll.address(), troll.address())],
+            resource_owner: clinic.address(),
+            capability: Capability::issue(
+                &troll, karst_object::Cid::of(b"board:karst-design"), troll.address(), vec![]),
         },
     );
     match Post::from_object(&forged) {
