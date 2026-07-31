@@ -134,3 +134,23 @@ Stated plainly so they are not mistaken for established results:
 4. **The four-error framing itself.** It is a way of organising known problems, not a
    result. It is useful if it predicts where the next chokepoint appears, and so far it
    has only been used to explain ones that already exist.
+
+---
+
+## Hardware-backed keys
+
+**Direct Anonymous Attestation.** Brickell, Camenisch, Chen. *Direct Anonymous
+Attestation.* ACM CCS 2004.
+<https://eprint.iacr.org/2004/205.pdf>
+
+Lets a TPM prove it is a genuine TPM without revealing which one, removing the per-device
+correlation that the Privacy CA model creates. Adopted by the TCG into TPM 2.0 as ECDAA.
+
+Cited in `11-hardware-keys.md` §2 as the real mitigation for TPM attestation privacy, and as
+insufficient for our purposes: DAA removes the correlation and keeps the issuer, and that
+issuer is tied to the manufacturer.
+
+**TPM 2.0 and Ed25519.** `TPM_ECC_CURVE_25519` is registered in the TCG Algorithm Registry
+but is barely present in the TPM Library and PC Client specifications and rarely implemented;
+deployed TPMs do RSA and NIST-curve ECDSA. This is a concrete blocker for hardware-backing
+KARST identities, not a detail to sort out later.
