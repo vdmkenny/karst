@@ -773,6 +773,18 @@ relationship. An operation declares its price before anyone invokes it (L11).
 Advertising is not regulated here, it is made unnecessary, which is the only approach that has
 ever worked on anything.
 
+**The concealment conflict.** Paying a relay requires its contribution to be established, which
+requires it to be seen, and that pulls against concealing who participates. Every published
+anonymous incentive scheme for Tor keeps a measurement step: BRAIDS monitors, LIRA uses a
+central entity for relays, TEARS audits, TorCoin proves publicly. The payment side is anonymous
+in all four; the earning side is observed in all four.
+
+KARST's warrants are signed by the party served rather than produced by an auditor, so no third
+party watches the wire. The warrant still reaches the issuer quorum, so **relay participation is
+revealed to `t` issuers, not to a network observer.** That is better than public measurement and
+it is not concealment, and the design says so rather than claiming otherwise. See
+[`docs/17-paying-concealed-relays.md`](docs/17-paying-concealed-relays.md).
+
 **Secondary benefit.** Relays can be paid by the traffic they carry rather than by a patron.
 Tor's development has been heavily funded by US government sources, which is a permanent
 adoption cost even where the reality is fine, and a genuine structural dependency.
@@ -826,6 +838,14 @@ infrastructure and a datacentre.
 entry for what they wrote. A node that caches or replicates announces nothing. So discovery
 covers authored content while replication stays private, and holding something is not
 observable.
+
+**Fetching is a different matter and is not solved.** L4 conceals who is asking; it does not
+conceal what is asked for, and a content address names exactly one object. The fetcher is
+hidden among the parties who plausibly want that object rather than among the population, so
+for anything in the long tail a request identifies its requester completely. Under a realistic
+catalogue, where objects far outnumber readers, that is over 98% of the catalogue. Private
+information retrieval is the known answer and collides with commitments made elsewhere. See
+§6.13 and [`docs/16-fetch-privacy.md`](docs/16-fetch-privacy.md).
 
 That distinction comes directly from Tor: in v2 onion services, hidden service directories could
 be positioned to harvest descriptors, so the full set of onion addresses was enumerable by anyone
@@ -1093,6 +1113,19 @@ non-native speakers first, and the protocol cannot prevent that because the poli
 The categories are also dissolving: a person editing model output, a model drafting and a person
 signing, an agent under standing instructions written months ago. `Assisted` is one word over a
 growing range and any taxonomy here has a shelf life.
+
+**6.13 A fetch names what you wanted, and most of a catalogue is tail.** Content addressing makes
+a request a hash, so the requester is hidden only among the parties who plausibly want that
+object. At a 5% identification threshold, mixing suffices down to twenty interested parties and
+no further. Under a realistic catalogue, where objects outnumber readers, over 98% of objects
+fall below that line, so a request identifies its requester. PIR is the known answer, is nearly
+affordable, and needs either a per-server client relationship or non-colluding servers, both of
+which this design refuses elsewhere. Unresolved.
+
+**6.14 Paying relays leaks that they are relays, to the issuer quorum.** Concealment and payment
+pull against each other, and the four published anonymous incentive schemes for Tor all observe
+the earning side. KARST narrows the leak to `t` issuers rather than a network observer; it does
+not remove it.
 
 ### Unsolved
 
