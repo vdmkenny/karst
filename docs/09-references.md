@@ -235,3 +235,32 @@ without threshold issuance, so it trades the singleton back in.
 `karst-value` implements neither. It implements the protocol shape and real threshold sharing,
 and tests that the issuance and spend transcripts share no field. The cryptographic binding is
 open work.
+
+---
+
+## Long-run attacks, and a contested assumption
+
+**Statistical disclosure attacks.** Danezis, 2003, extending Kesdogan's disclosure attack.
+<https://www.freehaven.net/doc/e2e-traffic/e2e-traffic.pdf> (Mathewson and Dingledine,
+*Practical Traffic Analysis: Extending and Resisting Statistical Disclosure*, PET 2005)
+
+The long-term intersection attack against mix systems. It works by differencing the recipient
+population in rounds where a target is sending against rounds where they are not. Against a
+steady-state mix network it is slowed but still succeeds. The conditions that make it
+impractical are highly variable delivery times, an adversary who observes little, and users
+who pad consistently while the adversary cannot learn how the network behaves in their
+absence.
+
+Cited in `05-anonymity.md`. KARST's constant-rate emission targets the third condition
+directly, and `karst-mix::intersection` measures it: without padding the attack reaches full
+attribution by round 500, with constant-rate padding it never separates the target from a
+stranger. The exception it also measures is joining, since a user who arrives partway through
+gives the adversary the absent-population baseline the attack needs.
+
+**Mixing time of social graphs.** Mohaisen, Yun, Kim. IMC 2010.
+<https://conferences.sigcomm.org/imc/2010/papers/p383.pdf>
+
+Measures the mixing time of real social graphs and finds it **much larger than the literature
+assumes**, so systems built on fast mixing have weaker guarantees than claimed or must be less
+efficient to compensate. Directly qualifies the SybilLimit bound cited in
+`13-observation-defence.md`.

@@ -64,9 +64,7 @@ a social graph, and social-graph Sybil defence is a mature literature with proof
 **SybilLimit** (Yu, Gibbons, Kaminsky and Xiao, IEEE S&P 2008) bounds the number of Sybil
 identities accepted per attack edge to within a log *n* factor of optimal, roughly 200 times
 better than its predecessor SybilGuard (Yu, Kaminsky, Gibbons and Flaxman, SIGCOMM 2006) in a
-million-node experiment. SybilLimit also supplied the first real-world evidence that social
-networks are fast mixing, which is the assumption both protocols rest on and which SybilGuard
-had merely posited.
+million-node experiment.
 
 This is the right shape for L5:
 
@@ -74,6 +72,27 @@ This is the right shape for L5:
   it does not.
 - It needs a social graph, which L5 already requires for unrelated reasons.
 - It produces a bound with a proof rather than a hope.
+
+### The assumption underneath it is contested
+
+Both protocols rest on social graphs being **fast mixing**, meaning a short random walk
+approaches the stationary distribution. SybilLimit presented evidence for it.
+
+Mohaisen, Yun and Kim measured it directly (*Measuring the Mixing Time of Social Graphs*, IMC
+2010) and found **the mixing time of real social graphs is much larger than the literature
+assumes.** Their stated consequence is that systems built on fast mixing either have weaker
+guarantees than claimed, or must run less efficiently to compensate.
+
+That is not a reason to abandon the approach, and it is a reason not to quote SybilLimit's
+bound as though it transfers unexamined. The bound is contingent on a graph property that has
+been measured and found weaker than assumed, and KARST's introduction graph is not a general
+social network anyway: it is built by deliberate introductions for the purpose of joining a
+network, which may mix better or worse than a friendship graph and has never been measured
+because it does not exist.
+
+**So the honest position is that L5 adopts SybilLimit's structure and owes a measurement.**
+Quoting the log *n* bound before measuring the graph it applies to would repeat the error the
+IMC paper documents.
 
 ---
 
@@ -115,3 +134,5 @@ autonomous systems without attribution, patience is the cheap input. So:
   Sybil Attacks.* IEEE S&P 2008.
 - Yu, Kaminsky, Gibbons, Flaxman. *SybilGuard: Defending Against Sybil Attacks via Social
   Networks.* SIGCOMM 2006.
+- Mohaisen, Yun, Kim. *Measuring the Mixing Time of Social Graphs.* IMC 2010.
+  <https://conferences.sigcomm.org/imc/2010/papers/p383.pdf>
