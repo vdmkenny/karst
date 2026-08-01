@@ -269,18 +269,46 @@ widespread real-world adoption". That is the base rate this is working against.
 
 - **Distribution.** Entries travel as objects, and nothing here gossips, replicates or
   reconciles them. Two readers can hold different catalogues and neither can tell.
-- **Completeness detection.** Content addressing gives integrity of what you retrieve and
-  nothing on whether you were shown everything. Castro et al. are explicit that self-certifying
-  data does not help when verifying an object is *not* stored. `karst-object::freshness` already
-  implements TUF freeze detection with a snapshot commitment, for exactly this, and is not wired
-  to L15. **For a layer whose premise is publishing-equals-indexing, completeness is the
-  property under attack.**
-- **Trust bootstrapping.** How a reader acquires their first weights is L5's problem and is not
-  designed.
-- **Weight validation.** `Trust::set` accepts any `f64`, including negative and non-finite
-  values. A reader can only harm themselves with it, but it should refuse.
+- **Trust bootstrapping.** How a reader acquires their first weights is L5's problem.
+- **Discovery of publishers a reader has never heard of.** A census tells a reader they are
+  missing entries from a publisher they know. It says nothing about a publisher whose existence
+  was withheld, because **a reader cannot miss what they do not know exists**. That residue is
+  the same one Tor's v3 blinded descriptors leave.
 
 ---
+
+## Completeness, which is the property the premise puts under attack
+
+Every mechanism above verifies what a reader **receives**. None of them says anything about what
+a reader did not receive, so an adversary forwarding a subset of a publisher's announcements, or
+none, is untouched by all of it. Castro, Druschel, Ganesh, Rowstron and Wallach (OSDI 2002) are
+explicit that self-certifying data gives nothing when verifying an object is *not* stored.
+
+`karst-index::complete` closes the half that can be closed. A publisher periodically signs a
+**census**: how many announcements they have made, and a digest over their targets. A reader
+holding fewer than the count knows entries are missing and knows how many, without knowing
+which; a reader holding the right number of the wrong entries is caught by the digest.
+
+| Outcome | Meaning |
+|---|---|
+| `Complete` | Holding everything committed to, commitment current |
+| `Missing { held, announced }` | Somebody in between is withholding, and this many |
+| `Divergent { expected, held }` | Right count, wrong entries |
+| `Expired` | The commitment is too old to conclude from |
+| `Unknown` | **Suspect.** No commitment held |
+
+`Unknown` counts as suspect deliberately. A reader who has heard no commitment is in exactly the
+position this exists to remove them from, and reporting that as healthy would be the original
+failure wearing the mechanism's name.
+
+The structure is TUF's timestamp role, which `karst-object::freshness` already implements:
+expiring statements, a monotonic sequence so an old census cannot be replayed to make a reader
+believe they are current, and a snapshot commitment so forwarding genuine fresh statements while
+withholding what they refer to is detected rather than believed.
+
+Two ways to make the count lie are refused explicitly: another publisher's announcements do not
+fill it, or a flood of unrelated entries would make a withheld feed look complete; and claims do
+not count as announcements.
 
 ## References
 

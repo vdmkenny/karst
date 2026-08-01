@@ -95,8 +95,15 @@ impl Trust {
     }
 
     /// Trust a source. Weight is the reader's business; 1.0 is a sensible unit.
+    ///
+    /// Non-finite weights are refused. A reader can only harm themselves here, since nobody
+    /// else supplies the value, but `NaN` makes the comparison in the sort return `None` and
+    /// hands the whole ordering to the tie-break, and infinity turns any dispute into `NaN`.
+    /// Neither is a preference anyone holds, so neither is stored.
     pub fn set(&mut self, who: Address, weight: f64) -> &mut Self {
-        self.weights.insert(who, weight);
+        if weight.is_finite() {
+            self.weights.insert(who, weight);
+        }
         self
     }
 
@@ -728,6 +735,42 @@ mod tests {
         let (hits, cost) = Ranker::new(t).search_top(&cat, &terms(&["t"]), 3);
         assert_eq!(hits[0].target, favourite);
         assert!(cost.truncated > 0);
+    }
+
+    /// A weight that is not a number must not be stored.
+    ///
+    /// A reader can only harm themselves with this, so it is not a vulnerability. It is still
+    /// wrong: NaN makes the sort comparison return None, so the tie-break silently decides the
+    /// whole ordering, and infinity produces NaN the moment a dispute is subtracted.
+    #[test]
+    fn non_finite_weights_are_refused() {
+        let mut t = Trust::new();
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            t.set(addr(1), bad);
+            assert_eq!(t.weight_of(&addr(1)), None, "stored {bad}");
+        }
+        t.set(addr(1), 1.0);
+        assert_eq!(t.weight_of(&addr(1)), Some(1.0));
+    }
+
+    /// Ranking must stay a total order whatever weights a reader picks.
+    #[test]
+    fn ranking_is_total_under_any_finite_weights() {
+        let mut cat = Catalogue::new();
+        let mut t = Trust::new();
+        for i in 0..12u32 {
+            let target = Cid::of(&i.to_le_bytes());
+            t.set(addr(i), if i % 3 == 0 { -5.0 } else { 1e12 });
+            announce_as(&mut cat, target, i, &["topic"], &t);
+        }
+        let r = Ranker::new(t);
+        let a = r.search(&cat, &terms(&["topic"]));
+        let b = r.search(&cat, &terms(&["topic"]));
+        assert_eq!(a.len(), 12);
+        assert_eq!(a, b, "ranking was not deterministic under extreme weights");
+        for w in a.windows(2) {
+            assert!(w[0].score >= w[1].score, "the order is not sorted");
+        }
     }
 
 }
