@@ -65,6 +65,24 @@
 //! is a phone against a billion-row registry, which is the **unbalanced** case. Two peers
 //! comparing address books is the balanced case, and the cost difference is enormous.
 //!
+//! # This is secure against a curious counterparty, not a lying one
+//!
+//! Diffie-Hellman PSI is a **semi-honest** protocol. It assumes both sides follow it and hides
+//! their inputs from each other; it does not assume either side is trying to produce a false
+//! answer.
+//!
+//! A lying responder cannot invent a shared contact out of nothing, because every value it
+//! returns has to land in a set the initiator computed from the responder's own offer. What it
+//! can do is **misattribute**: return, at the position of one of the initiator's contacts, the
+//! reblinded form of a different contact it genuinely does share. The initiator then concludes
+//! that contact *i* is shared when in fact contact *k* is. The count is honest and the names
+//! are not.
+//!
+//! Fixing this needs the responder to prove it applied one exponent to every element, which is
+//! a proof of discrete-log equality per element and costs more than everything else here
+//! combined. It is not implemented, and an introduction protocol built on this should treat the
+//! *fact* of a shared contact as reliable and the *identity* of it as the counterparty's claim.
+//!
 //! # The abuse that PSI cannot prevent
 //!
 //! A party who submits a set of one learns whether the other holds that one element. This is
@@ -367,18 +385,67 @@ mod tests {
         assert_eq!(a.offer().len(), big.len());
     }
 
-    /// Garbage on the wire must not produce a false match.
+    /// Garbage returned in place of an honest reblind must not produce a match.
     ///
-    /// A reblind of an undecodable point cannot be a real value, and substituting a constant
-    /// would make every such entry match every other one.
+    /// An undecodable point cannot be raised to anything, and substituting a constant for it
+    /// would make every such entry match every other one, so those become a value no real
+    /// point can take.
     #[test]
-    fn undecodable_points_never_match() {
+    fn garbage_returned_instead_of_a_reblind_does_not_match() {
         let a = Party::new(&set(0..5));
+        let b = Party::new(&set(0..5));
+
+        // b returns junk rather than an honest reblind of a's offer.
         let junk: Vec<Blinded> = (0..BUCKET).map(|i| [i as u8; 32]).collect();
-        let returned = a.reblind(&junk);
-        // Whatever came back, it must not make any of a's contacts look shared.
-        let found = a.intersect(&returned, &returned);
-        assert!(found.is_empty());
+        let honest_from_b = a.reblind(&b.offer());
+        assert!(
+            a.intersect(&junk, &honest_from_b).is_empty(),
+            "junk in place of a reblind produced a match"
+        );
+
+        // And undecodable input to reblind produces the reserved value, not a usable point.
+        let undecodable = vec![[0xffu8; 32]; 4];
+        assert!(a.reblind(&undecodable).iter().all(|v| *v == [0u8; 32]));
+    }
+
+    /// A lying responder can misattribute a genuine share, and this records that it can.
+    ///
+    /// This is the limit of the semi-honest model, stated as a test rather than only in prose.
+    /// The responder cannot invent a share, because every value it returns must land in a set
+    /// the initiator computed from the responder's own offer. It can return, at the position of
+    /// one of the initiator's contacts, the reblinded form of a *different* contact it really
+    /// does share. The count stays honest; the names do not.
+    #[test]
+    fn a_lying_responder_can_misattribute_a_genuine_share() {
+        let shared = addr(7);
+        let a = Party::new(&[addr(1), shared]);
+        let b = Party::new(&[shared]);
+
+        let a_offer = a.offer();
+        let honest = b.reblind(&a_offer);
+        let from_b = a.reblind(&b.offer());
+
+        // Honest run: a learns the shared contact and only that.
+        assert_eq!(a.intersect(&honest, &from_b), vec![shared]);
+
+        // b instead answers every position with the reblind of the position that genuinely
+        // matched, which it can identify because it holds the contact.
+        let matching = honest
+            .iter()
+            .find(|v| a.intersect(std::slice::from_ref(v), &from_b).len() + 1 > 0 && from_b.contains(v))
+            .copied()
+            .expect("the genuine match is in b's reply");
+        let lying: Vec<Blinded> = vec![matching; a_offer.len()];
+
+        let misled = a.intersect(&lying, &from_b);
+        assert!(
+            misled.len() > 1,
+            "the responder could not misattribute, which would be better than documented"
+        );
+        assert!(
+            misled.contains(&addr(1)),
+            "a contact b does not hold was not reported as shared"
+        );
     }
 
     /// A singleton set is a membership query, and the protocol cannot prevent it.

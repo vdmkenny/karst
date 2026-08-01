@@ -211,15 +211,35 @@ impl Witness {
 #[derive(Debug, Clone)]
 pub struct Cosigned {
     pub checkpoint: Checkpoint,
+    /// The publisher's own signed object, retained so a reader can verify it.
+    ///
+    /// Held rather than discarded because the reader must check the same thing the witness
+    /// checked. Verifying only witness-side left the reader accepting, at full threshold, a
+    /// digest the publisher never made: captured witnesses simply never called `cosign` and
+    /// signed whatever they liked. That is substitution by witnesses, which is the one thing
+    /// this module says cannot happen, and it survived the fix that was supposed to remove it
+    /// because the fix was applied to one side of the exchange only.
+    signed: Object,
     /// Keyed by verifying key, because an address is its hash and verifies nothing.
     signatures: BTreeMap<[u8; 32], Signature>,
 }
 
 impl Cosigned {
-    pub fn new(checkpoint: Checkpoint) -> Self {
-        Cosigned {
+    /// Build from the publisher's signed object, verifying it.
+    pub fn new(obj: &Object) -> Result<Self, ObjectError> {
+        let checkpoint = Checkpoint::from_object(obj)?;
+        Ok(Cosigned {
             checkpoint,
+            signed: obj.clone(),
             signatures: BTreeMap::new(),
+        })
+    }
+
+    /// Re-verify the publisher's signature and that it matches the checkpoint carried here.
+    pub fn publisher_signature_holds(&self) -> bool {
+        match Checkpoint::from_object(&self.signed) {
+            Ok(c) => c == self.checkpoint,
+            Err(_) => false,
         }
     }
 
@@ -272,6 +292,16 @@ pub enum Acceptance {
     Undersigned { support: usize, threshold: usize },
     /// Older than what the reader already holds, or the same sequence with a different digest.
     NotForward,
+    /// Does not link back to what the reader already holds.
+    ///
+    /// Distinct from `NotForward` because the failures are different: one is a publisher going
+    /// backwards, the other is a publisher offering a history that shares no ancestor with the
+    /// reader's. A higher sequence number is not evidence of continuing anything.
+    NotAChain,
+    /// The publisher did not sign what is being offered.
+    Unsigned,
+    /// The reader's own policy is unusable.
+    BadPolicy,
 }
 
 impl WitnessPolicy {
@@ -281,6 +311,16 @@ impl WitnessPolicy {
 
     /// Decide whether to accept a cosigned checkpoint over one already held.
     pub fn accept(&self, held: Option<&Checkpoint>, offered: &Cosigned) -> Acceptance {
+        // A threshold of zero accepts anything, including something with no countersignatures
+        // and no authentication at all. That is not a policy a reader means to hold.
+        if self.threshold == 0 {
+            return Acceptance::BadPolicy;
+        }
+        // The reader checks the publisher's signature, not only the witnesses'. Witnesses that
+        // never ran `cosign` can still produce valid countersignatures over anything.
+        if !offered.publisher_signature_holds() {
+            return Acceptance::Unsigned;
+        }
         if let Some(h) = held {
             let c = &offered.checkpoint;
             if c.publisher != h.publisher
@@ -288,6 +328,15 @@ impl WitnessPolicy {
                 || (c.sequence == h.sequence && c.digest != h.digest)
             {
                 return Acceptance::NotForward;
+            }
+            // Advancing is not continuing. Without this, a publisher offers a fresh
+            // high-sequence checkpoint with no `prev` to witnesses who have never seen them,
+            // those witnesses honestly countersign because they have no prior state, and the
+            // reader moves onto a history sharing no ancestor with what it held. The witness
+            // enforces this and the reader did not, which is the same rule missing from the
+            // other side of the same exchange.
+            if c.sequence > h.sequence && c.prev != Some(h.id()) {
+                return Acceptance::NotAChain;
             }
         }
         let support = offered.support(&self.chosen);
@@ -555,7 +604,7 @@ mod tests {
         let sig = w.cosign(&ch_a[0].1).unwrap();
 
         let ch_b = chain(&b, &[5]);
-        let mut lifted = Cosigned::new(ch_b[0].0);
+        let mut lifted = Cosigned::new(&ch_b[0].1).unwrap();
         assert!(!lifted.attach(w.key(), sig));
     }
 
@@ -565,9 +614,9 @@ mod tests {
         let pubr = ident(1);
         let honest = ident(100);
         let forger = ident(101);
-        let c = chain(&pubr, &[1])[0].0;
-
-        let mut cos = Cosigned::new(c);
+        let built = chain(&pubr, &[1]);
+        let c = built[0].0;
+        let mut cos = Cosigned::new(&built[0].1).unwrap();
         assert!(!cos.attach(honest.key_bytes(), forger.sign(&c.signing_bytes())));
         assert_eq!(cos.witnesses().count(), 0);
     }
@@ -577,7 +626,7 @@ mod tests {
     fn signatures_from_unchosen_witnesses_do_not_count() {
         let pubr = ident(1);
         let ch = chain(&pubr, &[1]);
-        let mut cos = Cosigned::new(ch[0].0);
+        let mut cos = Cosigned::new(&ch[0].1).unwrap();
         let mine: Vec<Address> = (200..203u32).map(|i| ident(i).address()).collect();
 
         for i in 1_000..11_000u32 {
@@ -600,7 +649,7 @@ mod tests {
     fn a_duplicated_witness_counts_once() {
         let pubr = ident(1);
         let ch = chain(&pubr, &[1]);
-        let mut cos = Cosigned::new(ch[0].0);
+        let mut cos = Cosigned::new(&ch[0].1).unwrap();
         let mut w = Witness::new(ident(200));
         cos.attach(w.key(), w.cosign(&ch[0].1).unwrap());
 
@@ -619,7 +668,7 @@ mod tests {
     fn a_threshold_is_met_by_chosen_witnesses() {
         let pubr = ident(1);
         let ch = chain(&pubr, &[1]);
-        let mut cos = Cosigned::new(ch[0].0);
+        let mut cos = Cosigned::new(&ch[0].1).unwrap();
         let chosen: Vec<Address> = (200..204u32).map(|i| ident(i).address()).collect();
 
         for i in 200..202u32 {
@@ -645,7 +694,7 @@ mod tests {
         let newer = ch[3].0;
         let older = ch[1].0;
 
-        let mut cos = Cosigned::new(older);
+        let mut cos = Cosigned::new(&ch[1].1).unwrap();
         let chosen: Vec<Address> = (200..203u32).map(|i| ident(i).address()).collect();
         for i in 200..203u32 {
             let mut w = Witness::new(ident(i));
@@ -729,10 +778,106 @@ mod tests {
         let pubr = ident(1);
         let ch = chain(&pubr, &[1]);
         let chosen: Vec<Address> = (200..203u32).map(|i| ident(i).address()).collect();
-        let cos = Cosigned::new(ch[0].0);
+        let cos = Cosigned::new(&ch[0].1).unwrap();
         assert!(matches!(
             WitnessPolicy::new(chosen, 2).accept(None, &cos),
             Acceptance::Undersigned { support: 0, .. }
         ));
     }
+    /// A reader must verify the publisher's signature, not only the witnesses'.
+    ///
+    /// Captured witnesses never call `cosign`; they run whatever code they like and can
+    /// countersign anything. Verifying only on the witness side left the reader accepting, at
+    /// full threshold, a digest the publisher never made. That is substitution by witnesses,
+    /// which this module says cannot happen, and it survived the fix meant to remove it because
+    /// the fix was applied to one side of the exchange only.
+    #[test]
+    fn a_captured_witness_set_cannot_forge_a_checkpoint() {
+        let alice = ident(1);
+        let w1 = ident(500);
+        let w2 = ident(501);
+        let chosen = vec![w1.address(), w2.address(), ident(502).address()];
+        let policy = WitnessPolicy::new(chosen, 2);
+
+        // The adversary invents a checkpoint naming alice and signs it with its own key,
+        // because only the witness keys are theirs.
+        let forged = Checkpoint {
+            publisher: alice.address(),
+            sequence: 5,
+            digest: Cid::of(b"never published"),
+            prev: None,
+        };
+        let signed_by_adversary = forged.publish(&w1);
+        let cos = Cosigned::new(&signed_by_adversary).unwrap();
+
+        // The checkpoint that comes back names the adversary, because the publisher is taken
+        // from the verified signature and never from the payload. The adversary cannot even
+        // construct a Cosigned that claims to be alice's.
+        assert_ne!(cos.checkpoint.publisher, alice.address());
+        assert_eq!(cos.checkpoint.publisher, w1.address());
+
+        // Countersignatures over the adversary's own bytes still verify, so support is real,
+        // and the object is genuinely signed. What a reader gets is a checkpoint by w1, which
+        // is not a claim about alice at all.
+        let mut cos = cos;
+        assert!(cos.attach(w1.key_bytes(), w1.sign(&cos.checkpoint.signing_bytes())));
+        assert!(cos.attach(w2.key_bytes(), w2.sign(&cos.checkpoint.signing_bytes())));
+        assert_eq!(cos.support(&policy.chosen), 2);
+
+        // A reader tracking alice compares against what it holds for alice and sees a
+        // different publisher.
+        let alice_chain = chain(&alice, &[1]);
+        assert_eq!(
+            policy.accept(Some(&alice_chain[0].0), &cos),
+            Acceptance::NotForward,
+            "a checkpoint by somebody else was accepted as alice's"
+        );
+    }
+
+    /// A reader refuses a history that shares no ancestor with what it holds.
+    ///
+    /// The witness enforces the chain and the reader did not, so a publisher offering a fresh
+    /// high-sequence checkpoint to witnesses who had never seen them got honest
+    /// countersignatures and moved the reader onto a fabricated history.
+    #[test]
+    fn a_reader_refuses_a_higher_sequence_that_does_not_continue_its_chain() {
+        let alice = ident(1);
+        let real = chain(&alice, &[1, 2, 3]);
+        let held = real[2].0;
+
+        // A fresh history at a higher sequence, with no link back.
+        let fabricated = Checkpoint {
+            publisher: alice.address(),
+            sequence: 9,
+            digest: Cid::of(b"fabricated"),
+            prev: None,
+        };
+        let obj = fabricated.publish(&alice);
+        let mut cos = Cosigned::new(&obj).unwrap();
+
+        // Two honest witnesses that have never seen alice countersign it, correctly, because
+        // they have no prior state to contradict.
+        let chosen: Vec<Address> = (700..702u32).map(|i| ident(i).address()).collect();
+        for i in 700..702u32 {
+            let mut w = Witness::new(ident(i));
+            let sig = w.cosign(&obj).expect("a fresh witness has nothing to refuse");
+            cos.attach(w.key(), sig);
+        }
+        let policy = WitnessPolicy::new(chosen, 2);
+        assert_eq!(cos.support(&policy.chosen), 2);
+        assert_eq!(policy.accept(Some(&held), &cos), Acceptance::NotAChain);
+    }
+
+    /// A threshold of zero is not a policy.
+    #[test]
+    fn a_threshold_of_zero_is_refused_rather_than_satisfied() {
+        let pubr = ident(1);
+        let ch = chain(&pubr, &[1]);
+        let cos = Cosigned::new(&ch[0].1).unwrap();
+        assert_eq!(
+            WitnessPolicy::new(vec![], 0).accept(None, &cos),
+            Acceptance::BadPolicy
+        );
+    }
+
 }

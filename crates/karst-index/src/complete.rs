@@ -148,9 +148,38 @@ impl Census {
 }
 
 /// A reader's view of one publisher's completeness.
+///
+/// # A census on its own is unwitnessed
+///
+/// A census is signed and monotonic, and that is not enough. It has no back-link, so a
+/// publisher can keep two census histories on disjoint sequence numbers, serve one to each
+/// reader, and each reader's monitor accepts its own subsequence and reports `Complete`. Both
+/// readers then ask entirely honest witnesses about the publisher's **checkpoint**, are told it
+/// is accepted, and conclude the whole picture is sound.
+///
+/// It is not. Witnesses never see a census: `Checkpoint::from_object` refuses any object that
+/// is not a checkpoint, so a census cannot even be offered to one. The split view L8 exists to
+/// prevent was fully available on the exact object carrying the completeness claim.
+///
+/// So a census must be **bound into the checkpoint the witnesses do see**. `witnessed_digest`
+/// is what a publisher puts in a checkpoint, and `matches_witnessed` is what a reader checks
+/// before believing a census at all.
 #[derive(Debug, Clone, Default)]
 pub struct CensusMonitor {
     latest: Option<Census>,
+}
+
+/// What a checkpoint must commit to for a census to be witnessed.
+///
+/// A publisher computes this from the census object it published and puts it in the checkpoint
+/// digest. A reader recomputes it from the census object it holds and refuses to believe the
+/// census unless a countersigned checkpoint carries the same value.
+pub fn witnessed_digest(census_obj: &Object, state: &Cid) -> Cid {
+    let mut e = Enc::new();
+    e.str("karst.index.census.witnessed.v1")
+        .cid(&census_obj.cid())
+        .cid(state);
+    Cid::of(&e.finish())
 }
 
 impl CensusMonitor {
@@ -175,6 +204,22 @@ impl CensusMonitor {
 
     pub fn latest(&self) -> Option<&Census> {
         self.latest.as_ref()
+    }
+
+    /// Whether the census this monitor holds is the one a witnessed checkpoint covers.
+    ///
+    /// A reader that skips this is trusting a census no witness has ever seen, which is the
+    /// whole of the gap between the two mechanisms.
+    pub fn matches_witnessed(
+        &self,
+        census_obj: &Object,
+        state: &Cid,
+        witnessed: &Cid,
+    ) -> bool {
+        match &self.latest {
+            None => false,
+            Some(_) => witnessed_digest(census_obj, state) == *witnessed,
+        }
     }
 
     /// Compare a catalogue against what the publisher committed to.
@@ -430,4 +475,46 @@ mod tests {
             "claims were counted as announcements"
         );
     }
+    /// A census must be bound to the checkpoint witnesses actually see.
+    ///
+    /// Without this, a publisher keeps two census histories on disjoint sequence numbers and
+    /// serves one to each reader. Each monitor accepts its own subsequence and reports
+    /// Complete; each reader then asks honest witnesses about the checkpoint and is told it is
+    /// accepted. Witnesses never see a census at all, so nothing in the chain contradicts
+    /// anything, and a reader is told in green that they hold everything while a document
+    /// exists they have been told nothing about.
+    #[test]
+    fn a_census_is_only_believable_when_a_checkpoint_covers_it() {
+        let pubr = ident(1);
+        let state = Cid::of(b"state root");
+        let obj = Census::publish(&pubr, &targets(5), 100, 1_000, 1);
+        let mut m = CensusMonitor::new();
+        m.accept(Census::from_object(&obj).unwrap());
+
+        let witnessed = witnessed_digest(&obj, &state);
+        assert!(m.matches_witnessed(&obj, &state, &witnessed));
+
+        // A second census on a different sequence, which the monitor would otherwise accept
+        // and report on, is not the one the checkpoint covers.
+        let other = Census::publish(&pubr, &targets(9), 100, 1_000, 2);
+        assert!(
+            !m.matches_witnessed(&other, &state, &witnessed),
+            "a census the checkpoint does not cover was treated as witnessed"
+        );
+
+        // And a checkpoint over a different state does not vouch for this census either.
+        let elsewhere = witnessed_digest(&obj, &Cid::of(b"different state"));
+        assert!(!m.matches_witnessed(&obj, &state, &elsewhere));
+    }
+
+    /// A reader holding no census must not be able to claim one is witnessed.
+    #[test]
+    fn no_census_is_never_witnessed() {
+        let pubr = ident(1);
+        let obj = Census::publish(&pubr, &targets(1), 0, 10, 1);
+        let m = CensusMonitor::new();
+        let d = witnessed_digest(&obj, &Cid::of(b"s"));
+        assert!(!m.matches_witnessed(&obj, &Cid::of(b"s"), &d));
+    }
+
 }
