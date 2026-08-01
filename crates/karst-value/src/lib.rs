@@ -387,16 +387,41 @@ mod tests {
         w.assemble(set, &partials)
     }
 
+    /// Sub-threshold partials must not produce a usable credential, not merely an error.
+    ///
+    /// The previous version asserted on the error's own `got` and `need` counters, which are
+    /// computed from the length of the slice passed in. That holds however the cryptography
+    /// behaves: a `combine` that reconstructed the secret from two of three partials would
+    /// still have produced `BelowThreshold` from the arithmetic, because the count check runs
+    /// first and never reaches the material.
     #[test]
-    fn a_threshold_of_issuers_can_mint_and_fewer_cannot() {
+    fn sub_threshold_partials_do_not_reconstruct_a_usable_credential() {
         let set = IssuerSet::new(3, 5, 1);
         let mut w = Wallet::new(9);
+        let good = issue(&set, &mut w, &[0, 1, 2]).expect("a threshold subset must mint");
 
-        assert!(issue(&set, &mut w, &[0, 1, 2]).is_ok());
+        // The count check, kept because it is the caller-facing behaviour.
+        let mut w2 = Wallet::new(9);
         assert_eq!(
-            issue(&set, &mut w, &[0, 1]),
+            issue(&set, &mut w2, &[0, 1]),
             Err(ValueError::BelowThreshold { got: 2, need: 3 })
         );
+
+        // And the property underneath it, which the count check never reaches: fewer than a
+        // threshold of shares do not reconstruct the secret.
+        let secret = 0x0123_4567_89ab_cdefu128;
+        let shares = shamir::split(secret, 3, 5, 1);
+        assert_eq!(
+            shamir::combine(&shares[..3]),
+            Some(secret),
+            "a threshold must recombine, or the negative below is vacuous"
+        );
+        assert_ne!(
+            shamir::combine(&shares[..2]),
+            Some(secret),
+            "two shares reconstructed what three are supposed to"
+        );
+        let _ = good;
     }
 
     #[test]
