@@ -35,7 +35,7 @@ list of everything the design makes worse.
 > [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 446 tests
+cargo test          # 458 tests
 cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-index --bin karst-search    # discovery with 200,000 sybils in the room
 cargo run --release -p karst-stack --bin karst-stack-demo  # the whole stack, composed
@@ -51,6 +51,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`karst-object`](crates/karst-object) | L6 Objects | Canonical encoding, signed immutable objects, offline verification. |
 | [`karst-blob`](crates/karst-blob) | L6/L7 Files | Chunked merkle manifests, automatic dedup, verified seeking, measured swarm delivery. |
 | [`karst-doc`](crates/karst-doc) | L10 Document | A typed content-addressed node graph. Not a markup language. |
+| [`karst-witness`](crates/karst-witness) | L8 Witness | Countersigning that a publisher only moved forward. A witness can refuse and cannot lie. |
 | [`karst-cap`](crates/karst-cap) | L9 Authority | Capability chains that can only ever narrow, verifiable with no directory. |
 | [`karst-attest`](crates/karst-attest) | L13.1 | Human or machine authorship, declared and where possible verified. |
 | [`karst-agency`](crates/karst-agency) | L12 Agency | A document requests a rendering, the client decides, and the fetch pattern says nothing. |

@@ -520,7 +520,8 @@ of delay. There is no third option and we should stop looking for one.
 
 ### L8 Witness
 
-*Fixes error 03. Status: sketched.*
+*Fixes error 03. Status: **built** (`karst-witness`); countersigning and equivocation evidence
+implemented, distribution of checkpoints unbuilt.*
 
 **Lever removed.** A root store of a few hundred certificate authorities across a few dozen
 jurisdictions, any one of which can sign anything.
@@ -535,6 +536,32 @@ hardcoded key list in source is a root store by another name.
 transparency logs the operator chooses, vouched for by parties they choose. This is
 Certificate Transparency generalised past certificates. Two deployments may share no trust
 roots at all and still interoperate at every layer below this one.
+
+**What witnessing is for.** L15's census catches somebody between a publisher and a reader
+dropping entries. It does not catch a publisher, or a colluding replica set, showing one reader
+one consistent history and another a different one: both readers see a signed, current,
+internally consistent view with nothing to compare against. Comparing across replicas does not
+help, because a jointly stale set agrees with itself.
+
+A witness countersigns a checkpoint **only if it extends what that witness has already seen**,
+so producing a split view requires corrupting witnesses rather than fooling a reader. This is
+the direction Certificate Transparency moved after client-to-client gossip failed to deploy
+(Syta et al., *Keeping Authorities Honest or Bust*, IEEE S&P 2016).
+
+**A witness can refuse and cannot lie.** It never originates a statement; it countersigns a
+publisher's own signed checkpoint or declines. So witnesses add parties who can **withhold** and
+none who can **substitute**, which is the same shape as adding replicas at L7 and the reason
+both are cheap to add. A captured witness set can stall and cannot forge.
+
+What a witness can do is sign two conflicting checkpoints at one sequence, and that is not
+deniable: the two signatures are portable evidence, verifiable by anyone, naming the witness.
+Equivocation is expensive rather than quiet.
+
+**Witness sets belong to readers.** A single global set is exactly the privileged set L16 exists
+to prevent, and a captured one captures everything at once. A reader chooses their own witnesses
+and threshold, as they already choose trust weights at L15 and replicas at L7. Countersignatures
+from witnesses a reader did not choose count for nothing, which is what stops ten thousand
+minted identities from satisfying a threshold of three.
 
 **Honest assessment.** There being no default means there is no safe out of the box
 configuration, which means most people will use whatever their client ships with, which

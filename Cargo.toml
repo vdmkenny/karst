@@ -16,6 +16,7 @@ members = [
     "crates/karst-wire",
     "crates/karst-symmetry",
     "crates/karst-value",
+    "crates/karst-witness",
     "crates/karst-fuzz",
     "crates/karst-attest",
     "crates/karst-afford",
@@ -52,6 +53,7 @@ karst-seal = { path = "crates/karst-seal" }
 karst-wire = { path = "crates/karst-wire" }
 karst-symmetry = { path = "crates/karst-symmetry" }
 karst-value = { path = "crates/karst-value" }
+karst-witness = { path = "crates/karst-witness" }
 karst-attest = { path = "crates/karst-attest" }
 karst-afford = { path = "crates/karst-afford" }
 karst-thread = { path = "crates/karst-thread" }
