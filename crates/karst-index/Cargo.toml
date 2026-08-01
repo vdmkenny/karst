@@ -12,3 +12,7 @@ karst-object.workspace = true
 [[bin]]
 name = "karst-search"
 path = "src/bin/karst-search.rs"
+
+[[bin]]
+name = "karst-indexscale"
+path = "src/bin/karst-indexscale.rs"

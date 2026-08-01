@@ -96,6 +96,21 @@ impl Trust {
     }
 }
 
+/// What a search cost, in statements examined.
+///
+/// Exposed because the alternative way to check that ranking has not become quadratic is to
+/// time it, and a timing assertion is flaky enough that it gets deleted the first time CI is
+/// busy. Work is countable, so it is counted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct SearchCost {
+    /// Objects that matched at least one query term.
+    pub candidates: usize,
+    /// Statements read while ranking them.
+    pub examined: usize,
+    /// Results dropped because the reader asked for fewer than were found.
+    pub truncated: usize,
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Ranked {
     pub target: Cid,
@@ -119,10 +134,39 @@ impl Ranker {
 
     /// Rank everything in the catalogue matching `query`, best first.
     pub fn search(&self, cat: &Catalogue, query: &[String]) -> Vec<Ranked> {
+        self.search_counted(cat, query).0
+    }
+
+    /// Rank the best `k`, and say how many were dropped.
+    ///
+    /// A query on a common term matches a large fraction of the catalogue, and ranking that
+    /// many results is linear in the catalogue however good the index is. Li, Loo, Hellerstein,
+    /// Kaashoek, Karger and Morris (IPTPS 2003) established that a decentralised index becomes
+    /// feasible only by giving up either ranking quality or decentralisation; **this is the
+    /// first trade, taken deliberately.** The truncation is reported rather than silent, so a
+    /// reader is never told "these are the results" when it means "these are some of them".
+    pub fn search_top(
+        &self,
+        cat: &Catalogue,
+        query: &[String],
+        k: usize,
+    ) -> (Vec<Ranked>, SearchCost) {
+        let (mut out, mut cost) = self.search_counted(cat, query);
+        if out.len() > k {
+            cost.truncated = out.len() - k;
+            out.truncate(k);
+        }
+        (out, cost)
+    }
+
+    /// Rank, and report what it cost.
+    pub fn search_counted(&self, cat: &Catalogue, query: &[String]) -> (Vec<Ranked>, SearchCost) {
         let q: Vec<String> = query.iter().map(|s| normalise(s)).collect();
         let mut out = Vec::new();
+        let mut cost = SearchCost::default();
 
         for target in cat.candidates(&q) {
+            cost.candidates += 1;
             let mut score = 0.0;
             let mut trusted_support = 0;
             let mut trusted_disputes = 0;
@@ -130,7 +174,8 @@ impl Ranker {
 
             // The author's own announcement establishes that the object exists and claims
             // terms. It is worth the reader's weight for that author and nothing more.
-            for a in cat.announcements().filter(|a| a.target == target) {
+            for a in cat.announcements_about(&target) {
+                cost.examined += 1;
                 let hits = a.matches(&q);
                 if hits == 0 {
                     continue;
@@ -146,6 +191,7 @@ impl Ranker {
             }
 
             for c in cat.claims_about(&target) {
+                cost.examined += 1;
                 let sign = match c.verdict {
                     Verdict::Commend => 1.0,
                     Verdict::Corroborate => 0.5,
@@ -185,7 +231,7 @@ impl Ranker {
                 // depend on the order statements happened to arrive in.
                 .then_with(|| a.target.cmp(&b.target))
         });
-        out
+        (out, cost)
     }
 }
 
@@ -426,6 +472,132 @@ mod tests {
             r[0].target, target,
             "the entry was evicted after the reader chose to trust its source"
         );
+    }
+
+    /// A rare query must cost what its results cost, not what the catalogue costs.
+    ///
+    /// This is the regression test for the defect that every other test in this crate missed.
+    /// Ranking originally scanned the whole catalogue once per candidate, which is quadratic
+    /// for any query whose terms are common: 21.7 seconds for one query over 64,000 objects,
+    /// growing 37x per 4x growth in corpus. Twenty-one passing tests did not see it, because
+    /// every one of them used a catalogue small enough for quadratic to look instant.
+    ///
+    /// Reynolds and Vahdat reported sub-kilobyte queries for peer-to-peer keyword search at
+    /// 100,000 documents; Li et al. measured the same approach at 530 MB per query over three
+    /// billion. **Small-corpus evaluation of a decentralised index is worthless**, so this
+    /// asserts on work performed rather than on a clock, which would be flaky and get deleted.
+    #[test]
+    fn a_rare_query_does_not_pay_for_the_whole_catalogue() {
+        let trust = Trust::new();
+        let mut small = Catalogue::new().with_untrusted_capacity(1 << 20);
+        let mut large = Catalogue::new().with_untrusted_capacity(1 << 20);
+
+        for (cat, n) in [(&mut small, 200u32), (&mut large, 40_000u32)] {
+            for i in 0..n {
+                let mut b = [0u8; 32];
+                b[..4].copy_from_slice(&i.to_le_bytes());
+                cat.announce(
+                    Announcement::new(
+                        Cid::of(&b),
+                        Address::from_raw(b),
+                        "doc",
+                        &terms(&["common"]),
+                        0,
+                    )
+                    .unwrap(),
+                    &trust,
+                );
+            }
+            // One object, and only one, carries the rare term.
+            cat.announce(
+                Announcement::new(Cid::of(b"needle"), addr(7), "doc", &terms(&["rare"]), 0)
+                    .unwrap(),
+                &trust,
+            );
+        }
+
+        let r = Ranker::new(Trust::new());
+        let (_, small_cost) = r.search_counted(&small, &terms(&["rare"]));
+        let (hits, large_cost) = r.search_counted(&large, &terms(&["rare"]));
+
+        assert_eq!(hits.len(), 1);
+        assert_eq!(small_cost.candidates, 1);
+        assert_eq!(large_cost.candidates, 1);
+        assert_eq!(
+            large_cost.examined, small_cost.examined,
+            "a 200x larger catalogue changed the cost of a one-result query: {} vs {}",
+            large_cost.examined, small_cost.examined
+        );
+    }
+
+    /// Ranking a common query must be linear in what matched, not quadratic in the catalogue.
+    #[test]
+    fn a_common_query_costs_what_it_matches_and_no_more() {
+        let trust = Trust::new();
+        let mut cat = Catalogue::new().with_untrusted_capacity(1 << 20);
+        let n = 20_000u32;
+        for i in 0..n {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&i.to_le_bytes());
+            cat.announce(
+                Announcement::new(Cid::of(&b), Address::from_raw(b), "doc", &terms(&["the"]), 0)
+                    .unwrap(),
+                &trust,
+            );
+        }
+        let (hits, cost) = Ranker::new(Trust::new()).search_counted(&cat, &terms(&["the"]));
+        assert_eq!(hits.len(), n as usize);
+        assert_eq!(
+            cost.examined, n as usize,
+            "examined {} statements to rank {} results",
+            cost.examined, n
+        );
+    }
+
+    /// Truncation must be reported, never silent.
+    ///
+    /// A reader told "these are the results" when it means "these are some of them" cannot
+    /// tell a sparse topic from a truncated one, and that difference is exactly what an
+    /// adversary suppressing entries wants to be invisible.
+    #[test]
+    fn asking_for_fewer_results_says_how_many_were_dropped() {
+        let trust = Trust::new();
+        let mut cat = Catalogue::new().with_untrusted_capacity(1 << 20);
+        for i in 0..500u32 {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&i.to_le_bytes());
+            cat.announce(
+                Announcement::new(Cid::of(&b), Address::from_raw(b), "doc", &terms(&["t"]), 0)
+                    .unwrap(),
+                &trust,
+            );
+        }
+        let r = Ranker::new(Trust::new());
+        let (hits, cost) = r.search_top(&cat, &terms(&["t"]), 10);
+        assert_eq!(hits.len(), 10);
+        assert_eq!(cost.truncated, 490);
+
+        // Asking for more than exists truncates nothing and says so.
+        let (all, cost) = r.search_top(&cat, &terms(&["t"]), 10_000);
+        assert_eq!(all.len(), 500);
+        assert_eq!(cost.truncated, 0);
+    }
+
+    /// Truncation must keep the best, not an arbitrary slice.
+    #[test]
+    fn truncation_keeps_the_highest_ranked() {
+        let mut cat = Catalogue::new();
+        let favourite = Cid::of(b"the one i want");
+        let chosen = addr(1);
+        let mut t = Trust::new();
+        t.set(chosen, 1.0);
+        announce_as(&mut cat, favourite, chosen, &["t"], &t);
+        for i in 0..300u32 {
+            announce_as(&mut cat, Cid::of(&i.to_le_bytes()), addr(500 + i), &["t"], &t);
+        }
+        let (hits, cost) = Ranker::new(t).search_top(&cat, &terms(&["t"]), 3);
+        assert_eq!(hits[0].target, favourite);
+        assert!(cost.truncated > 0);
     }
 
 }
