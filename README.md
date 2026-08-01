@@ -122,6 +122,20 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 6. **Attack it, do not exercise it.** Tests that confirm a thing works find fewer defects than
    tests that ask what an adversary with a stated capability does. Four defects in this repo
    were found the second way and none of them by the first.
+7. **A test must be able to fail.** Naming a security property is not testing it. Four tests
+   here asserted properties they were structurally incapable of detecting, and each passed
+   from the day it was written:
+   - one varied a parameter the function under test did not take;
+   - one flipped a byte to `0x41` when only `0x02` mattered;
+   - one compared a slice to itself;
+   - one exercised only the case where the adversary does nothing.
+
+   So a test that claims an adversary cannot do X must contain the input where the adversary
+   tries hardest, and a test asserting something is absent must first show it could have been
+   present. Where that is not obvious, the test says how it could fail.
+8. **Fix both sides.** A rule enforced where an object is produced and not where it is consumed
+   is not enforced. Three defects here were rules present in the writer and missing in the
+   reader, twice in code whose earlier half had been fixed hours before.
 
 ## What this costs
 
