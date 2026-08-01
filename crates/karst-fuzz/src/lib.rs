@@ -154,7 +154,7 @@ pub fn valid_corpus() -> Vec<(Target, Vec<u8>)> {
         Run::strong("bold"),
         Run::link("linked", cid),
         Run { text: "s".into(), emphasis: Emphasis::Stress, link: None },
-        Run { text: "l".into(), emphasis: Emphasis::Literal, link: Some(cid) },
+        Run { text: "l".into(), emphasis: Emphasis::Literal, link: Some(karst_doc::Link::Pinned(cid)) },
     ] {
         let mut e = Enc::new();
         r.encode(&mut e);
