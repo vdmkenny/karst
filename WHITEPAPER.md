@@ -267,7 +267,7 @@ every petname layer in recorded history has recentralised into a registry.
 
 ### L3 Wire
 
-*Fixes error 03. Status: sketched.*
+*Fixes error 03. Status: **built** (`karst-wire`).*
 
 **Lever removed.** Anything with a recognisable handshake, which today means everything.
 
@@ -289,8 +289,9 @@ some are.
 
 ### L4 Mixing
 
-*Fixes error 02. Status: **Sphinx packet format and four adversary simulators built**
-(`karst-mix`); network unbuilt.*
+*Fixes error 02. Status: **built and running** (`karst-mix`, `karst-node`, `karst-net`). Sphinx
+packets, four adversary simulators, a mix node with a defended clock and delay queue, and a
+network on real sockets carrying messages between clients with loop-cover drop detection.*
 
 **Adversary.** B, the global passive adversary. This layer exists to defeat the attack
 onion routing declines to attempt.
@@ -488,7 +489,8 @@ inputs, 13,006 decode and every one re-encodes to itself.
 
 ### L7 Streams
 
-*Fixes errors 01 and 04. Status: **built** in structure (`karst-blob`), live append unbuilt.*
+*Fixes errors 01 and 04. Status: **built** in structure (`karst-blob`), carriage and exposure
+accounting built (`karst-net::bulk`), live append and a bulk transport unbuilt.*
 
 **Lever removed.** The delivery network, and the interconnect deals only large publishers
 can strike.
@@ -799,7 +801,8 @@ Full treatment in [`docs/10-versioning-and-permanence.md`](docs/10-versioning-an
 
 ### L14 Value
 
-*Fixes errors 02 and 03. Status: **built** (`karst-value`); threshold issuance and the earn/spend loop implemented, blind signature not.*
+*Fixes errors 02 and 03. Status: **built** (`karst-value`); threshold issuance, the earn/spend
+loop and RSA blind signatures implemented.*
 
 **Lever removed.** Payment processors, and the de-banking that runs through them.
 
