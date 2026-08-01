@@ -18,17 +18,53 @@
 //! otherwise would turn ordinary propagation delay into an accusation. What distinguishes them
 //! is **persistence**: a replica that never catches up across many rounds is not lagging.
 //!
-//! # The limit this cannot cross
+//! # This is a quorum read, not fork detection, and that matters
 //!
-//! One reader comparing `k` providers detects disagreement **among those `k`**. If all of them
-//! show that reader the same incomplete view, the reader sees perfect agreement and learns
-//! nothing. Catching that requires comparing against what *other readers* were shown, which
-//! means a channel between readers.
+//! Detecting a single untrusted server that shows different clients different content is hard
+//! in a way that is proved rather than merely observed. Mazières and Shasha (*Building secure
+//! file systems out of Byzantine storage*, PODC 2002) define fork consistency and state the
+//! limit in their own abstract: immediate unconditional detection "is unfortunately not
+//! achievable", and what fork consistency buys is that a server which lies to one client must
+//! **permanently partition** it from another, "a failure easily detectable with on-line
+//! communication". The detection channel is out of band, client to client. Cachin, Shelat and
+//! Shraer (PODC 2007) then prove the cost: fork-linearizability forces an operation to block on
+//! another client taking a step **even when the server is correct**.
 //!
-//! This is the same wall Certificate Transparency hit: a log can show different clients
-//! different trees, and the answer is gossip between clients rather than anything a lone client
-//! can do. Stating it plainly matters because the mechanism here looks like it detects
-//! withholding and only detects *disagreement about* withholding.
+//! None of that binds here, because the hardness comes from there being **one** server. With
+//! `k` providers a single reader gets `k` independent views by itself, so comparing them is a
+//! **Byzantine quorum read** (Malkhi and Reiter, *Byzantine quorum systems*, Distributed
+//! Computing 11, 1998) rather than fork detection, and it needs no other reader.
+//!
+//! So the claim that holds is stronger than it first appears:
+//!
+//! > A reader who queries **every** replica detects withholding by any **minority** of them,
+//! > with no coordination and no gossip.
+//!
+//! # Where it does stop
+//!
+//! Two cases, and both must be named or the stronger claim above becomes a lie.
+//!
+//! **A reader who queries fewer than all `k`** has no quorum and learns only that whoever they
+//! asked agreed. Querying one replica is exactly the single-server case the impossibility
+//! results are about.
+//!
+//! **Staleness rather than divergence.** If every replica serves the same old but internally
+//! consistent state, the reader sees perfect agreement. This is not detectable by comparison
+//! at all, because there is nothing to compare against; it needs a trusted clock or another
+//! party's view. `karst-object::freshness` is the mechanism for that and is not wired here.
+//!
+//! # And the empirical record on the fallback
+//!
+//! The usual answer to the second case is gossip between readers. Certificate Transparency has
+//! the identical problem and its gossip specification (`draft-ietf-trans-gossip`) **expired
+//! without becoming an RFC**, with measured adoption of the feedback endpoints at **0.015% of
+//! domains** (Gasser, Hof, Helm, Korczynski, Holz, Carle, PAM 2018). What actually shipped in
+//! Chrome is sampled reporting to Google, which is centralised auditing by a party that also
+//! operates logs. The current direction is **witness cosigning**, where independent witnesses
+//! countersign checkpoints only if they extend what they have already seen (Syta et al.,
+//! *Keeping Authorities Honest or Bust with Decentralized Witness Cosigning*, IEEE S&P 2016).
+//!
+//! A design whose detection story rests on readers gossiping should expect readers not to.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -130,10 +166,20 @@ impl FeedWatch {
 
     /// Whether every provider asked has shown the same set.
     ///
-    /// Agreement is not evidence of completeness. It is evidence that whoever is withholding
-    /// is withholding consistently, which a colluding replica set does by definition.
+    /// Agreement across a **full** replica set means no minority is withholding. Agreement
+    /// across a subset means only that the subset agrees, and agreement across all of them
+    /// still says nothing about whether they are jointly serving a stale state.
     pub fn agreed(&self) -> bool {
         self.lagging().is_empty()
+    }
+
+    /// How many replicas this reader has actually heard from.
+    ///
+    /// Exposed because every guarantee here is conditional on it. A reader comparing a subset
+    /// has no quorum, and a reader who does not know how many replicas exist cannot tell
+    /// whether they have one.
+    pub fn heard_from(&self) -> usize {
+        self.by_provider.len()
     }
 }
 
@@ -230,10 +276,10 @@ mod tests {
 
     /// Agreement across every replica must not be mistaken for completeness.
     ///
-    /// A colluding replica set shows one reader a consistent, incomplete view, and this
-    /// mechanism reports perfect agreement. Catching that needs comparison against what other
-    /// readers were shown, which needs a channel between readers, which is not built. The test
-    /// exists so the limit is written down where the mechanism is, rather than only in prose.
+    /// This is the staleness case rather than the divergence case: every replica serves the
+    /// same old but internally consistent state, so there is nothing to compare against and
+    /// the quorum read reports perfect health. It needs a trusted clock or another party's
+    /// view, and the test exists so the limit sits where the mechanism does.
     #[test]
     fn a_colluding_replica_set_looks_exactly_like_a_healthy_one() {
         let mut honest = FeedWatch::new();
@@ -273,4 +319,50 @@ mod tests {
         w.end_round(&[1, 2]);
         assert!(w.agreed());
     }
+    /// Querying a subset is the single-server case, and must not look like a quorum.
+    ///
+    /// Everything this offers is conditional on having asked every replica. A reader who asks
+    /// one and sees agreement has learned that one replica agrees with itself.
+    #[test]
+    fn agreement_among_a_subset_is_not_agreement() {
+        let mut w = FeedWatch::new();
+        // Three replicas exist. This reader only ever asks one, which withholds two objects.
+        for c in 0..3u8 {
+            w.record(1, cid(c));
+        }
+        for _ in 0..20 {
+            w.end_round(&[1]);
+        }
+        assert!(w.agreed(), "one replica always agrees with itself");
+        assert_eq!(
+            w.heard_from(),
+            1,
+            "a caller must be able to see that agreement rested on one view"
+        );
+    }
+
+    /// Asking the full set turns the same withholding into a detection.
+    #[test]
+    fn asking_the_full_set_catches_what_asking_one_missed() {
+        let mut w = FeedWatch::new();
+        for c in 0..3u8 {
+            w.record(1, cid(c));
+            w.record(2, cid(c));
+            w.record(3, cid(c));
+        }
+        // Two honest replicas serve more; the third does not.
+        for c in 3..6u8 {
+            w.record(2, cid(c));
+            w.record(3, cid(c));
+        }
+        for _ in 0..6 {
+            w.end_round(&[1, 2, 3]);
+        }
+        assert_eq!(w.heard_from(), 3);
+        assert!(!w.agreed());
+        let behind = w.persistently_behind(5);
+        assert_eq!(behind.len(), 1);
+        assert_eq!(behind[0].provider, 1);
+    }
+
 }

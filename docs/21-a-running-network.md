@@ -290,8 +290,8 @@ probabilistic one; it does not eliminate it.** The residue is handled by loop co
   silenced by anyone able to drop its loops. The alarm currently reports and nothing acts on it.
 - **Guards.** Selection is uniform within a layer. Whether persistent entry guards are right
   here is open, and guard placement attacks defeat Counter-RAPTOR, DeNASA and LASTor, with
-  0.216% of bandwidth reaching 18.22% of guard selections (Hanley, Sun, Wagh, Mittal, PoPETs
-  2019).
+  0.216% of bandwidth reaching 18.22% of guard selections (Wan, Johnson, Wails, Wagh, Mittal,
+  PoPETs 2019(4)).
 - **A ratchet**, **PIR for collection**, and **capability-gated deposit**, all named above.
 
 ---
@@ -313,4 +313,7 @@ probabilistic one; it does not eliminate it.** The residue is handled by loop co
 - Degabriele, Lehmann, Paterson, Smart, Strefler. *On the Joint Security of Encryption and
   Signature Schemes.* CT-RSA 2011.
 - Barnes, Bhargavan, Lipp, Wood. *Hybrid Public Key Encryption.* RFC 9180.
-- Hanley, Sun, Wagh, Mittal. *DPSelect / guard placement attacks.* PoPETs 2019.
+- Wan, Johnson, Wails, Wagh, Mittal. *Guard Placement Attacks on Path Selection Algorithms for
+  Tor.* PoPETs 2019(4):272-291.
+- Hanley, Sun, Wagh, Mittal. *DPSelect: A Differential Privacy Based Guard Relay Selection
+  Algorithm for Tor.* PoPETs 2019(2):166-186. The defence, not the attack.
