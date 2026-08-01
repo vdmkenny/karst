@@ -50,8 +50,10 @@ use karst_object::{Cid, Dec, Enc, Object, ObjectError};
 pub const ANNOUNCE_KIND: &str = "karst.index.announce.v1";
 pub const CLAIM_KIND: &str = "karst.index.claim.v1";
 
+pub mod complete;
 pub mod rank;
 
+pub use complete::{Census, CensusMonitor, Completeness};
 pub use rank::{Ranked, Ranker, Trust};
 
 /// The most terms one statement may carry.
