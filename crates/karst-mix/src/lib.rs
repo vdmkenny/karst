@@ -35,6 +35,7 @@
 //! and nowhere near sufficient.
 
 pub mod active;
+pub mod clock;
 pub mod exposure;
 pub mod frontier;
 pub mod intersection;

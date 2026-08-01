@@ -74,6 +74,14 @@ pub const PAYLOAD_BYTES: usize = PACKET_BYTES - ALPHA_BYTES - MAC_BYTES - HEADER
 
 const FLAG_FORWARD: u8 = 1;
 const FLAG_DELIVER: u8 = 2;
+/// Terminates here and is discarded.
+///
+/// Cover traffic needs somewhere to end that is not an application. Without this a cover
+/// packet delivers an empty payload upward and every layer above has to know to ignore it,
+/// which is the kind of shared secret that eventually gets forgotten in one place. The flag
+/// sits inside the encrypted routing block, so only the hop where the packet dies learns it
+/// was cover; every earlier hop forwards it indistinguishably from a real packet.
+const FLAG_DROP: u8 = 3;
 
 // ---------------------------------------------------------------- primitives
 
@@ -196,6 +204,8 @@ pub enum Peeled {
         delay_ms: u32,
         packet: Packet,
     },
+    /// Cover traffic, which ends here.
+    Drop { delay_ms: u32 },
     Deliver {
         delay_ms: u32,
         payload: Vec<u8>,
@@ -253,6 +263,17 @@ pub struct Hop {
     pub id: u16,
     pub public: PublicKey,
     pub delay_ms: u32,
+}
+
+/// Redacted on purpose.
+///
+/// A route is the one thing a sender must never leak, and a route printed into a log or an
+/// error message is a route an adversary can read without breaking anything. The delay is
+/// withheld for the same reason: per-hop delays are what an observer needs to correlate.
+impl core::fmt::Debug for Hop {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Hop(redacted)")
+    }
 }
 
 #[derive(Clone, PartialEq, Eq)]
@@ -363,8 +384,15 @@ fn routing_block(flag: u8, next: u16, delay_ms: u32) -> [u8; ROUTING_BYTES] {
 
 impl Packet {
     /// Derive the per-hop shared secrets the sender needs, and the element each hop sees.
+    /// Derive the per-hop shared secrets and the ephemeral public keys that accompany them.
+    ///
+    /// The seed is hashed rather than used as a scalar directly. X25519 clamps a scalar by
+    /// clearing its low three bits and forcing bit 254, so eight distinct seeds map to one
+    /// key. A caller deriving seeds from a counter would then emit byte-identical packets,
+    /// which every node on the route drops as replays, losing the message with no error at
+    /// send time. Hashing makes the seed space genuinely 2^256 as its type implies.
     fn derive_path(route: &[Hop], seed: [u8; 32]) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
-        let mut eph = StaticSecret::from(seed);
+        let mut eph = StaticSecret::from(subkey(&seed, "eph"));
         let mut alpha = PublicKey::from(&eph).to_bytes();
         let mut secrets = Vec::with_capacity(route.len());
         let mut alphas = Vec::with_capacity(route.len());
@@ -398,7 +426,25 @@ impl Packet {
     }
 
     /// Wrap a message for a route. Delays are chosen by the sender, per Loopix.
+    /// Build a cover packet: routed exactly like a real one, discarded where it ends.
+    ///
+    /// Indistinguishable from a real packet at every hop before the last, because it is one.
+    /// The payload is pseudorandom rather than zeroed, so a compromised terminal hop learns
+    /// only the flag and not that the sender was economising.
+    pub fn cover(route: &[Hop], seed: [u8; 32]) -> Result<Packet, MixError> {
+        Self::build_inner(route, &[], seed, FLAG_DROP)
+    }
+
     pub fn wrap(route: &[Hop], message: &[u8], seed: [u8; 32]) -> Result<Packet, MixError> {
+        Self::build_inner(route, message, seed, FLAG_DELIVER)
+    }
+
+    fn build_inner(
+        route: &[Hop],
+        message: &[u8],
+        seed: [u8; 32],
+        terminal: u8,
+    ) -> Result<Packet, MixError> {
         let n = route.len();
         if n == 0 || n > MAX_HOPS {
             return Err(MixError::BadRoute);
@@ -425,7 +471,7 @@ impl Packet {
         let last_len = HEADER_BYTES - phi.len();
 
         let mut beta = vec![0u8; last_len];
-        beta[..ROUTING_BYTES].copy_from_slice(&routing_block(FLAG_DELIVER, 0, route[n - 1].delay_ms));
+        beta[..ROUTING_BYTES].copy_from_slice(&routing_block(terminal, 0, route[n - 1].delay_ms));
         // The next-MAC slot is zero at the final hop, and the remainder is deterministic
         // padding so the header carries no structure a hop could read.
         let tail_pad = stream(&secrets[n - 1], "hpad", last_len - BLOCK);
@@ -494,6 +540,7 @@ impl Packet {
         let delay_ms = u32::from_le_bytes([padded[3], padded[4], padded[5], padded[6]]);
 
         match flag {
+            FLAG_DROP => Ok(Peeled::Drop { delay_ms }),
             FLAG_DELIVER => {
                 let len = u32::from_le_bytes(self.delta[..4].try_into().unwrap()) as usize;
                 if len + 4 > PAYLOAD_BYTES {
@@ -537,6 +584,33 @@ impl Packet {
         v.extend_from_slice(&self.beta);
         v.extend_from_slice(&self.delta);
         v
+    }
+
+    /// Read a packet off the wire.
+    ///
+    /// Structural only: it checks that the right number of bytes are present and does no
+    /// cryptography. Nothing here can distinguish a genuine packet from random bytes, and
+    /// nothing here should try, because `peel` is where authentication belongs and doing any
+    /// of it earlier would create a cheaper oracle than `peel` offers.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Packet> {
+        if bytes.len() != PACKET_BYTES {
+            return None;
+        }
+        let mut alpha = [0u8; ALPHA_BYTES];
+        let mut gamma = [0u8; MAC_BYTES];
+        let mut beta = [0u8; HEADER_BYTES];
+        let (a, rest) = bytes.split_at(ALPHA_BYTES);
+        let (g, rest) = rest.split_at(MAC_BYTES);
+        let (b, d) = rest.split_at(HEADER_BYTES);
+        alpha.copy_from_slice(a);
+        gamma.copy_from_slice(g);
+        beta.copy_from_slice(b);
+        Some(Packet {
+            alpha,
+            gamma,
+            beta,
+            delta: d.to_vec(),
+        })
     }
 
     /// Flip one bit of the payload, as an attacker on the wire would.
@@ -586,6 +660,7 @@ mod tests {
                     cur = packet;
                 }
                 Peeled::Deliver { payload, .. } => return Ok(payload),
+                Peeled::Drop { .. } => return Err(MixError::Malformed),
             }
         }
         Err(MixError::Malformed)
@@ -954,4 +1029,115 @@ mod adversarial {
         // And a genuine packet still gets through afterwards.
         assert!(p.peel(&ks[0], &mut seen).is_ok());
     }
+    /// Seeds that differ at all must produce packets that differ.
+    ///
+    /// X25519 clamping discards three bits of a scalar. Using a seed as a scalar directly
+    /// therefore collapses eight seeds onto one key, and two sends with counter-derived seeds
+    /// produce the same packet, which is dropped as a replay. The message is lost and the
+    /// sender is told nothing.
+    #[test]
+    fn adjacent_seeds_produce_distinct_packets() {
+        let k = MixKey::from_seed([3u8; 32]);
+        let route = vec![Hop {
+            id: 0,
+            public: k.public(),
+            delay_ms: 1,
+        }];
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 0..64u8 {
+            let mut seed = [0u8; 32];
+            seed[0] = i;
+            let p = Packet::wrap(&route, b"m", seed).unwrap();
+            assert!(seen.insert(p.to_bytes()), "seed {i} collided with an earlier one");
+        }
+    }
+
+    /// A cover packet must be indistinguishable from a real one at every hop before the last.
+    ///
+    /// If an intermediate hop could tell cover from real, cover would be worthless: an
+    /// adversary running one mix on the path would simply filter it out and be left watching
+    /// real traffic only.
+    #[test]
+    fn cover_is_indistinguishable_from_real_until_it_dies() {
+        let ks: Vec<MixKey> = (0..3).map(|i| MixKey::from_seed([i + 40; 32])).collect();
+        let route: Vec<Hop> = ks
+            .iter()
+            .enumerate()
+            .map(|(i, k)| Hop {
+                id: i as u16,
+                public: k.public(),
+                delay_ms: 10,
+            })
+            .collect();
+
+        let real = Packet::wrap(&route, b"real message", [1u8; 32]).unwrap();
+        let cover = Packet::cover(&route, [2u8; 32]).unwrap();
+        assert_eq!(real.to_bytes().len(), cover.to_bytes().len());
+
+        let mut seen: Vec<SeenTags> = (0..3).map(|_| SeenTags::new()).collect();
+        let mut seen2: Vec<SeenTags> = (0..3).map(|_| SeenTags::new()).collect();
+
+        // Two hops in, both are still Forward and carry no distinguishing structure.
+        let mut a = real;
+        let mut b = cover;
+        for i in 0..2 {
+            let Peeled::Forward { packet: pa, next: na, delay_ms: da } =
+                a.peel(&ks[i], &mut seen[i]).unwrap() else { panic!("real died early") };
+            let Peeled::Forward { packet: pb, next: nb, delay_ms: db } =
+                b.peel(&ks[i], &mut seen2[i]).unwrap() else { panic!("cover died early") };
+            assert_eq!(na, nb, "routing differs at hop {i}");
+            assert_eq!(da, db, "delay differs at hop {i}");
+            a = pa;
+            b = pb;
+        }
+
+        // Only the last hop learns the difference.
+        assert!(matches!(a.peel(&ks[2], &mut seen[2]), Ok(Peeled::Deliver { .. })));
+        assert!(matches!(b.peel(&ks[2], &mut seen2[2]), Ok(Peeled::Drop { .. })));
+    }
+
+    /// Serialising and reading back must be exact for any packet.
+    #[test]
+    fn the_wire_encoding_round_trips() {
+        let k = MixKey::from_seed([11u8; 32]);
+        let route = vec![Hop { id: 0, public: k.public(), delay_ms: 3 }];
+        for n in [0usize, 1, 100, PAYLOAD_BYTES - 5] {
+            let p = Packet::wrap(&route, &vec![0xA5; n], [n as u8; 32]).unwrap();
+            let bytes = p.to_bytes();
+            assert_eq!(bytes.len(), PACKET_BYTES);
+            let back = Packet::from_bytes(&bytes).expect("did not read back");
+            assert_eq!(back.to_bytes(), bytes);
+        }
+    }
+
+    /// Anything that is not exactly a packet must be refused.
+    #[test]
+    fn wrong_length_input_is_refused() {
+        for n in [0usize, 1, PACKET_BYTES - 1, PACKET_BYTES + 1, 4096] {
+            assert!(Packet::from_bytes(&vec![0u8; n]).is_none());
+        }
+    }
+
+    /// Random bytes of the right length must decode structurally and then fail to peel.
+    ///
+    /// The decoder must not be a cheaper oracle than peeling. If it could reject forgeries by
+    /// shape, an adversary would learn from the shape alone.
+    #[test]
+    fn random_bytes_decode_structurally_and_fail_only_at_the_mac() {
+        let k = MixKey::from_seed([12u8; 32]);
+        let mut seen = SeenTags::new();
+        let mut rejected = 0;
+        for i in 0..200u32 {
+            let mut buf = vec![0u8; PACKET_BYTES];
+            let mut h = blake3::Hasher::new();
+            h.update(&i.to_le_bytes());
+            let mut r = h.finalize_xof();
+            r.fill(&mut buf);
+            let mut p = Packet::from_bytes(&buf).expect("structure accepted anything sized");
+            assert_eq!(p.peel(&k, &mut seen), Err(MixError::BadMac));
+            rejected += 1;
+        }
+        assert_eq!(rejected, 200);
+    }
+
 }

@@ -7,6 +7,10 @@ members = [
     "crates/karst-blob",
     "crates/karst-cap",
     "crates/karst-mix",
+    "crates/karst-node",
+    "crates/karst-net",
+    "crates/karst-seal",
+    "crates/karst-wire",
     "crates/karst-symmetry",
     "crates/karst-value",
     "crates/karst-fuzz",
@@ -36,6 +40,10 @@ karst-doc = { path = "crates/karst-doc" }
 karst-blob = { path = "crates/karst-blob" }
 karst-cap = { path = "crates/karst-cap" }
 karst-mix = { path = "crates/karst-mix" }
+karst-node = { path = "crates/karst-node" }
+karst-net = { path = "crates/karst-net" }
+karst-seal = { path = "crates/karst-seal" }
+karst-wire = { path = "crates/karst-wire" }
 karst-symmetry = { path = "crates/karst-symmetry" }
 karst-value = { path = "crates/karst-value" }
 karst-attest = { path = "crates/karst-attest" }
