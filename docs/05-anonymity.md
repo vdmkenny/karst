@@ -103,6 +103,13 @@ sensitivity: at a 1% baseline a 5% suppression is called within 140 loops rather
 `samples_to_detect` returns nothing rather than a number in that region, so the limit is in the
 API instead of a footnote.
 
+**Where the baseline comes from is itself a security decision.** A detector that learns its own
+normal from a channel the adversary sits on can be poisoned: degrade the channel steadily,
+watch the baseline rise, then attack underneath the inflated figure. `Baseline` therefore
+offers `Fixed`, set out of band and not poisonable, and `Ratcheted`, which may fall but never
+rise. The ratchet costs standing alarms under genuine long-term deterioration, which is the
+correct direction to fail.
+
 ### 3.4 Path selection without a consensus document
 
 Tor clients need a global view to pick relays, which is why the consensus exists, which

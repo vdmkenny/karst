@@ -133,8 +133,20 @@ client, when the answer acts *in* it.
 > **Adopt TUF's structure.** Freeze detection now, the rest mapped onto existing primitives.
 
 Implemented in `karst-object::freshness`: expiring signed statements, monotonic sequence so an
-old statement cannot be replayed, and a client-side monitor that distinguishes fresh, expired,
-rolled back and never-heard. A publisher with nothing to say still says so.
+old statement cannot be replayed, and a client-side monitor distinguishing fresh, expired,
+rolled back, never-heard, and content-withheld. A publisher with nothing to say still says so.
+
+**Expiry alone is not enough**, which adversarial testing showed. An adversary who forwards
+genuine, fresh, correctly-sequenced statements while withholding the advisories they refer to
+leaves a client reporting current and missing exactly the update it needs: the freeze attack
+wearing a disguise. Each statement therefore commits to a digest of the advisory set it vouches
+for, which is TUF's snapshot role, and a client comparing that against what it holds detects
+the withholding.
+
+Two limits stated rather than papered over. Expiry checks are only as good as the client's
+clock, so an adversary with local access who sets it back defeats them. And a publisher issuing
+very long validity windows disables the detector without ever lying, so validity is a security
+parameter rather than a convenience.
 
 TUF's other mechanisms map onto primitives that already exist and are not yet wired up:
 threshold signing (`karst-value::shamir`), role separation, and key rotation

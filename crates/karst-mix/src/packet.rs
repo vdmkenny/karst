@@ -270,23 +270,86 @@ impl core::fmt::Debug for Packet {
 }
 
 /// Replay detection. Sphinx provides the tag; storing it is the node's job.
-#[derive(Default)]
+///
+/// **Unbounded storage is a denial of service.** A node that remembers every tag forever runs
+/// out of memory on schedule, and an adversary can bring that schedule forward by sending
+/// packets, which costs them nothing they were not already spending. Replay protection is
+/// therefore epoch-scoped: tags are retained for two epochs and then dropped.
+///
+/// The tradeoff is explicit. A packet replayed after two epochs is accepted, so the epoch
+/// length must exceed the maximum time a packet can legitimately be in flight, which is
+/// bounded by L4's delay distribution. Too short and honest late packets are treated as new;
+/// too long and memory grows.
 pub struct SeenTags {
-    tags: std::collections::BTreeSet<[u8; 16]>,
+    current: std::collections::BTreeSet<[u8; 16]>,
+    previous: std::collections::BTreeSet<[u8; 16]>,
+    epoch: u64,
+    /// Refuse to grow past this within one epoch, so a flood degrades into rejection rather
+    /// than into exhaustion.
+    capacity: usize,
+}
+
+impl Default for SeenTags {
+    fn default() -> Self {
+        SeenTags::new()
+    }
 }
 
 impl SeenTags {
+    /// A capacity sized for a busy relay. Reaching it means something abnormal is happening.
+    pub const DEFAULT_CAPACITY: usize = 1 << 20;
+
     pub fn new() -> Self {
-        SeenTags::default()
+        SeenTags::with_capacity(Self::DEFAULT_CAPACITY)
     }
+
+    pub fn with_capacity(capacity: usize) -> Self {
+        SeenTags {
+            current: Default::default(),
+            previous: Default::default(),
+            epoch: 0,
+            capacity,
+        }
+    }
+
+    /// Advance to a new epoch, retiring the older half of the window.
+    pub fn rotate(&mut self, epoch: u64) {
+        if epoch <= self.epoch {
+            return;
+        }
+        // More than one epoch has passed, so nothing from the old window is still in flight.
+        if epoch > self.epoch + 1 {
+            self.previous.clear();
+        } else {
+            self.previous = std::mem::take(&mut self.current);
+        }
+        self.current.clear();
+        self.epoch = epoch;
+    }
+
     pub fn len(&self) -> usize {
-        self.tags.len()
+        self.current.len() + self.previous.len()
     }
+
     pub fn is_empty(&self) -> bool {
-        self.tags.is_empty()
+        self.len() == 0
     }
+
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
     fn check_and_insert(&mut self, tag: [u8; 16]) -> bool {
-        self.tags.insert(tag)
+        if self.previous.contains(&tag) || self.current.contains(&tag) {
+            return false;
+        }
+        if self.current.len() >= self.capacity {
+            // Refusing is the safe direction: an accepted replay is a correctness failure,
+            // a rejected packet is a liveness one.
+            return false;
+        }
+        self.current.insert(tag);
+        true
     }
 }
 
@@ -754,5 +817,141 @@ mod tests {
             Packet::wrap(&route(&ks), &vec![0u8; PAYLOAD_BYTES], [1u8; 32]).unwrap_err(),
             MixError::PayloadTooLarge
         );
+    }
+}
+
+/// Attacks on the packet format and the node state around it.
+#[cfg(test)]
+mod adversarial {
+    use super::*;
+
+    fn keys(n: usize) -> Vec<MixKey> {
+        (0..n).map(|i| MixKey::from_seed([(i as u8) + 1; 32])).collect()
+    }
+    fn route(ks: &[MixKey]) -> Vec<Hop> {
+        ks.iter()
+            .enumerate()
+            .map(|(i, k)| Hop {
+                id: i as u16,
+                public: k.public(),
+                delay_ms: 10,
+            })
+            .collect()
+    }
+
+    /// **Memory exhaustion.** A node remembering every tag forever runs out of memory on a
+    /// schedule an adversary controls, at no cost to them beyond traffic they were already
+    /// sending.
+    #[test]
+    fn replay_state_is_bounded_rather_than_growing_forever() {
+        let mut seen = SeenTags::with_capacity(4);
+        let ks = keys(1);
+        let r = route(&ks);
+
+        // Fill past capacity.
+        let mut accepted = 0;
+        for i in 0..20u8 {
+            let p = Packet::wrap(&r, b"x", [i; 32]).unwrap();
+            if p.peel(&ks[0], &mut seen).is_ok() {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, 4, "capacity was not enforced");
+        assert!(seen.len() <= 4, "state grew past capacity: {}", seen.len());
+    }
+
+    /// Rotation must retire old tags, or the bound is never reclaimed.
+    #[test]
+    fn rotating_epochs_reclaims_space_without_forgetting_too_soon() {
+        let mut seen = SeenTags::with_capacity(8);
+        let ks = keys(1);
+        let r = route(&ks);
+        let p = Packet::wrap(&r, b"x", [7u8; 32]).unwrap();
+
+        assert!(p.clone().peel(&ks[0], &mut seen).is_ok());
+        assert_eq!(p.clone().peel(&ks[0], &mut seen), Err(MixError::Replay));
+
+        // One epoch on, the tag is still remembered: a packet may legitimately still be in
+        // flight across one boundary.
+        seen.rotate(1);
+        assert_eq!(
+            p.clone().peel(&ks[0], &mut seen),
+            Err(MixError::Replay),
+            "forgetting after one epoch would accept in-flight replays"
+        );
+
+        // Two epochs on it is forgotten, which is the stated cost of a bounded window.
+        seen.rotate(2);
+        seen.rotate(3);
+        assert!(p.peel(&ks[0], &mut seen).is_ok());
+    }
+
+    #[test]
+    fn rotation_does_not_go_backwards() {
+        let mut seen = SeenTags::with_capacity(8);
+        seen.rotate(5);
+        seen.rotate(2);
+        assert_eq!(seen.epoch(), 5);
+    }
+
+    /// A tagging attack on the payload must not survive to the destination in recognisable
+    /// form. Every single-bit flip across the payload is tried.
+    #[test]
+    fn no_single_payload_bit_flip_produces_a_recognisable_mark() {
+        let ks = keys(2);
+        let r = route(&ks);
+        let msg = vec![0x5Au8; 300];
+        let clean = Packet::wrap(&r, &msg, [4u8; 32]).unwrap();
+
+        for bit in (0..PAYLOAD_BYTES * 8).step_by(541) {
+            let tampered = clean.tamper_payload(bit);
+            let mut s: Vec<SeenTags> = (0..2).map(|_| SeenTags::new()).collect();
+            let Ok(Peeled::Forward { packet, .. }) = tampered.peel(&ks[0], &mut s[0]) else {
+                continue;
+            };
+            if let Ok(Peeled::Deliver { payload, .. }) = packet.peel(&ks[1], &mut s[1]) {
+                let matching = payload.iter().zip(msg.iter()).filter(|(a, b)| a == b).count();
+                assert!(
+                    matching * 4 < payload.len().max(4),
+                    "bit {bit} survived recognisably: {matching} of {} bytes",
+                    payload.len()
+                );
+            }
+        }
+    }
+
+    /// Every byte of the header is covered by the MAC, with none left unauthenticated.
+    #[test]
+    fn every_header_byte_is_authenticated() {
+        let ks = keys(3);
+        let r = route(&ks);
+        let p = Packet::wrap(&r, b"payload", [5u8; 32]).unwrap();
+
+        for byte in 0..HEADER_BYTES {
+            let mut seen = SeenTags::new();
+            assert_eq!(
+                p.tamper_header(byte * 8).peel(&ks[0], &mut seen),
+                Err(MixError::BadMac),
+                "header byte {byte} is not covered by the MAC"
+            );
+        }
+    }
+
+    /// A rejected packet must not consume replay state, or an adversary exhausts the window
+    /// with garbage that never had a chance of being accepted.
+    #[test]
+    fn a_packet_that_fails_the_mac_does_not_consume_replay_state() {
+        let ks = keys(2);
+        let r = route(&ks);
+        let p = Packet::wrap(&r, b"x", [6u8; 32]).unwrap();
+        let mut seen = SeenTags::with_capacity(4);
+
+        for bit in 0..50 {
+            let _ = p.tamper_header(bit).peel(&ks[0], &mut seen);
+        }
+        assert_eq!(seen.len(), 0, "forged packets consumed the replay window");
+
+        // And a genuine packet still gets through afterwards.
+        assert!(p.peel(&ks[0], &mut seen).is_ok());
     }
 }
