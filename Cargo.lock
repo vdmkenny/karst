@@ -353,6 +353,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "karst-index"
+version = "0.1.0"
+dependencies = [
+ "karst-id",
+ "karst-object",
+]
+
+[[package]]
 name = "karst-mix"
 version = "0.1.0"
 dependencies = [
