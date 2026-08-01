@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::frame::{MAILBOX_BYTES, SEALED_BYTES};
+use crate::frame::{ENVELOPE_BYTES, MAILBOX_BYTES};
 
 pub type Tag = [u8; MAILBOX_BYTES];
 
@@ -98,7 +98,7 @@ impl Provider {
     ///
     /// The payload is `[tag][sealed]` and the provider reads only the tag.
     pub fn deposit(&mut self, payload: &[u8]) -> Result<(), DepositError> {
-        if payload.len() != MAILBOX_BYTES + SEALED_BYTES {
+        if payload.len() != MAILBOX_BYTES + ENVELOPE_BYTES {
             return Err(DepositError::WrongSize);
         }
         let mut tag: Tag = [0u8; MAILBOX_BYTES];
@@ -118,7 +118,7 @@ impl Provider {
         Ok(())
     }
 
-    /// Empty a box.
+    /// Empty a box, for a party entitled to drain it.
     ///
     /// Collecting a box that does not exist returns an empty collection rather than an error,
     /// because an error would tell whoever asked that the tag is unused, and that turns
@@ -138,6 +138,40 @@ impl Provider {
             }
         }
     }
+
+    /// Take one item, leaving the box and its refusal count intact.
+    ///
+    /// The refusal count is what tells an owner that mail was lost, so handing back one item
+    /// must not destroy it. The earlier arrangement emptied the box and re-deposited the
+    /// remainder, which recreated the entry through `or_default()` and zeroed the count.
+    pub fn take_one(&mut self, tag: &Tag) -> (Option<Vec<u8>>, u64) {
+        match self.boxes.get_mut(tag) {
+            None => (None, 0),
+            Some(b) => {
+                let item = b.items.pop_front();
+                if item.is_some() {
+                    self.held -= 1;
+                }
+                (item, b.refused)
+            }
+        }
+    }
+
+    /// Read one item without removing it.
+    ///
+    /// For feeds, where the tag is public and anyone may read. Draining on read would let any
+    /// stranger delete a publisher's output one datagram at a time.
+    pub fn peek(&self, tag: &Tag, index: usize) -> (Option<Vec<u8>>, u64) {
+        match self.boxes.get(tag) {
+            None => (None, 0),
+            Some(b) => (b.items.get(index).cloned(), b.refused),
+        }
+    }
+
+    /// How many items a box holds. Used by a feed reader to know when it has caught up.
+    pub fn depth(&self, tag: &Tag) -> usize {
+        self.boxes.get(tag).map_or(0, |b| b.items.len())
+    }
 }
 
 impl Default for Provider {
@@ -152,7 +186,7 @@ mod tests {
 
     fn payload(tag: u8, body: u8) -> Vec<u8> {
         let mut v = vec![tag; MAILBOX_BYTES];
-        v.extend(std::iter::repeat(body).take(SEALED_BYTES));
+        v.extend(std::iter::repeat(body).take(ENVELOPE_BYTES));
         v
     }
 
@@ -240,9 +274,62 @@ mod tests {
     #[test]
     fn wrong_sized_payloads_are_refused() {
         let mut p = Provider::new();
-        for n in [0usize, 31, MAILBOX_BYTES, MAILBOX_BYTES + SEALED_BYTES - 1, 4096] {
+        for n in [0usize, 31, MAILBOX_BYTES, MAILBOX_BYTES + ENVELOPE_BYTES - 1, 4096] {
             assert_eq!(p.deposit(&vec![0u8; n]), Err(DepositError::WrongSize));
         }
         assert_eq!(p.held(), 0);
     }
+    /// Reading one item must not destroy the record that mail was lost.
+    ///
+    /// The design justifies a world-writable feed box on the grounds that denial is visible.
+    /// Emptying the box to hand back one item rebuilt it from nothing and zeroed the counter,
+    /// so the thing the justification rested on did not survive a single read.
+    #[test]
+    fn taking_one_item_preserves_the_refusal_count() {
+        let mut p = Provider::with_limits(2, 100);
+        p.deposit(&payload(1, 0)).unwrap();
+        p.deposit(&payload(1, 1)).unwrap();
+        for _ in 0..9 {
+            let _ = p.deposit(&payload(1, 2));
+        }
+
+        let (item, refused) = p.take_one(&[1u8; 32]);
+        assert!(item.is_some());
+        assert_eq!(refused, 9);
+        // And again, still reported.
+        let (item, refused) = p.take_one(&[1u8; 32]);
+        assert!(item.is_some());
+        assert_eq!(refused, 9, "the count was destroyed by reading");
+        assert_eq!(p.take_one(&[1u8; 32]).0, None);
+    }
+
+    /// Reading a feed must not delete it.
+    ///
+    /// A feed tag is computable from a public address, so if reading drained the box any
+    /// stranger could delete any publication one datagram at a time.
+    #[test]
+    fn peeking_does_not_drain_a_feed() {
+        let mut p = Provider::new();
+        for i in 0..5 {
+            p.deposit(&payload(9, i)).unwrap();
+        }
+        let tag = [9u8; 32];
+        for _ in 0..100 {
+            for i in 0..5 {
+                assert!(p.peek(&tag, i).0.is_some(), "an item vanished on read");
+            }
+        }
+        assert_eq!(p.depth(&tag), 5);
+        assert_eq!(p.peek(&tag, 5).0, None);
+    }
+
+    /// Reading past the end of an unknown box must look like reading an empty one.
+    #[test]
+    fn peeking_an_unknown_tag_is_indistinguishable_from_an_empty_box() {
+        let mut p = Provider::new();
+        p.deposit(&payload(1, 0)).unwrap();
+        let _ = p.take_one(&[1u8; 32]);
+        assert_eq!(p.peek(&[1u8; 32], 0), p.peek(&[123u8; 32], 0));
+    }
+
 }

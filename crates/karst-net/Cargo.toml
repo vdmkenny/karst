@@ -11,6 +11,7 @@ karst-node.workspace = true
 karst-wire.workspace = true
 karst-seal.workspace = true
 karst-id.workspace = true
+karst-object.workspace = true
 rand = "0.8"
 blake3 = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }

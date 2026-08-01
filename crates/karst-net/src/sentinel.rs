@@ -250,14 +250,29 @@ mod tests {
     /// No amount of sampling detects an adversary who stays under the noise floor. This is a
     /// property of the mechanism rather than a defect in it, and an operator who does not know
     /// it will believe silence means safety.
+    ///
+    /// The drop rate here is **per hop**, and a client sees the compound. Over a four hop
+    /// route a 2% per-hop rate is 7.8% end to end, which is *above* a 5% baseline rather than
+    /// below it. That is worth stating in its own right: an adversary sizing an attack to stay
+    /// under a client's noise floor has to account for the route length, and a client setting
+    /// a baseline has to set it against end-to-end loss rather than link loss.
     #[test]
     fn dropping_below_the_baseline_is_invisible_by_construction() {
-        let s = observe(0.02, 150);
+        // 0.3% per hop over four hops is about 1.2% end to end, comfortably under the 5%
+        // baseline with room for sampling noise.
+        let s = observe(0.003, 200);
         assert!(
             s.alarm().is_none(),
-            "2% loss against a 5% baseline should not be distinguishable"
+            "1.2% end-to-end loss against a 5% baseline should not be distinguishable, \
+             observed {:.3}",
+            s.loss_rate()
         );
-        assert!(s.loss_rate() < 0.10, "vacuous: loss was {}", s.loss_rate());
+        assert!(
+            s.loss_rate() < 0.05,
+            "observed {:.3}, which is not below the baseline",
+            s.loss_rate()
+        );
+        assert!(s.samples() >= 190, "vacuous: only {} samples", s.samples());
     }
 
     /// A loop that is merely slow must not be counted as lost.

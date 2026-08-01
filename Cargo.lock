@@ -380,6 +380,7 @@ dependencies = [
  "karst-id",
  "karst-mix",
  "karst-node",
+ "karst-object",
  "karst-seal",
  "karst-wire",
  "rand",
@@ -413,6 +414,20 @@ dependencies = [
  "chacha20poly1305",
  "rand",
  "x25519-dalek",
+]
+
+[[package]]
+name = "karst-stack"
+version = "0.1.0"
+dependencies = [
+ "karst-doc",
+ "karst-id",
+ "karst-index",
+ "karst-mix",
+ "karst-net",
+ "karst-node",
+ "karst-object",
+ "rand",
 ]
 
 [[package]]

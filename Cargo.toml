@@ -10,6 +10,7 @@ members = [
     "crates/karst-node",
     "crates/karst-index",
     "crates/karst-net",
+    "crates/karst-stack",
     "crates/karst-seal",
     "crates/karst-wire",
     "crates/karst-symmetry",
@@ -44,6 +45,7 @@ karst-mix = { path = "crates/karst-mix" }
 karst-node = { path = "crates/karst-node" }
 karst-index = { path = "crates/karst-index" }
 karst-net = { path = "crates/karst-net" }
+karst-stack = { path = "crates/karst-stack" }
 karst-seal = { path = "crates/karst-seal" }
 karst-wire = { path = "crates/karst-wire" }
 karst-symmetry = { path = "crates/karst-symmetry" }

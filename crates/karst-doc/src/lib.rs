@@ -519,6 +519,15 @@ impl Doc {
         cid
     }
 
+    /// Every node this document holds.
+    ///
+    /// Deterministic order, because a document published twice must produce the same set of
+    /// objects in the same sequence or it would look like a different document to anyone
+    /// diffing what a publisher emitted.
+    pub fn cids(&self) -> Vec<Cid> {
+        self.nodes.keys().copied().collect()
+    }
+
     pub fn get(&self, cid: &Cid) -> Option<&Node> {
         self.nodes.get(cid)
     }

@@ -1,0 +1,20 @@
+[package]
+name = "karst-stack"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The whole stack, composed over a running network"
+
+[[bin]]
+name = "karst-stack-demo"
+path = "src/main.rs"
+
+[dependencies]
+karst-id.workspace = true
+karst-object.workspace = true
+karst-doc.workspace = true
+karst-index.workspace = true
+karst-mix.workspace = true
+karst-node.workspace = true
+karst-net.workspace = true
+rand = "0.8"

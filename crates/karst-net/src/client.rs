@@ -39,6 +39,19 @@ pub enum SendError {
     MessageTooLarge,
 }
 
+/// A mailbox tag is the hash of the key that drains it.
+///
+/// Deposit needs the tag; collection needs the preimage. That is the whole separation, and it
+/// costs one hash. A provider checks it by hashing what it was given.
+pub fn mailbox_tag(collect_key: &[u8; 32]) -> Tag {
+    let mut h = blake3::Hasher::new();
+    h.update(b"karst.net.v1.mailbox");
+    h.update(collect_key);
+    let mut t = [0u8; MAILBOX_BYTES];
+    t.copy_from_slice(h.finalize().as_bytes());
+    t
+}
+
 /// A packet and the node to hand it to.
 ///
 /// A packet does not say where it enters. The first hop is drawn per packet, and a sender who
@@ -63,37 +76,56 @@ pub struct Contact {
 pub struct Client {
     identity: Identity,
     sealing: SealingKey,
+    /// Proves the right to **drain** this client's box.
+    ///
+    /// The tag is its hash, so a correspondent holding the tag may deposit and cannot collect.
+    /// When the two were the same value, every correspondent could permanently delete the
+    /// mail they had sent, and anyone who learned a tag could delete everything in it.
+    collect_key: [u8; 32],
     mailbox: Tag,
     provider: u16,
+    /// Reassembly for **sealed mail only**.
+    ///
+    /// Feed content gets its own buffer per `FeedReader`. Sharing one meant fragments from a
+    /// world-writable public box could occupy and evict state belonging to private mail, so
+    /// the secrecy of a mailbox tag stopped being the thing that gated reach into a client's
+    /// reassembly.
     inbox: Reassembler,
 }
 
 impl Client {
     pub fn new(identity: Identity, provider: u16) -> Self {
-        let mut mailbox = [0u8; MAILBOX_BYTES];
-        rand::thread_rng().fill(&mut mailbox);
+        let mut collect_key = [0u8; 32];
+        rand::thread_rng().fill(&mut collect_key);
         Client {
             identity,
             sealing: SealingKey::generate(),
-            mailbox,
+            mailbox: mailbox_tag(&collect_key),
+            collect_key,
             provider,
             inbox: Reassembler::new(),
         }
     }
 
     pub fn from_seed(seed: [u8; 32], provider: u16) -> Self {
-        let mut mailbox = [0u8; MAILBOX_BYTES];
+        let mut collect_key = [0u8; 32];
         let mut h = blake3::Hasher::new();
-        h.update(b"karst.net.v1.mailbox");
+        h.update(b"karst.net.v1.collect");
         h.update(&seed);
-        mailbox.copy_from_slice(h.finalize().as_bytes());
+        collect_key.copy_from_slice(h.finalize().as_bytes());
         Client {
             identity: Identity::from_seed(seed),
             sealing: SealingKey::from_seed(seed),
-            mailbox,
+            mailbox: mailbox_tag(&collect_key),
+            collect_key,
             provider,
             inbox: Reassembler::new(),
         }
+    }
+
+    /// The secret that entitles this client to drain its own box. Never in a `Contact`.
+    pub fn collect_key(&self) -> [u8; 32] {
+        self.collect_key
     }
 
     pub fn address(&self) -> karst_id::Address {
@@ -130,10 +162,11 @@ impl Client {
             // The tag is authenticated but not encrypted, since a provider must read it to
             // file the mail. Binding it means a sealed blob cannot be lifted into another box.
             let sealed = karst_seal::seal(&to.sealing, &to.mailbox, &f.encode());
-            debug_assert_eq!(sealed.len(), frame::SEALED_BYTES);
+            debug_assert_eq!(sealed.len(), frame::BODY_BYTES);
 
             let mut payload = Vec::with_capacity(frame::FRAGMENT_BYTES);
             payload.extend_from_slice(&to.mailbox);
+            payload.push(frame::ENV_SEALED);
             payload.extend_from_slice(&sealed);
 
             let route = dir.route_to(to.provider, rng).map_err(SendError::Route)?;
@@ -166,12 +199,65 @@ impl Client {
         })
     }
 
-    /// Take a sealed blob out of the box. Returns a message when the last fragment lands.
+    /// Publish to a feed, readable by anyone who collects the tag.
     ///
-    /// Anything that does not open, or does not decode, is discarded silently. A provider can
-    /// put arbitrary bytes in a box and must learn nothing from what happens next.
-    pub fn accept(&mut self, sealed: &[u8]) -> Option<Vec<u8>> {
-        let inner = self.sealing.open(&self.mailbox, sealed).ok()?;
+    /// Not sealed, because it is not addressed to anyone. Content published for the world is
+    /// content the provider holding it can read, and pretending otherwise by encrypting it to
+    /// a key everyone has would be theatre. What stays hidden is who publishes it, which is
+    /// L4's job, and who reads it, which is not solved.
+    pub fn publish(
+        &self,
+        dir: &Directory,
+        feed: Tag,
+        provider: u16,
+        message: &[u8],
+        rng: &mut impl Rng,
+    ) -> Result<Vec<Dispatch>, SendError> {
+        let mut msg_id = [0u8; 16];
+        rng.fill(&mut msg_id);
+        let frags = frame::split(msg_id, message).map_err(|_| SendError::MessageTooLarge)?;
+
+        let mut out = Vec::with_capacity(frags.len());
+        for f in frags {
+            let inner = f.encode();
+            let mut body = vec![0u8; frame::BODY_BYTES];
+            body[..inner.len()].copy_from_slice(&inner);
+            // The remainder is padding an observer cannot distinguish from sealing overhead,
+            // which is why open and sealed bodies are the same width.
+            rng.fill(&mut body[inner.len()..]);
+
+            let mut payload = Vec::with_capacity(frame::FRAGMENT_BYTES);
+            payload.extend_from_slice(&feed);
+            payload.push(frame::ENV_OPEN);
+            payload.extend_from_slice(&body);
+
+            let route = dir.route_to(provider, rng).map_err(SendError::Route)?;
+            let mut seed = [0u8; 32];
+            rng.fill(&mut seed);
+            out.push(Dispatch {
+                via: route[0].id,
+                packet: Packet::wrap(&route, &payload, seed).map_err(SendError::Mix)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Take an envelope out of **this client's own mailbox**.
+    ///
+    /// Sealed only. An open envelope is unsealed and unauthenticated, so honouring one here
+    /// would let anyone who can write bytes into the box put chosen content into the
+    /// application's inbox with no key and no seal. Adding the open kind for feeds silently
+    /// converted the private inbox into an unauthenticated channel, and the test that claimed
+    /// a hostile provider could not inject missed it by one bit: it flipped `0x40`, turning
+    /// `ENV_SEALED` into `0x41`, which falls through, and never tried `1 ^ 0x03 = ENV_OPEN`.
+    ///
+    /// The two kinds now have entirely separate entry points and there is no dispatch on an
+    /// attacker-controlled byte.
+    pub fn accept(&mut self, envelope: &[u8]) -> Option<Vec<u8>> {
+        if envelope.len() != frame::ENVELOPE_BYTES || envelope[0] != frame::ENV_SEALED {
+            return None;
+        }
+        let inner = self.sealing.open(&self.mailbox, &envelope[1..]).ok()?;
         let f = Fragment::decode(&inner).ok()?;
         self.inbox.accept(f).ok().flatten()
     }
@@ -447,4 +533,95 @@ mod tests {
             assert_eq!(eve.accept(&item), None);
         }
     }
+    /// An open envelope must never be accepted out of a private mailbox.
+    ///
+    /// This is the defect the feed work introduced and that six independent reviews found. An
+    /// open envelope is unsealed and unauthenticated, so honouring one on the mailbox path let
+    /// anyone who could write bytes into the box put chosen content into the application's
+    /// inbox with no key at all. The test that claimed to cover hostile injection missed it by
+    /// one bit, flipping 0x40 so that ENV_SEALED became 0x41 and fell through, never trying
+    /// 1 ^ 0x03 = ENV_OPEN.
+    #[test]
+    fn an_open_envelope_is_never_accepted_from_a_private_mailbox() {
+        let mesh = Mesh::new(3, 2);
+        let mut bob = Client::from_seed([2u8; 32], mesh.provider_id);
+
+        // Forge exactly what a hostile provider would build: no key, no seal, no tag secret.
+        let f = crate::frame::Fragment {
+            msg_id: [0x11; 16],
+            index: 0,
+            total: 1,
+            data: b"the transfer is approved".to_vec(),
+        };
+        let inner = f.encode();
+        let mut envelope = vec![0u8; frame::ENVELOPE_BYTES];
+        envelope[0] = frame::ENV_OPEN;
+        envelope[1..1 + inner.len()].copy_from_slice(&inner);
+        assert_eq!(envelope.len(), frame::ENVELOPE_BYTES);
+
+        assert_eq!(
+            bob.accept(&envelope),
+            None,
+            "an unsealed envelope was accepted as private mail"
+        );
+
+        // And the one-bit flip the old test could not reach.
+        let alice = Client::from_seed([1u8; 32], mesh.provider_id);
+        let mut rng = rand::thread_rng();
+        let real = alice
+            .send(&mesh.dir, &bob.contact(), b"genuine", &mut rng)
+            .unwrap();
+        let payload_kind_flip = {
+            let mut e = vec![0u8; frame::ENVELOPE_BYTES];
+            e[0] = frame::ENV_SEALED ^ 0x03;
+            e
+        };
+        assert_eq!(bob.accept(&payload_kind_flip), None);
+        let _ = real;
+    }
+
+    /// Every byte value in the kind position other than sealed must be refused.
+    #[test]
+    fn only_the_sealed_kind_is_honoured_on_the_mailbox_path() {
+        let mesh = Mesh::new(3, 2);
+        let mut bob = Client::from_seed([2u8; 32], mesh.provider_id);
+        let f = crate::frame::Fragment {
+            msg_id: [0x22; 16],
+            index: 0,
+            total: 1,
+            data: b"injected".to_vec(),
+        };
+        let inner = f.encode();
+        for kind in 0u8..=255 {
+            let mut envelope = vec![0u8; frame::ENVELOPE_BYTES];
+            envelope[0] = kind;
+            envelope[1..1 + inner.len()].copy_from_slice(&inner);
+            assert_eq!(
+                bob.accept(&envelope),
+                None,
+                "kind byte {kind} produced a message with no seal"
+            );
+        }
+    }
+
+    /// A correspondent knows where to deposit and must not be able to drain.
+    ///
+    /// The tag and the right to collect used to be the same value, so everyone a client had
+    /// ever written to could permanently delete their mail.
+    #[test]
+    fn a_contact_carries_the_right_to_deposit_and_not_to_collect() {
+        let bob = Client::from_seed([2u8; 32], 0);
+        let contact = bob.contact();
+        assert_eq!(contact.mailbox, bob.mailbox());
+        assert_ne!(
+            contact.mailbox, bob.collect_key(),
+            "the tag is the collection key, so anyone who can send can also drain"
+        );
+        assert_eq!(
+            crate::client::mailbox_tag(&bob.collect_key()),
+            bob.mailbox(),
+            "the tag must be the hash of the key that drains it"
+        );
+    }
+
 }

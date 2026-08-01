@@ -110,23 +110,37 @@ fn a_dropping_mix_causes_loss_and_never_corruption() {
     let mut rng = rand::thread_rng();
 
     let msg: Vec<u8> = (0..crate::frame::DATA_BYTES * 6).map(|i| (i % 251) as u8).collect();
-    let mut arrived = 0;
     let mut corrupted = 0;
     for _ in 0..30 {
         mesh.inject(alice.send(&mesh.dir, &bob.contact(), &msg, &mut rng).unwrap());
         mesh.run(1_500);
         for item in mesh.provider.collect(&bob.mailbox()).items {
             if let Some(got) = bob.accept(&item) {
-                if got == msg {
-                    arrived += 1;
-                } else {
+                if got != msg {
                     corrupted += 1;
                 }
             }
         }
     }
     assert_eq!(corrupted, 0, "a dropping mix produced corrupted output");
-    assert!(arrived > 0, "vacuous: nothing arrived even without the drop");
+
+    // Non-vacuity, proved rather than sampled. Counting arrivals through the dropping mesh
+    // would be a coin flip: a six fragment message survives a one-in-three entry drop only
+    // 8.8% of the time, so a run where nothing arrives is ordinary rather than informative.
+    // The same message through the same mesh with nothing dropping must arrive.
+    let mut clean = Mesh::new(4, 3);
+    let alice2 = Client::from_seed([1u8; 32], clean.provider_id);
+    let mut bob2 = Client::from_seed([2u8; 32], clean.provider_id);
+    clean.inject(alice2.send(&clean.dir, &bob2.contact(), &msg, &mut rng).unwrap());
+    clean.run(2_500);
+    let got: Vec<Vec<u8>> = clean
+        .provider
+        .collect(&bob2.mailbox())
+        .items
+        .into_iter()
+        .filter_map(|i| bob2.accept(&i))
+        .collect();
+    assert_eq!(got, vec![msg], "the message does not arrive even with nothing dropping");
 }
 
 /// A mix altering a packet must destroy it rather than mark it.
