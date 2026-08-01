@@ -446,6 +446,7 @@ dependencies = [
  "karst-net",
  "karst-node",
  "karst-object",
+ "karst-witness",
  "rand",
 ]
 

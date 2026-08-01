@@ -13,6 +13,7 @@ use std::time::{Duration, Instant};
 
 use karst_doc::{Doc, Node, Run};
 use karst_id::Identity;
+use karst_index::complete::{Census, CensusMonitor, Completeness};
 use karst_index::{Announcement, Catalogue, Ranker, Trust};
 use karst_mix::packet::MixKey;
 use karst_net::client::Client;
@@ -23,6 +24,7 @@ use karst_net::runner::{ClientRunner, NodeRunner};
 use karst_net::watch::FeedWatch;
 use karst_node::MixNode;
 use karst_object::Object;
+use karst_witness::{Acceptance, Checkpoint, Cosigned, Witness, WitnessPolicy};
 
 const LAYERS: u8 = 4;
 const PER_LAYER: usize = 2;
@@ -323,6 +325,89 @@ fn main() -> std::io::Result<()> {
         }
         _ => println!("  \x1b[31mthe document did not reassemble\x1b[0m"),
     }
+
+    rule("Bob checks he was shown everything");
+
+    // Alice commits to how much she has announced. A reader holding fewer entries than the
+    // commitment knows some were dropped, and knows how many, without knowing which.
+    let announced: std::collections::BTreeSet<karst_object::Cid> = [doc_cid].into_iter().collect();
+    let census_obj = Census::publish(&alice_id, &announced, 100, 100_000, 1);
+    let mut census = CensusMonitor::new();
+    census.accept(Census::from_object(&census_obj).unwrap());
+
+    match census.check(&cat, 200) {
+        Completeness::Complete => println!("  \x1b[32mcomplete: everything alice committed to is here\x1b[0m"),
+        other => println!("  \x1b[33m{other:?}\x1b[0m"),
+    }
+    // And what a reader who was shown less would see.
+    let starved = Catalogue::new();
+    println!("  a reader shown nothing sees: {:?}", census.check(&starved, 200));
+    note("Without this, a topic with no results and a topic whose results were withheld are");
+    note("the same observation. Content addressing verifies what arrives and says nothing");
+    note("about what did not.");
+
+    rule("And that alice has not shown someone else a different history");
+
+    // Three witnesses bob chose. They countersign only what extends what they have seen.
+    let mut witnesses: Vec<Witness> = (500..503u32)
+        .map(|i| Witness::new(Identity::from_seed({
+            let mut s = [0u8; 32];
+            s[..4].copy_from_slice(&i.to_le_bytes());
+            s
+        })))
+        .collect();
+    let chosen: Vec<_> = witnesses.iter().map(|w| w.address()).collect();
+    let policy = WitnessPolicy::new(chosen, 2);
+
+    let cp = Checkpoint {
+        publisher: alice_id.address(),
+        sequence: 1,
+        digest: doc_cid,
+        prev: None,
+    };
+    let signed = cp.publish(&alice_id);
+    let mut cosigned = Cosigned::new(cp);
+    for w in witnesses.iter_mut() {
+        if let Ok(sig) = w.cosign(&signed) {
+            cosigned.attach(w.key(), sig);
+        }
+    }
+    println!(
+        "  {} of {} chosen witnesses countersigned",
+        cosigned.support(&policy.chosen),
+        policy.chosen.len()
+    );
+    println!("  {:?}", policy.accept(None, &cosigned));
+
+    // Now alice tries to show a second reader a different history at the same sequence.
+    let forked = Checkpoint {
+        publisher: alice_id.address(),
+        sequence: 1,
+        digest: karst_object::Cid::of(b"a different history"),
+        prev: None,
+    };
+    let forked_signed = forked.publish(&alice_id);
+    let mut forked_cosigned = Cosigned::new(forked);
+    let mut refusals = 0;
+    for w in witnesses.iter_mut() {
+        match w.cosign(&forked_signed) {
+            Ok(sig) => {
+                forked_cosigned.attach(w.key(), sig);
+            }
+            Err(_) => refusals += 1,
+        }
+    }
+    println!(
+        "  \x1b[33mthe forked history was refused by {refusals} of {} witnesses\x1b[0m",
+        policy.chosen.len()
+    );
+    match policy.accept(None, &forked_cosigned) {
+        Acceptance::Accepted => println!("  \x1b[31mand bob accepted it anyway\x1b[0m"),
+        other => println!("  bob's verdict on it: {other:?}"),
+    }
+    note("A witness never originates a statement, so it can withhold and cannot substitute.");
+    note("What it cannot catch is every witness bob chose being captured at once, which is why");
+    note("the set is his rather than the network's.");
 
     rule("One provider stops serving");
 
