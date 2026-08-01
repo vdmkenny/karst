@@ -14,3 +14,7 @@ karst-id.workspace = true
 rand = "0.8"
 blake3 = "1"
 x25519-dalek = { version = "2", features = ["static_secrets"] }
+
+[[bin]]
+name = "karst-net-demo"
+path = "src/bin/karst-net-demo.rs"

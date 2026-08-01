@@ -26,7 +26,6 @@
 use std::collections::VecDeque;
 
 use karst_mix::clock::Clock;
-use karst_mix::packet::Packet;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PacerStats {
@@ -39,12 +38,17 @@ pub struct PacerStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct QueueFull;
 
-pub struct Pacer {
+/// Generic over what is being paced.
+///
+/// A sender usually needs to carry more than the packet: which node it enters at, which
+/// attempt it is. Keeping that alongside the packet in a second list is a bug waiting to
+/// happen, because the two orders diverge the moment anything is dropped.
+pub struct Pacer<T> {
     /// Mean emissions per second.
     lambda: f64,
     clock: Clock,
     next_emit: u64,
-    queue: VecDeque<Packet>,
+    queue: VecDeque<T>,
     capacity: usize,
     /// Dedicated to the schedule so that no other draw can shift it, and so the schedule is
     /// reproducible in a test independently of anything the queue does.
@@ -52,7 +56,7 @@ pub struct Pacer {
     stats: PacerStats,
 }
 
-impl Pacer {
+impl<T> Pacer<T> {
     pub const DEFAULT_CAPACITY: usize = 4096;
 
     pub fn new(lambda_per_sec: f64) -> Self {
@@ -91,7 +95,7 @@ impl Pacer {
     }
 
     /// Hand a packet to the link. It leaves when the schedule says, not now.
-    pub fn offer(&mut self, p: Packet) -> Result<(), QueueFull> {
+    pub fn offer(&mut self, p: T) -> Result<(), QueueFull> {
         self.stats.offered += 1;
         if self.queue.len() >= self.capacity {
             self.stats.refused += 1;
@@ -106,7 +110,7 @@ impl Pacer {
     /// `cover` is called only when a slot comes due with nothing real waiting. It must always
     /// produce a packet: a slot that cannot be filled is a gap, and a gap is the signal this
     /// whole module exists to remove.
-    pub fn tick(&mut self, reading_ms: u64, mut cover: impl FnMut() -> Packet) -> Vec<Packet> {
+    pub fn tick(&mut self, reading_ms: u64, mut cover: impl FnMut() -> T) -> Vec<T> {
         let now = self.clock.advance(reading_ms);
         let mut out = Vec::new();
         while self.next_emit <= now {
@@ -138,7 +142,7 @@ impl Pacer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use karst_mix::packet::{Hop, MixKey};
+    use karst_mix::packet::{Hop, MixKey, Packet};
 
     fn a_packet() -> Packet {
         let k = MixKey::from_seed([5u8; 32]);
@@ -168,7 +172,7 @@ mod tests {
     }
 
     /// Run a pacer for a while and record exactly when it emitted.
-    fn schedule_of(mut p: Pacer, offer_every: Option<u64>, ms: u64) -> Vec<u64> {
+    fn schedule_of(mut p: Pacer<Packet>, offer_every: Option<u64>, ms: u64) -> Vec<u64> {
         let mut times = Vec::new();
         for t in 0..ms {
             if let Some(k) = offer_every {

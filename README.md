@@ -24,16 +24,19 @@ none of them.
 Research project. Working code for ten layers, a specification for the rest, and an itemised
 list of everything the design makes worse.
 
-> **L4 mixing has a packet format and simulators, not a network.** Against a whole-network
-> observer the design holds the adversary to chance, at roughly 200x bandwidth. Cover traffic
-> carries that result; Poisson delay earns its place against an *active* adversary, where a
-> batch mix is isolated 51.7% of the time and a Poisson mix 0.7%. Against a *patient* one,
-> constant-rate emission defeats statistical disclosure entirely, **except at the moment you
-> join**, which fully deanonymises a user the adversary was already watching. See
-> [`docs/05-anonymity.md`](docs/05-anonymity.md).
+> **L4 mixing runs.** `karst-net-demo` stands up seven mixes in four layers on real UDP
+> sockets, one thread each, and two clients exchange messages through them with cover traffic
+> carrying the rest of the stream. Against a whole-network observer the design holds the
+> adversary to chance, at roughly 200x bandwidth. Poisson delay earns its place against an
+> *active* adversary, where a batch mix is isolated 51.7% of the time and a Poisson mix 0.7%.
+> Against a *patient* one, constant-rate emission defeats statistical disclosure entirely,
+> **except at the moment you join**, which fully deanonymises a user the adversary was already
+> watching. See [`docs/05-anonymity.md`](docs/05-anonymity.md) and
+> [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 238 tests
+cargo test          # 315 tests
+cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
 cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?
@@ -49,6 +52,10 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`karst-attest`](crates/karst-attest) | L13.1 | Human or machine authorship, declared and where possible verified. |
 | [`karst-afford`](crates/karst-afford) | L11 Affordance | Typed, priced machine operations inside the signed object. |
 | [`karst-mix`](crates/karst-mix) | L4 Mixing | Sphinx packets with per-hop MAC and wide-block payload, plus four adversary simulators. |
+| [`karst-node`](crates/karst-node) | L4 Mixing | A mix that runs: defended clock, delay queue, shuffled release, eviction by remaining hold. |
+| [`karst-wire`](crates/karst-wire) | L3 Wire | One datagram size, Poisson emission drawn without reference to the queue. |
+| [`karst-seal`](crates/karst-seal) | L4/L6 | HPKE base mode. Sealing keys are separate from identity keys, on purpose. |
+| [`karst-net`](crates/karst-net) | L3-L5 | Directory, stratified routes, providers, clients. The network, running. |
 | [`karst-symmetry`](crates/karst-symmetry) | L16 Symmetry | Does flattening returns to scale actually prevent capture? Partly. |
 | [`karst-value`](crates/karst-value) | L14 Value | Capacity credentials, earned by relaying and spent unlinkably. No bank. |
 | [`karst-fuzz`](crates/karst-fuzz) | commitment 4 | Property tests for reject-never-recover across every decoder. |
