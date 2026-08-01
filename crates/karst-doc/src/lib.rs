@@ -124,11 +124,69 @@ impl Emphasis {
 ///
 /// Note that a link is a `Cid`, not a string. It identifies content, so it can be
 /// resolved by anyone holding that content and it cannot break when a server moves.
+/// What a link means.
+///
+/// A URL names a location and resolves to whatever is there now. That single behaviour produces
+/// both link rot and silent substitution, because the reference cannot say whether it meant
+/// *these bytes* or *whatever this becomes*. It always means the second, and a reader cannot
+/// tell which the author intended.
+///
+/// Both exist here and they are different types, so an author picks and a reader is told.
+///
+/// | | Resolves to | Verifies | Changes under the reader |
+/// |---|---|---|---|
+/// | `Pinned` | exact bytes | by construction | never |
+/// | `Tracking` | current head of the chain | against the lineage | yes, and visibly |
+///
+/// `Pinned` is what a citation means. `Tracking` is what a menu entry means.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Link {
+    /// These bytes, forever.
+    Pinned(Cid),
+    /// Whatever supersedes this, resolved forward from what the author saw.
+    ///
+    /// Carrying what the author saw rather than the start of the chain costs the same 66 bytes
+    /// and buys two things. A reader holding nothing newer degrades to exactly the pinned
+    /// behaviour instead of failing, and a reader holding something newer can **diff what the
+    /// author linked against what they are being shown**, which detects substitution rather
+    /// than merely permitting it.
+    Tracking { seen: Cid },
+}
+
+impl Link {
+    /// What to show when nothing newer is held. Always safe, never wrong, possibly stale.
+    pub fn fallback(&self) -> Cid {
+        match self {
+            Link::Pinned(c) => *c,
+            Link::Tracking { seen } => *seen,
+        }
+    }
+
+    pub fn encode(&self, e: &mut Enc) {
+        match self {
+            Link::Pinned(c) => {
+                e.u8(1).cid(c);
+            }
+            Link::Tracking { seen } => {
+                e.u8(2).cid(seen);
+            }
+        }
+    }
+
+    pub fn decode_tagged(d: &mut Dec<'_>, tag: u8) -> Result<Link, DecodeError> {
+        match tag {
+            1 => Ok(Link::Pinned(d.cid()?)),
+            2 => Ok(Link::Tracking { seen: d.cid()? }),
+            t => Err(DecodeError::UnknownTag(t)),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct Run {
     pub text: String,
     pub emphasis: Emphasis,
-    pub link: Option<Cid>,
+    pub link: Option<Link>,
 }
 
 impl Run {
@@ -146,20 +204,28 @@ impl Run {
             link: None,
         }
     }
+    /// A citation: these bytes, whatever happens later.
     pub fn link(text: &str, to: Cid) -> Self {
         Run {
             text: text.to_string(),
             emphasis: Emphasis::Plain,
-            link: Some(to),
+            link: Some(Link::Pinned(to)),
+        }
+    }
+
+    /// A reference that follows its target forward.
+    pub fn tracking_link(text: &str, seen: Cid) -> Self {
+        Run {
+            text: text.to_string(),
+            emphasis: Emphasis::Plain,
+            link: Some(Link::Tracking { seen }),
         }
     }
 
     pub fn encode(&self, e: &mut Enc) {
         e.str(&self.text).u8(self.emphasis as u8);
-        match self.link {
-            Some(c) => {
-                e.u8(1).cid(&c);
-            }
+        match &self.link {
+            Some(l) => l.encode(e),
             None => {
                 e.u8(0);
             }
@@ -171,8 +237,7 @@ impl Run {
         let emphasis = Emphasis::from_tag(d.u8()?)?;
         let link = match d.u8()? {
             0 => None,
-            1 => Some(d.cid()?),
-            t => return Err(DecodeError::UnknownTag(t)),
+            t => Some(Link::decode_tagged(d, t)?),
         };
         Ok(Run {
             text,
@@ -410,7 +475,7 @@ impl Node {
     /// Following these is always a deliberate act by the reader, never automatic.
     pub fn links(&self) -> Vec<Cid> {
         match self {
-            Node::Prose { runs } => runs.iter().filter_map(|r| r.link).collect(),
+            Node::Prose { runs } => runs.iter().filter_map(|r| r.link.map(|l| l.fallback())).collect(),
             Node::Quote { source, .. } => vec![*source],
             Node::Media { source, .. } => vec![*source],
             Node::Record { fields, .. } => fields
@@ -488,11 +553,23 @@ impl Doc {
             Node::Prose { runs } => {
                 let line: String = runs
                     .iter()
-                    .map(|r| match r.emphasis {
-                        Emphasis::Strong => format!("*{}*", r.text),
-                        Emphasis::Stress => format!("_{}_", r.text),
-                        Emphasis::Literal => format!("`{}`", r.text),
-                        Emphasis::Plain => r.text.clone(),
+                    .map(|r| {
+                        let body = match r.emphasis {
+                            Emphasis::Strong => format!("*{}*", r.text),
+                            Emphasis::Stress => format!("_{}_", r.text),
+                            Emphasis::Literal => format!("`{}`", r.text),
+                            Emphasis::Plain => r.text.clone(),
+                        };
+                        // The kind of link is rendered, not just the target. A reader who
+                        // cannot tell a citation from a reference that follows its target is
+                        // in exactly the position a URL leaves them in.
+                        match &r.link {
+                            None => body,
+                            Some(Link::Pinned(c)) => format!("{body}[pinned {}]", c.short()),
+                            Some(Link::Tracking { seen }) => {
+                                format!("{body}[tracking {}]", seen.short())
+                            }
+                        }
                     })
                     .collect();
                 out.push_str(&format!("{pad}{line}\n"));
@@ -818,4 +895,344 @@ mod tests {
         expected.sort();
         assert_eq!(back, expected);
     }
+}
+
+/// Following a link forward.
+pub mod resolve {
+    //! What a `Tracking` link resolves to, and what it refuses to resolve to.
+    //!
+    //! Resolution walks forward from what the author saw, through `supersedes` edges the
+    //! lineage has verified. Three things make this different from following a URL.
+    //!
+    //! A reader holding nothing newer gets **exactly what the author saw**, rather than an
+    //! error or a guess. Staleness degrades to the pinned behaviour.
+    //!
+    //! A reader holding something newer is told **how far it moved**, so the difference between
+    //! the author's reference and the reader's view is visible rather than assumed away.
+    //!
+    //! A chain that **forks** is refused rather than resolved. Two valid successors mean the
+    //! publisher signed two conflicting continuations, and any rule for picking one lets that
+    //! publisher show different readers different content while both verify. Refusing is the
+    //! only answer that does not quietly pick a side.
+
+    use karst_object::{Cid, Lineage};
+
+    use super::Link;
+
+    #[derive(Clone, Debug, PartialEq, Eq)]
+    pub enum Resolved {
+        /// A pinned link. Nothing to follow.
+        Pinned(Cid),
+        /// Tracking, and nothing has superseded what the author saw.
+        Current(Cid),
+        /// Tracking, and the chain has moved on.
+        Superseded {
+            head: Cid,
+            /// What the author saw, kept so a reader can compare.
+            seen: Cid,
+            steps: usize,
+        },
+        /// The chain forks. Resolution refuses rather than choosing.
+        Forked { at: Cid, candidates: Vec<Cid> },
+        /// Tracking a target the reader holds nothing about, so the author's view stands.
+        Unknown(Cid),
+    }
+
+    impl Resolved {
+        /// The content to show. `None` only when the chain forks, which needs a reader's
+        /// decision rather than a default.
+        pub fn target(&self) -> Option<Cid> {
+            match self {
+                Resolved::Pinned(c) | Resolved::Current(c) | Resolved::Unknown(c) => Some(*c),
+                Resolved::Superseded { head, .. } => Some(*head),
+                Resolved::Forked { .. } => None,
+            }
+        }
+
+        /// Whether a reader is seeing something other than what the author linked.
+        pub fn moved(&self) -> bool {
+            matches!(self, Resolved::Superseded { .. } | Resolved::Forked { .. })
+        }
+    }
+
+    /// The most steps resolution will walk.
+    ///
+    /// A chain is publisher-controlled, so an unbounded walk is an unbounded amount of a
+    /// reader's time bought by whoever publishes the chain.
+    pub const MAX_STEPS: usize = 4096;
+
+    pub fn resolve(link: &Link, lineage: &Lineage) -> Resolved {
+        let seen = match link {
+            Link::Pinned(c) => return Resolved::Pinned(*c),
+            Link::Tracking { seen } => *seen,
+        };
+
+        let mut cursor = seen;
+        let mut steps = 0;
+        loop {
+            let next = lineage.successors(&cursor);
+            match next.len() {
+                0 => break,
+                1 => {
+                    cursor = next[0];
+                    steps += 1;
+                    if steps >= MAX_STEPS {
+                        break;
+                    }
+                }
+                _ => {
+                    return Resolved::Forked {
+                        at: cursor,
+                        candidates: next,
+                    }
+                }
+            }
+        }
+
+        if steps > 0 {
+            Resolved::Superseded {
+                head: cursor,
+                seen,
+                steps,
+            }
+        } else if lineage.successors(&seen).is_empty() && lineage_holds(lineage, &seen) {
+            Resolved::Current(seen)
+        } else {
+            Resolved::Unknown(seen)
+        }
+    }
+
+    fn lineage_holds(lineage: &Lineage, cid: &Cid) -> bool {
+        lineage.get(cid).is_some()
+    }
+}
+
+#[cfg(test)]
+mod link_tests {
+    use super::resolve::{resolve, Resolved, MAX_STEPS};
+    use super::*;
+    use karst_id::Identity;
+    use karst_object::{Lineage, Object};
+
+    /// Publish a chain of `n` versions by one author, returning their cids in order.
+    fn chain(id: &Identity, n: usize, lineage: &mut Lineage) -> Vec<Cid> {
+        let mut cids = Vec::new();
+        let mut prev = None;
+        for i in 0..n {
+            let o = Object::create(id, "page", i as u64, format!("v{i}").into_bytes(), prev);
+            let c = lineage.insert(o).unwrap();
+            cids.push(c);
+            prev = Some(c);
+        }
+        cids
+    }
+
+    /// A pinned link never moves, whatever the publisher does afterwards.
+    ///
+    /// This is what a citation needs and what a URL cannot promise.
+    #[test]
+    fn a_pinned_link_does_not_move_when_the_target_is_superseded() {
+        let id = Identity::from_seed([1u8; 32]);
+        let mut lin = Lineage::new();
+        let cids = chain(&id, 5, &mut lin);
+
+        let l = Link::Pinned(cids[0]);
+        assert_eq!(resolve(&l, &lin), Resolved::Pinned(cids[0]));
+        assert!(!resolve(&l, &lin).moved());
+        assert_eq!(resolve(&l, &lin).target(), Some(cids[0]));
+    }
+
+    /// A tracking link follows the chain, and reports that it did.
+    #[test]
+    fn a_tracking_link_follows_and_says_how_far() {
+        let id = Identity::from_seed([1u8; 32]);
+        let mut lin = Lineage::new();
+        let cids = chain(&id, 5, &mut lin);
+
+        let l = Link::Tracking { seen: cids[0] };
+        match resolve(&l, &lin) {
+            Resolved::Superseded { head, seen, steps } => {
+                assert_eq!(head, cids[4]);
+                assert_eq!(seen, cids[0]);
+                assert_eq!(steps, 4);
+            }
+            other => panic!("expected Superseded, got {other:?}"),
+        }
+        assert!(resolve(&l, &lin).moved(), "the reader was not told it moved");
+    }
+
+    /// A tracking link at the head reports current rather than superseded.
+    #[test]
+    fn a_tracking_link_at_the_head_is_current() {
+        let id = Identity::from_seed([1u8; 32]);
+        let mut lin = Lineage::new();
+        let cids = chain(&id, 3, &mut lin);
+        let l = Link::Tracking { seen: cids[2] };
+        assert_eq!(resolve(&l, &lin), Resolved::Current(cids[2]));
+        assert!(!resolve(&l, &lin).moved());
+    }
+
+    /// A reader holding nothing gets what the author saw, not an error.
+    ///
+    /// Staleness must degrade to the pinned behaviour. Anything else makes a tracking link
+    /// worse than a pinned one for a reader who is merely behind.
+    #[test]
+    fn a_reader_holding_nothing_sees_what_the_author_saw() {
+        let id = Identity::from_seed([1u8; 32]);
+        let mut full = Lineage::new();
+        let cids = chain(&id, 4, &mut full);
+
+        let empty = Lineage::new();
+        let l = Link::Tracking { seen: cids[0] };
+        assert_eq!(resolve(&l, &empty), Resolved::Unknown(cids[0]));
+        assert_eq!(resolve(&l, &empty).target(), Some(cids[0]));
+    }
+
+    /// A forked chain must refuse rather than pick.
+    ///
+    /// Two valid successors mean the publisher signed two conflicting continuations. Any rule
+    /// for choosing lets that publisher show different readers different content while both
+    /// verify, which is exactly the substitution this layer exists to prevent.
+    #[test]
+    fn a_forked_chain_is_refused_rather_than_resolved() {
+        let id = Identity::from_seed([1u8; 32]);
+        let mut lin = Lineage::new();
+        let base = lin
+            .insert(Object::create(&id, "page", 0, b"v0".to_vec(), None))
+            .unwrap();
+        let a = lin
+            .insert(Object::create(&id, "page", 1, b"left".to_vec(), Some(base)))
+            .unwrap();
+        let b = lin
+            .insert(Object::create(&id, "page", 1, b"right".to_vec(), Some(base)))
+            .unwrap();
+
+        let l = Link::Tracking { seen: base };
+        match resolve(&l, &lin) {
+            Resolved::Forked { at, candidates } => {
+                assert_eq!(at, base);
+                assert_eq!(candidates.len(), 2);
+                assert!(candidates.contains(&a) && candidates.contains(&b));
+            }
+            other => panic!("a fork resolved to {other:?}"),
+        }
+        assert_eq!(resolve(&l, &lin).target(), None, "a fork was given a default");
+    }
+
+    /// Somebody else's successor must not capture a tracking link.
+    ///
+    /// If it could, anyone could publish an object claiming to supersede a popular page and
+    /// every tracking link to it would follow them. The lineage already refuses the edge; this
+    /// asserts resolution inherits that refusal.
+    #[test]
+    fn a_stranger_cannot_capture_a_tracking_link() {
+        let author = Identity::from_seed([1u8; 32]);
+        let stranger = Identity::from_seed([2u8; 32]);
+        let mut lin = Lineage::new();
+        let base = lin
+            .insert(Object::create(&author, "page", 0, b"mine".to_vec(), None))
+            .unwrap();
+        let _ = lin.insert(Object::create(
+            &stranger,
+            "page",
+            1,
+            b"hijacked".to_vec(),
+            Some(base),
+        ));
+
+        let l = Link::Tracking { seen: base };
+        assert_eq!(
+            resolve(&l, &lin),
+            Resolved::Current(base),
+            "a stranger's object captured the link"
+        );
+    }
+
+    /// Resolution must not walk an unbounded chain.
+    ///
+    /// The chain is publisher-controlled, so an unbounded walk is unbounded reader time bought
+    /// by whoever publishes it.
+    #[test]
+    fn resolution_is_bounded_by_the_publishers_chain_length() {
+        let id = Identity::from_seed([1u8; 32]);
+        let mut lin = Lineage::new();
+        let cids = chain(&id, 64, &mut lin);
+        let l = Link::Tracking { seen: cids[0] };
+        match resolve(&l, &lin) {
+            Resolved::Superseded { steps, .. } => {
+                assert_eq!(steps, 63);
+                assert!(steps < MAX_STEPS);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// Both link kinds must survive a document round trip and stay distinguishable.
+    ///
+    /// If the encoding lost the distinction, every citation would silently become a tracking
+    /// link, which is the failure this whole type exists to prevent.
+    #[test]
+    fn the_two_link_kinds_survive_encoding_and_stay_distinct() {
+        let c = Cid::of(b"target");
+        let node = Node::Prose {
+            runs: vec![
+                Run::plain("see "),
+                Run::link("the citation", c),
+                Run::plain(" and "),
+                Run::tracking_link("the current version", c),
+            ],
+        };
+        let back = Node::from_bytes(&node.encode()).unwrap();
+        assert_eq!(back, node);
+
+        let Node::Prose { runs } = back else {
+            panic!("shape changed")
+        };
+        assert_eq!(runs[1].link, Some(Link::Pinned(c)));
+        assert_eq!(runs[3].link, Some(Link::Tracking { seen: c }));
+        assert_ne!(runs[1].link, runs[3].link, "the kinds collapsed into one");
+    }
+
+    /// An unknown link tag must be refused rather than guessed at.
+    #[test]
+    fn an_unknown_link_tag_is_refused() {
+        let c = Cid::of(b"t");
+        let node = Node::Prose {
+            runs: vec![Run::link("x", c)],
+        };
+        let mut bytes = node.encode();
+        // Find the link tag byte and corrupt it to an unassigned value.
+        let good = bytes.clone();
+        let mut refused = 0;
+        for i in 0..bytes.len() {
+            bytes.copy_from_slice(&good);
+            if bytes[i] == 1 {
+                bytes[i] = 9;
+                if Node::from_bytes(&bytes).is_err() {
+                    refused += 1;
+                }
+            }
+        }
+        assert!(refused > 0, "no tag position rejected an unassigned value");
+    }
+    /// A reader must be able to see which kind of link they are following.
+    ///
+    /// A link whose kind is invisible is a URL again: the reader cannot tell whether what they
+    /// are about to follow is fixed or will change under them.
+    #[test]
+    fn rendering_distinguishes_the_two_kinds_of_link() {
+        let c = Cid::of(b"target");
+        let mut doc = Doc::new();
+        let root = doc.add(Node::Prose {
+            runs: vec![
+                Run::link("a citation", c),
+                Run::plain(" and "),
+                Run::tracking_link("a menu", c),
+            ],
+        });
+        let text = doc.render_text(&root);
+        assert!(text.contains("pinned"), "a pinned link rendered without saying so: {text}");
+        assert!(text.contains("tracking"), "a tracking link rendered without saying so: {text}");
+    }
+
 }
