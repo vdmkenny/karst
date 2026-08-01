@@ -341,9 +341,14 @@ mod tests {
         assert_eq!(s.samples(), 0);
     }
 
-    /// A loop must be indistinguishable from real mail at the provider.
+    /// A loop must be indistinguishable from real mail in what a provider can read.
+    ///
+    /// Comparing lengths compares two constants: every envelope is the same width by
+    /// construction, so that assertion holds even if loops were sent unsealed. What a provider
+    /// actually sees is the envelope kind byte and the bytes after it, and a loop sent open
+    /// while mail is sealed would be filterable in one comparison.
     #[test]
-    fn a_loop_looks_like_mail_to_the_provider() {
+    fn a_loop_is_indistinguishable_from_mail_in_what_a_provider_reads() {
         let mut mesh = Mesh::new(4, 3, 0.0);
         let alice = Client::from_seed([1u8; 32], mesh.provider_id);
         let bob = Client::from_seed([2u8; 32], mesh.provider_id);
@@ -360,5 +365,12 @@ mod tests {
         let mail_item = mesh.provider.collect(&bob.mailbox()).items.remove(0);
 
         assert_eq!(loop_item.len(), mail_item.len());
+        assert_eq!(
+            loop_item[0], mail_item[0],
+            "a loop and real mail carry different envelope kinds, so a provider can filter loops"
+        );
+        assert_eq!(loop_item[0], crate::frame::ENV_SEALED);
+        // And the sealed body differs, so this is not comparing a constant to itself.
+        assert_ne!(loop_item[1..], mail_item[1..]);
     }
 }

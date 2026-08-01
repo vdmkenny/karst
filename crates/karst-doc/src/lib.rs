@@ -1157,22 +1157,28 @@ mod link_tests {
         );
     }
 
-    /// Resolution must not walk an unbounded chain.
+    /// Resolution must stop at the cap, and the test must actually reach it.
     ///
-    /// The chain is publisher-controlled, so an unbounded walk is unbounded reader time bought
-    /// by whoever publishes it.
+    /// The previous version built a chain of 64 against a cap of 4096 and asserted
+    /// `steps < MAX_STEPS`, which compares two constants and holds however `resolve` behaves.
+    /// Deleting the cap entirely would have passed it, leaving a publisher able to buy
+    /// unbounded reader time on every tracking link.
     #[test]
-    fn resolution_is_bounded_by_the_publishers_chain_length() {
-        let id = Identity::from_seed([1u8; 32]);
+    fn resolution_stops_at_the_cap() {
+        let id = Identity::from_seed([9u8; 32]);
         let mut lin = Lineage::new();
-        let cids = chain(&id, 64, &mut lin);
-        let l = Link::Tracking { seen: cids[0] };
-        match resolve(&l, &lin) {
-            Resolved::Superseded { steps, .. } => {
-                assert_eq!(steps, 63);
-                assert!(steps < MAX_STEPS);
+        let cids = chain(&id, MAX_STEPS + 2, &mut lin);
+
+        match resolve(&Link::Tracking { seen: cids[0] }, &lin) {
+            Resolved::Superseded { head, steps, .. } => {
+                assert_eq!(steps, MAX_STEPS, "the walk did not stop at the cap");
+                assert_ne!(
+                    head,
+                    *cids.last().unwrap(),
+                    "the walk reached the true head, so the cap was not binding"
+                );
             }
-            other => panic!("{other:?}"),
+            other => panic!("expected a capped walk, got {other:?}"),
         }
     }
 
@@ -1202,27 +1208,57 @@ mod link_tests {
         assert_ne!(runs[1].link, runs[3].link, "the kinds collapsed into one");
     }
 
-    /// An unknown link tag must be refused rather than guessed at.
+    /// Every unassigned link tag must be refused, at the position that actually holds it.
+    ///
+    /// The previous version overwrote **every** byte equal to 1 and asserted only that some
+    /// mutation was refused. At least three unrelated positions in this encoding are 1: a run
+    /// count, a string length, and the hash algorithm byte, each of which fails decoding on its
+    /// own. So the aggregate held regardless of what the link tag did, and a fallthrough that
+    /// silently decoded tag 9 as a pinned link would have passed: two byte strings naming one
+    /// node, which is the parser differential the format exists to prevent.
     #[test]
-    fn an_unknown_link_tag_is_refused() {
+    fn every_unassigned_link_tag_is_refused() {
         let c = Cid::of(b"t");
-        let node = Node::Prose {
+        let good = Node::Prose {
             runs: vec![Run::link("x", c)],
-        };
-        let mut bytes = node.encode();
-        // Find the link tag byte and corrupt it to an unassigned value.
-        let good = bytes.clone();
-        let mut refused = 0;
-        for i in 0..bytes.len() {
-            bytes.copy_from_slice(&good);
-            if bytes[i] == 1 {
-                bytes[i] = 9;
-                if Node::from_bytes(&bytes).is_err() {
-                    refused += 1;
+        }
+        .encode();
+
+        // Find the tag deterministically: it is the byte whose value is 1 and which, when set
+        // to 2, still decodes, since 2 is the other assigned tag.
+        let mut tag_at = None;
+        for i in 0..good.len() {
+            if good[i] != 1 {
+                continue;
+            }
+            let mut probe = good.clone();
+            probe[i] = 2;
+            if let Ok(Node::Prose { runs }) = Node::from_bytes(&probe) {
+                if runs.len() == 1 && matches!(runs[0].link, Some(Link::Tracking { .. })) {
+                    tag_at = Some(i);
+                    break;
                 }
             }
         }
-        assert!(refused > 0, "no tag position rejected an unassigned value");
+        let tag_at = tag_at.expect("the link tag position was not found");
+
+        let mut refused = 0;
+        for t in 3u8..=255 {
+            let mut bad = good.clone();
+            bad[tag_at] = t;
+            assert!(
+                Node::from_bytes(&bad).is_err(),
+                "link tag {t} was accepted rather than refused"
+            );
+            refused += 1;
+        }
+        assert_eq!(refused, 253);
+        // And the two assigned values still work, so the sweep is not refusing everything.
+        for t in [1u8, 2] {
+            let mut ok = good.clone();
+            ok[tag_at] = t;
+            assert!(Node::from_bytes(&ok).is_ok(), "assigned tag {t} was refused");
+        }
     }
     /// A reader must be able to see which kind of link they are following.
     ///

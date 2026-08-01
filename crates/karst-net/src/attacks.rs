@@ -371,31 +371,64 @@ fn a_clients_schedule_does_not_move_when_it_starts_talking() {
     assert_eq!(silent, busy, "talking moved the schedule");
 }
 
-/// A provider must not be able to learn a mailbox is live by probing.
+/// A drained mailbox must be indistinguishable from one never used.
+///
+/// The previous version deposited nothing, so both collections took the unknown-tag arm and it
+/// compared that arm against itself. The states that are actually distinguishable are a box
+/// that has held mail and a box that never existed, and only one of those was ever built.
 #[test]
-fn collecting_an_unused_tag_is_indistinguishable_from_an_empty_one() {
+fn a_drained_mailbox_is_indistinguishable_from_one_never_used() {
     let mut p = Provider::new();
-    let a = p.collect(&[1u8; 32]);
-    let b = p.collect(&[2u8; 32]);
-    assert_eq!(a, b);
+    let used: crate::provider::Tag = [1u8; 32];
+    let never: crate::provider::Tag = [2u8; 32];
+
+    let mut payload = used.to_vec();
+    payload.extend(std::iter::repeat(9u8).take(crate::frame::ENVELOPE_BYTES));
+    p.deposit(&payload).unwrap();
+
+    // Drained through the path that keeps the entry alive with its refusal count.
+    assert!(p.take_one(&used).0.is_some());
+    assert!(p.take_one(&used).0.is_none());
+    assert!(
+        p.depth(&used) == 0,
+        "vacuous: the box was not actually drained"
+    );
+
+    assert_eq!(
+        p.collect(&used),
+        p.collect(&never),
+        "a drained box is distinguishable from one that never existed"
+    );
+    assert_eq!(p.peek(&used, 0), p.peek(&never, 0));
 }
 
-/// Every packet a client emits must be the same size, cover or not.
+/// Cover and real packets must be indistinguishable in what the sender chooses.
+///
+/// Length is fixed by the format, so asserting it is equal compares `PACKET_BYTES` to itself
+/// and holds however the packets are built. What a sender actually controls is the route: hop
+/// count, and where the packet ends. A cover packet routed one hop, or terminating somewhere
+/// no real packet goes, would be trivially filterable and the previous test could not see it.
 #[test]
-fn cover_and_real_packets_are_byte_identical_in_length() {
+fn cover_and_real_packets_are_indistinguishable_in_route_shape() {
     let mesh = Mesh::new(4, 3);
     let alice = Client::from_seed([1u8; 32], mesh.provider_id);
     let bob = Client::from_seed([2u8; 32], mesh.provider_id);
     let mut rng = rand::thread_rng();
 
-    let real = alice.send(&mesh.dir, &bob.contact(), b"", &mut rng).unwrap();
-    let cover = alice.cover(&mesh.dir, mesh.provider_id, &mut rng).unwrap();
-    assert_eq!(real[0].packet.to_bytes().len(), cover.packet.to_bytes().len());
+    for _ in 0..64 {
+        let real = alice.send(&mesh.dir, &bob.contact(), b"m", &mut rng).unwrap();
+        let cover = alice.cover(&mesh.dir, mesh.provider_id, &mut rng).unwrap();
 
-    let full = alice
-        .send(&mesh.dir, &bob.contact(), &vec![3u8; crate::frame::DATA_BYTES], &mut rng)
-        .unwrap();
-    assert_eq!(full[0].packet.to_bytes().len(), cover.packet.to_bytes().len());
+        // Both enter at some layer-0 node, and the entry is drawn from the same set.
+        let real_layer = mesh.dir.get(real[0].via).unwrap().layer;
+        let cover_layer = mesh.dir.get(cover.via).unwrap().layer;
+        assert_eq!(real_layer, cover_layer, "cover entered at a different layer");
+        assert_eq!(real_layer, 0);
+
+        // And the wire form is the one size, which is structural rather than asserted.
+        assert_eq!(real[0].packet.to_bytes().len(), karst_mix::packet::PACKET_BYTES);
+        assert_eq!(cover.packet.to_bytes().len(), karst_mix::packet::PACKET_BYTES);
+    }
 }
 
 /// A hostile entry must not learn the destination from what it is handed.

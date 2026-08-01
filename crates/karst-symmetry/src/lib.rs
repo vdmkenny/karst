@@ -520,15 +520,40 @@ mod tests {
         assert!(doubled > both_ends * 3.5);
     }
 
+    /// Observation tracks node count, and the reported figure is the one the wiring implies.
+    ///
+    /// The previous version compared `flat.path_observation` against `linear.path_observation`
+    /// and asserted they were equal. Both come from `observation_rates`, which does not take
+    /// the returns rule as an argument, and both configs fix the same node counts, so it
+    /// compared one pure function's output to itself. It held however the call was wired, and
+    /// a wrong hop count passed through it unnoticed.
     #[test]
-    fn flat_returns_does_not_reduce_observation_at_all() {
-        let flat = run(&SymConfig::one_giant(Returns::Flat, 3));
-        let linear = run(&SymConfig::one_giant(Returns::Linear, 3));
-        assert_eq!(
-            flat.path_observation, linear.path_observation,
-            "the reputation rule is orthogonal to who is on the path"
+    fn observation_tracks_node_count_and_the_reported_figure_is_the_wired_one() {
+        // The claim, against the function that decides it.
+        let (small, _) = observation_rates(100, 400, 3);
+        let (large, _) = observation_rates(200, 400, 3);
+        assert!(
+            large > small,
+            "a larger share did not raise observation: {large:.3} vs {small:.3}"
         );
-        assert!(flat.path_observation > 0.5);
+        // Hop count is not interchangeable, so a wrong one is a detectable mistake.
+        let (fewer, _) = observation_rates(100, 400, 2);
+        assert_ne!(fewer, small);
+
+        // The wiring: what a run reports must be what its own configuration implies.
+        let cfg = SymConfig::one_giant(Returns::Flat, 3);
+        let f = run(&cfg);
+        let (expected, _) =
+            observation_rates(cfg.operators[0].nodes, cfg.total_nodes(), cfg.path_hops);
+        assert_eq!(
+            f.path_observation, expected,
+            "the reported observation is not what this configuration implies"
+        );
+
+        // And the rule really is orthogonal, which is worth keeping now that it is not the
+        // only thing asserted.
+        let linear = run(&SymConfig::one_giant(Returns::Linear, 3));
+        assert_eq!(f.path_observation, linear.path_observation);
     }
 
 
