@@ -31,10 +31,15 @@ Mohammadi and Kate (*Anonymity Trilemma: Strong Anonymity, Low Bandwidth Overhea
 Choose Two*, IEEE S&P 2018) prove the shape of it. Constant-rate emission is this design
 choosing strong anonymity and low latency, and paying in bandwidth.
 
-For calibration against a real system: Loopix reports over 300 messages per second per **mix
-node**, under 1.5 ms of node-added delay, and end-to-end latency in the order of seconds
-(Piotrowska, Hayes, Elahi, Meiser, Danezis, USENIX Security 2017). That is a node's aggregate
-across all its clients, not one client's goodput, which is the number in the table above.
+For calibration against a real system: Loopix's abstract claims a relay handles "upwards of 300
+messages per second" at under 1.5 ms of added delay, and its measurement section is more
+precise and more useful: bandwidth "increases linearly until it reaches around **225 messages
+per second**", after which growth is much smaller. 300 is the saturated ceiling; 225 is where
+linear scaling ends, and quoting the first as though it were the second would overstate the
+paper. Per-packet processing is about 0.6 ms.
+
+That is a **node's** aggregate across all its clients, not one client's goodput, which is the
+number in the table above.
 
 ---
 
@@ -54,6 +59,24 @@ trust one, and why the reader makes it per fetch instead of the publisher fixing
 `Exposure` states what each carriage reveals as four separate facts rather than one word:
 reader address, content requested, volume and timing, and ability to substitute. The last is
 false for both, and saying so explicitly is the point.
+
+### "Volume and timing" is far too mild a phrase
+
+It means **which film**. Reed and Kranch (*Identifying HTTPS-Protected Netflix Videos in
+Real-Time*, CODASPY 2017) built a fingerprint database of 42,027 Netflix titles and report
+differentiating between videos with "greater than 99.99% accuracy", identifying **199 of 200**
+test streams, most within two and a half minutes, using **only TCP/IP header information** and
+no payload at all. Variable-bitrate encoding makes each DASH segment's size content-dependent,
+so the sequence of segment sizes is the fingerprint and encryption does not touch it.
+
+Schuster, Shmatikov and Tromer (*Beauty and the Burst*, USENIX Security 2017) show the same
+attack does not even need an on-path observer: a JavaScript advertisement running on a nearby
+machine suffices.
+
+So a reader choosing `Direct` for a film is not revealing "some bytes moved". They are
+revealing the title, to anyone on the path, at better than 99% accuracy. `Exposure` says
+`content_requested` and `volume_and_timing` are both true for direct carriage, and this is what
+those two words are worth together.
 
 ---
 
@@ -94,6 +117,32 @@ which is a cost the reader sees in advance.
 
 ---
 
+## Bulk must never share a path with careful traffic
+
+Le Blond, Manils, Chaabane, Kaafar, Castelluccia, Legout and Dabbous (*One Bad Apple Spoils the
+Bunch*, LEET 2011) ran six instrumented Tor exit nodes for 23 days and revealed **10,000 IP
+addresses** of Tor users, which they describe as the largest attack on Tor by that measure.
+
+The mechanism is the part that matters here, and it is not really about BitTorrent. Tor
+multiplexes several TCP streams from one source onto a single circuit, so **deanonymising any
+one stream links every other stream sharing that circuit**. They used BitTorrent as the
+insecure application because it leaks an IP directly, and then harvested everything travelling
+beside it: 193% additional streams on top of the BitTorrent baseline, including **27% of HTTP
+streams possibly originating from "secure" browsers**. BitTorrent was over 40% of Tor's traffic
+by volume at the time.
+
+That is the strongest argument for the split in this document, and it is stronger than the
+bandwidth argument. Bulk is not merely too big for the mix network. **Bulk sharing a path with
+careful traffic destroys the careful traffic**, because the bulk is what gets deanonymised
+first and everything beside it comes along.
+
+The design keeps them apart structurally rather than by advice. Fragments already take
+independent routes, so no single node sees a whole message's timing, and `Carriage::Direct` is
+a different transport entirely rather than another circuit on the same one. There is no
+arrangement in which a film and a private message share a path.
+
+---
+
 ## Deduplication and unlinkability are opposed, and this takes deduplication
 
 A chunk's content address is identical for every reader and every publisher. That is exactly
@@ -107,6 +156,14 @@ under different names, produce identical chunk addresses.
 This is a property of the design and it is not a bug that a later version fixes. Randomising
 chunk content per reader would break the property, and would break deduplication with it. The
 choice is real and this is the side it takes.
+
+The adjacent published result is Harnik, Pinkas and Shulman-Peleg (*Side Channels in Cloud
+Services: Deduplication in Cloud Storage*, IEEE Security & Privacy 8(6), 2010), where a client
+learns whether content already exists on a server from whether their upload is skipped. It needs
+**source-based deduplication across users**, and this design does not do that: a provider stores
+what it is given and no upload is ever skipped on the basis of what someone else uploaded. So
+that particular channel is absent here, and the fingerprint above is a different one, arising
+from address stability rather than from upload behaviour.
 
 ---
 
@@ -123,22 +180,16 @@ choice is real and this is the side it takes.
 
 ---
 
-## Claims I wanted to make and could not verify
+## What is still uncited
 
-Recorded because leaving them out silently would be the same as never having tried, and stating
-them without a citation would be worse.
+Two narrower claims, kept separate from the verified ones above.
 
-- **BitTorrent over Tor deanonymises its users.** I believe there is a LEET 2011 paper by Le
-  Blond and colleagues on tracing Tor users through P2P applications. **Unverified**, so the
-  swarm section above claims nothing about whether peer-to-peer delivery is safe here.
-- **Deduplication is a published side channel.** A client learning whether content already
-  exists from whether an upload is skipped is, I believe, in the literature. **Unverified**, so
-  the section above rests on the property demonstrated in this repo's own test rather than on
-  anyone else's result.
-- **Encrypted video streams are fingerprintable by bitrate.** Widely believed and I could not
-  confirm a specific paper or accuracy figure. **Unverified**, and no claim above depends on it.
-
-Verification was interrupted rather than attempted and abandoned. These are open, not settled.
+- **Video identification through a VPN.** The HTTPS and remote-observer cases are verified. No
+  peer-reviewed evaluation of the same attack *through a VPN tunnel* was found, so nothing here
+  claims it.
+- **Video identification over Tor.** A 2025 journal paper on the subject appears to exist, and
+  its reported accuracy figures could not be confirmed from the paper itself. No number from it
+  is used.
 
 ---
 
@@ -146,6 +197,15 @@ Verification was interrupted rather than attempted and abandoned. These are open
 
 - Das, Meiser, Mohammadi, Kate. *Anonymity Trilemma: Strong Anonymity, Low Bandwidth Overhead,
   Low Latency — Choose Two.* IEEE S&P 2018.
-- Piotrowska, Hayes, Elahi, Meiser, Danezis. *The Loopix Anonymity System.* USENIX Security 2017.
+- Piotrowska, Hayes, Elahi, Meiser, Danezis. *The Loopix Anonymity System.* USENIX Security
+  2017, pp. 1199-1216.
+- Le Blond, Manils, Chaabane, Kaafar, Castelluccia, Legout, Dabbous. *One Bad Apple Spoils the
+  Bunch: Exploiting P2P Applications to Trace and Profile Tor Users.* LEET 2011.
+- Reed, Kranch. *Identifying HTTPS-Protected Netflix Videos in Real-Time.* CODASPY 2017,
+  pp. 361-368.
+- Schuster, Shmatikov, Tromer. *Beauty and the Burst: Remote Identification of Encrypted Video
+  Streams.* USENIX Security 2017.
+- Harnik, Pinkas, Shulman-Peleg. *Side Channels in Cloud Services: Deduplication in Cloud
+  Storage.* IEEE Security & Privacy 8(6):40-47, 2010.
 - `docs/15-fundamental-limits.md`, for what the trilemma costs elsewhere in this design.
 - `docs/21-a-running-network.md`, for where the constant-rate emission comes from.

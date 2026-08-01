@@ -35,7 +35,7 @@ list of everything the design makes worse.
 > [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 435 tests
+cargo test          # 446 tests
 cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-index --bin karst-search    # discovery with 200,000 sybils in the room
 cargo run --release -p karst-stack --bin karst-stack-demo  # the whole stack, composed
@@ -53,6 +53,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`karst-doc`](crates/karst-doc) | L10 Document | A typed content-addressed node graph. Not a markup language. |
 | [`karst-cap`](crates/karst-cap) | L9 Authority | Capability chains that can only ever narrow, verifiable with no directory. |
 | [`karst-attest`](crates/karst-attest) | L13.1 | Human or machine authorship, declared and where possible verified. |
+| [`karst-agency`](crates/karst-agency) | L12 Agency | A document requests a rendering, the client decides, and the fetch pattern says nothing. |
 | [`karst-afford`](crates/karst-afford) | L11 Affordance | Typed, priced machine operations inside the signed object. |
 | [`karst-mix`](crates/karst-mix) | L4 Mixing | Sphinx packets with per-hop MAC and wide-block payload, plus four adversary simulators. |
 | [`karst-node`](crates/karst-node) | L4 Mixing | A mix that runs: defended clock, delay queue, shuffled release, eviction by remaining hold. |
