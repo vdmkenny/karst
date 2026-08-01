@@ -87,10 +87,12 @@ fn main() {
     }
     show(&Ranker::new(trust.clone()), &cat, &["mixing", "anonymity"], &names);
     note(&format!(
-        "The catalogue held {} of them and refused the rest. What got in saturates:",
+        "The catalogue held {} of them and refused the rest, and all of them together are",
         cat.untrusted_held()
     ));
-    note("a thousand strangers are worth barely more than one, and less than anyone chosen.");
+    note("worth exactly one untrusted voice. The second identity gains nothing, and neither");
+    note("does the two hundred thousandth. Cheng and Friedman (2005) prove no name-blind");
+    note("ranking can manage this, which is why ranking is anchored at the reader.");
 
     rule("A moderator the reader trusts disputes the spam");
     trust.set(moderator, 1.0);
