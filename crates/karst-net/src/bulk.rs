@@ -96,6 +96,8 @@ pub struct FetchPlan {
     pub direct: Vec<Cid>,
     /// Bytes that will cross the exposed path.
     pub exposed_bytes: u64,
+    /// Bytes in the whole fetch, exposed or not.
+    pub total_bytes: u64,
 }
 
 impl FetchPlan {
@@ -104,33 +106,83 @@ impl FetchPlan {
         !self.direct.is_empty()
     }
 
-    /// How long the whole fetch takes if it all goes over the mix network instead.
+    /// How long the whole fetch takes if it all goes over the mix network.
     ///
-    /// Offered so a caller choosing exposure can see the price of not choosing it. Refusing to
-    /// compute this would make the safe option invisible.
+    /// Measured against **total** bytes rather than exposed ones. Measuring the exposed part
+    /// would report zero to exactly the reader who chose privacy, which is the one reader who
+    /// most needs to know what that choice costs them.
     pub fn seconds_if_all_mixed(&self, packets_per_sec: f64) -> f64 {
-        self.exposed_bytes as f64 / Carriage::Mixed.throughput(packets_per_sec)
+        self.total_bytes as f64 / Carriage::Mixed.throughput(packets_per_sec)
     }
 }
 
 /// The largest object that goes over the mix network by default.
-///
-/// A manifest and a document sit far below this; a media chunk sits far above. The threshold
-/// is a policy rather than a law, which is why `plan` takes it.
 pub const DEFAULT_MIXED_LIMIT: u64 = 64 * 1024;
+
+/// The most a reader will let cross the exposed path before refusing outright.
+pub const DEFAULT_EXPOSURE_BUDGET: u64 = 512 * 1024 * 1024;
+
+/// What a reader is willing to reveal, expressed before they see the content.
+///
+/// # Why a per-chunk threshold alone is not a policy
+///
+/// **The publisher chooses chunk size.** A per-chunk threshold therefore lets the publisher
+/// decide which side of it their content falls on: chunk a film at one byte over a reader's
+/// limit and every reader must expose themselves to read it, or chunk it at one byte under and
+/// every reader spends ten hours pulling it through the mix network. Either way the reader's
+/// stated preference has been overridden by someone else's encoding choice.
+///
+/// A policy has to be expressed in quantities the publisher does not control: the **total**
+/// a reader will expose, and whether they will expose anything at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Policy {
+    /// Objects at or below this go over the mix network. Publisher-influenced, so advisory.
+    pub mixed_limit: u64,
+    /// Total bytes allowed across the exposed path. Not publisher-influenced.
+    pub exposure_budget: u64,
+    /// Refuse exposure entirely, whatever it costs in time.
+    pub never_expose: bool,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        Policy {
+            mixed_limit: DEFAULT_MIXED_LIMIT,
+            exposure_budget: DEFAULT_EXPOSURE_BUDGET,
+            never_expose: false,
+        }
+    }
+}
+
+impl Policy {
+    /// Everything over the mix network, however slow.
+    pub fn private() -> Self {
+        Policy {
+            never_expose: true,
+            ..Policy::default()
+        }
+    }
+}
 
 /// Decide carriage per object.
 ///
 /// The **manifest always goes over the mix network**, whatever it costs, because it is what
 /// names everything else. A reader who fetches a manifest directly has told the carrier what
 /// work they are about to read, and no amount of care about the chunks afterwards undoes that.
-pub fn plan(manifest: Cid, chunks: &[(Cid, u64)], mixed_limit: u64) -> FetchPlan {
+///
+/// Beyond the reader's budget, chunks go back onto the mix network rather than being refused,
+/// so a publisher cannot make content unreadable by chunking it past the limit. They can make
+/// it slow, which is a cost the reader can see in advance.
+pub fn plan_with(manifest: Cid, chunks: &[(Cid, u64)], policy: &Policy) -> FetchPlan {
     let mut mixed = vec![manifest];
     let mut direct = Vec::new();
     let mut exposed_bytes = 0u64;
+    let total_bytes: u64 = chunks.iter().map(|(_, s)| *s).sum();
 
     for (cid, size) in chunks {
-        if *size <= mixed_limit {
+        let small = *size <= policy.mixed_limit;
+        let over_budget = exposed_bytes.saturating_add(*size) > policy.exposure_budget;
+        if small || policy.never_expose || over_budget {
             mixed.push(*cid);
         } else {
             direct.push(*cid);
@@ -141,7 +193,20 @@ pub fn plan(manifest: Cid, chunks: &[(Cid, u64)], mixed_limit: u64) -> FetchPlan
         mixed,
         direct,
         exposed_bytes,
+        total_bytes,
     }
+}
+
+/// Plan under the default policy.
+pub fn plan(manifest: Cid, chunks: &[(Cid, u64)], mixed_limit: u64) -> FetchPlan {
+    plan_with(
+        manifest,
+        chunks,
+        &Policy {
+            mixed_limit,
+            ..Policy::default()
+        },
+    )
 }
 
 #[cfg(test)]
@@ -229,7 +294,11 @@ mod tests {
     #[test]
     fn a_plan_reports_what_the_private_path_would_have_cost() {
         let hour_of_video = 1_610_612_736u64;
-        let p = plan(cid(0), &[(cid(1), hour_of_video)], DEFAULT_MIXED_LIMIT);
+        let generous = Policy {
+            exposure_budget: u64::MAX,
+            ..Policy::default()
+        };
+        let p = plan_with(cid(0), &[(cid(1), hour_of_video)], &generous);
         assert!(p.leaks());
         let secs = p.seconds_if_all_mixed(60.0);
         assert!(
@@ -256,4 +325,64 @@ mod tests {
         assert_eq!(a_chunks, b_chunks);
         assert_eq!(a.chunks, b.chunks);
     }
+    /// A publisher must not be able to force a reader to expose themselves.
+    ///
+    /// Chunk size is the publisher's choice, so a per-chunk threshold is a control the
+    /// publisher holds rather than the reader. Chunking one byte over a reader's limit would
+    /// otherwise mean every reader must use the exposed path to read that work at all.
+    #[test]
+    fn a_publisher_cannot_chunk_a_reader_into_exposing_themselves() {
+        // Every chunk one byte over the threshold.
+        let hostile: Vec<(Cid, u64)> = (0..200u8)
+            .map(|i| (cid(i), DEFAULT_MIXED_LIMIT + 1))
+            .collect();
+
+        let p = plan_with(cid(255), &hostile, &Policy::private());
+        assert!(!p.leaks(), "a reader who refuses exposure was exposed anyway");
+        assert_eq!(p.exposed_bytes, 0);
+        assert_eq!(p.mixed.len(), hostile.len() + 1);
+    }
+
+    /// And must not be able to exceed a reader's total budget by chunking finely.
+    ///
+    /// Any single chunk can sit just over the per-chunk threshold, so the quantity that binds
+    /// has to be one the publisher does not control.
+    #[test]
+    fn exposure_stops_at_the_readers_budget_however_the_content_is_chunked() {
+        let budget = 4 * 1024 * 1024u64;
+        let policy = Policy {
+            exposure_budget: budget,
+            ..Policy::default()
+        };
+        // A thousand chunks, each just over the per-chunk threshold.
+        let many: Vec<(Cid, u64)> = (0..250u8)
+            .map(|i| (cid(i), DEFAULT_MIXED_LIMIT * 2))
+            .collect();
+        let total: u64 = many.iter().map(|(_, s)| s).sum();
+        assert!(total > budget, "vacuous: the content fits in the budget");
+
+        let p = plan_with(cid(255), &many, &policy);
+        assert!(
+            p.exposed_bytes <= budget,
+            "exposed {} against a budget of {budget}",
+            p.exposed_bytes
+        );
+        // What did not fit went back onto the mix network rather than being refused, so the
+        // publisher cannot make content unreadable by chunking it past the limit.
+        assert_eq!(p.mixed.len() + p.direct.len(), many.len() + 1);
+    }
+
+    /// Refusing exposure must never make content unreadable, only slow.
+    #[test]
+    fn refusing_exposure_costs_time_and_not_access() {
+        let film = [(cid(1), 8 * 1024 * 1024 * 1024u64)];
+        let p = plan_with(cid(0), &film, &Policy::private());
+        assert!(!p.leaks());
+        assert_eq!(p.mixed.len(), 2, "the chunk was dropped rather than queued");
+        // And the reader can see what that decision costs before making it, which is the
+        // whole point of measuring against total rather than exposed bytes.
+        let days = p.seconds_if_all_mixed(60.0) / 86_400.0;
+        assert!(days > 1.0, "a film over the mix network should take days, got {days:.2}");
+    }
+
 }

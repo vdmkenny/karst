@@ -12,7 +12,7 @@ pub mod watch;
 pub mod runner;
 pub mod sentinel;
 
-pub use bulk::{plan, Carriage, Exposure, FetchPlan};
+pub use bulk::{plan, plan_with, Carriage, Exposure, FetchPlan, Policy};
 pub use client::{Client, Contact, SendError};
 pub use directory::{Directory, NodeInfo, RouteError};
 pub use sentinel::Sentinel;

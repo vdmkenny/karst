@@ -39,6 +39,7 @@ cargo test          # 364 tests
 cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-index --bin karst-search    # discovery with 200,000 sybils in the room
 cargo run --release -p karst-stack --bin karst-stack-demo  # the whole stack, composed
+cargo run --release -p karst-net --bin karst-bulkcost      # what the mixnet cannot carry
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
 cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?
