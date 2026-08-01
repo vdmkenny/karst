@@ -265,6 +265,17 @@ pub struct Hop {
     pub delay_ms: u32,
 }
 
+/// Redacted on purpose.
+///
+/// A route is the one thing a sender must never leak, and a route printed into a log or an
+/// error message is a route an adversary can read without breaking anything. The delay is
+/// withheld for the same reason: per-hop delays are what an observer needs to correlate.
+impl core::fmt::Debug for Hop {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Hop(redacted)")
+    }
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct Packet {
     alpha: [u8; ALPHA_BYTES],
@@ -573,6 +584,33 @@ impl Packet {
         v.extend_from_slice(&self.beta);
         v.extend_from_slice(&self.delta);
         v
+    }
+
+    /// Read a packet off the wire.
+    ///
+    /// Structural only: it checks that the right number of bytes are present and does no
+    /// cryptography. Nothing here can distinguish a genuine packet from random bytes, and
+    /// nothing here should try, because `peel` is where authentication belongs and doing any
+    /// of it earlier would create a cheaper oracle than `peel` offers.
+    pub fn from_bytes(bytes: &[u8]) -> Option<Packet> {
+        if bytes.len() != PACKET_BYTES {
+            return None;
+        }
+        let mut alpha = [0u8; ALPHA_BYTES];
+        let mut gamma = [0u8; MAC_BYTES];
+        let mut beta = [0u8; HEADER_BYTES];
+        let (a, rest) = bytes.split_at(ALPHA_BYTES);
+        let (g, rest) = rest.split_at(MAC_BYTES);
+        let (b, d) = rest.split_at(HEADER_BYTES);
+        alpha.copy_from_slice(a);
+        gamma.copy_from_slice(g);
+        beta.copy_from_slice(b);
+        Some(Packet {
+            alpha,
+            gamma,
+            beta,
+            delta: d.to_vec(),
+        })
     }
 
     /// Flip one bit of the payload, as an attacker on the wire would.
@@ -1056,6 +1094,50 @@ mod adversarial {
         // Only the last hop learns the difference.
         assert!(matches!(a.peel(&ks[2], &mut seen[2]), Ok(Peeled::Deliver { .. })));
         assert!(matches!(b.peel(&ks[2], &mut seen2[2]), Ok(Peeled::Drop { .. })));
+    }
+
+    /// Serialising and reading back must be exact for any packet.
+    #[test]
+    fn the_wire_encoding_round_trips() {
+        let k = MixKey::from_seed([11u8; 32]);
+        let route = vec![Hop { id: 0, public: k.public(), delay_ms: 3 }];
+        for n in [0usize, 1, 100, PAYLOAD_BYTES - 5] {
+            let p = Packet::wrap(&route, &vec![0xA5; n], [n as u8; 32]).unwrap();
+            let bytes = p.to_bytes();
+            assert_eq!(bytes.len(), PACKET_BYTES);
+            let back = Packet::from_bytes(&bytes).expect("did not read back");
+            assert_eq!(back.to_bytes(), bytes);
+        }
+    }
+
+    /// Anything that is not exactly a packet must be refused.
+    #[test]
+    fn wrong_length_input_is_refused() {
+        for n in [0usize, 1, PACKET_BYTES - 1, PACKET_BYTES + 1, 4096] {
+            assert!(Packet::from_bytes(&vec![0u8; n]).is_none());
+        }
+    }
+
+    /// Random bytes of the right length must decode structurally and then fail to peel.
+    ///
+    /// The decoder must not be a cheaper oracle than peeling. If it could reject forgeries by
+    /// shape, an adversary would learn from the shape alone.
+    #[test]
+    fn random_bytes_decode_structurally_and_fail_only_at_the_mac() {
+        let k = MixKey::from_seed([12u8; 32]);
+        let mut seen = SeenTags::new();
+        let mut rejected = 0;
+        for i in 0..200u32 {
+            let mut buf = vec![0u8; PACKET_BYTES];
+            let mut h = blake3::Hasher::new();
+            h.update(&i.to_le_bytes());
+            let mut r = h.finalize_xof();
+            r.fill(&mut buf);
+            let mut p = Packet::from_bytes(&buf).expect("structure accepted anything sized");
+            assert_eq!(p.peel(&k, &mut seen), Err(MixError::BadMac));
+            rejected += 1;
+        }
+        assert_eq!(rejected, 200);
     }
 
 }

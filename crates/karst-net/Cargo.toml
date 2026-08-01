@@ -1,0 +1,16 @@
+[package]
+name = "karst-net"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A network that runs: directory, mix runner, provider, client"
+
+[dependencies]
+karst-mix.workspace = true
+karst-node.workspace = true
+karst-wire.workspace = true
+karst-seal.workspace = true
+karst-id.workspace = true
+rand = "0.8"
+blake3 = "1"
+x25519-dalek = { version = "2", features = ["static_secrets"] }
