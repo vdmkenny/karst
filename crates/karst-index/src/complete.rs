@@ -401,19 +401,48 @@ mod tests {
         assert_ne!(recovered.publisher, victim.address());
     }
 
-    /// The digest must depend on the set and not on arrival order.
+    /// The digest depends on set membership, and order-independence is structural.
     ///
-    /// Two readers holding the same announcements have to compute the same value, or the
-    /// comparison detects nothing but the order things happened to arrive in.
+    /// Worth stating precisely, because two successive versions of this test claimed to check
+    /// something no test through this signature can check. `digest_of` takes a `BTreeSet`, so
+    /// by the time it runs the order is already decided by the type. Reversing the iteration
+    /// inside it reverses it identically for every input, so forward and backward construction
+    /// still agree and the mutation is invisible: **order-independence here is a property of
+    /// the parameter type rather than of the implementation.**
+    ///
+    /// That is the stronger arrangement, not a gap. A function taking a slice could get order
+    /// wrong; this one cannot. What is left to test is membership sensitivity, which is
+    /// behavioural, plus the type-level fact recorded so nobody widens the signature to a
+    /// slice without noticing what that would give up.
     #[test]
-    fn the_digest_is_order_independent() {
-        let forward: BTreeSet<Cid> = (0..20u32).map(|i| Cid::of(&i.to_le_bytes())).collect();
-        let backward: BTreeSet<Cid> = (0..20u32).rev().map(|i| Cid::of(&i.to_le_bytes())).collect();
-        assert_eq!(digest_of(&forward), digest_of(&backward));
-        // And on the set, so one missing entry changes it.
-        let mut fewer = forward.clone();
+    fn the_digest_depends_on_membership_and_order_is_settled_by_the_type() {
+        let base: BTreeSet<Cid> = (0..20u32).map(|i| Cid::of(&i.to_le_bytes())).collect();
+
+        // Construction order cannot reach `digest_of`, and this records why rather than
+        // pretending to test it.
+        let mut backward = BTreeSet::new();
+        for i in (0..20u32).rev() {
+            backward.insert(Cid::of(&i.to_le_bytes()));
+        }
+        assert_eq!(base, backward, "a BTreeSet settles order before digest_of is called");
+        assert_eq!(digest_of(&base), digest_of(&backward));
+
+        // Membership sensitivity, which is the part an implementation can get wrong.
+        let mut fewer = base.clone();
         fewer.remove(&Cid::of(&7u32.to_le_bytes()));
-        assert_ne!(digest_of(&forward), digest_of(&fewer));
+        assert_ne!(digest_of(&base), digest_of(&fewer), "a removal did not change it");
+
+        let mut more = base.clone();
+        more.insert(Cid::of(&999u32.to_le_bytes()));
+        assert_ne!(digest_of(&base), digest_of(&more), "an addition did not change it");
+
+        // A swap that keeps the count changes it, so the count is not standing in for content.
+        let mut swapped = fewer.clone();
+        swapped.insert(Cid::of(&999u32.to_le_bytes()));
+        assert_eq!(swapped.len(), base.len());
+        assert_ne!(digest_of(&base), digest_of(&swapped));
+
+        assert_ne!(digest_of(&BTreeSet::new()), digest_of(&base));
     }
 
     /// Another publisher's announcements must not count toward this publisher's census.

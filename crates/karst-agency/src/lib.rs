@@ -402,13 +402,37 @@ mod tests {
     /// And the order must not report the document's shape either.
     #[test]
     fn the_fetch_order_does_not_follow_the_document() {
-        let links = [cid(9), cid(3), cid(7), cid(1)];
-        let (d, root) = doc_with(&links);
-        let plan = decide(&declared_closure(&d, &root), &BTreeSet::new(), &Request::new(), &Policy::new());
+        // Driven through a hand-built declaration rather than one `declared_closure` already
+        // sorted, because comparing a sorted input against its own sort holds however `decide`
+        // orders things. A declaration arriving unsorted and with duplicates is what a
+        // publisher can actually send.
+        let declared = vec![cid(9), cid(3), cid(9), cid(7), cid(1), cid(3)];
+        let plan = decide(&declared, &BTreeSet::new(), &Request::new(), &Policy::new());
 
-        let mut sorted = plan.fetches.clone();
-        sorted.sort();
-        assert_eq!(plan.fetches, sorted, "fetches followed document order");
+        let mut expected = declared.clone();
+        expected.sort();
+        expected.dedup();
+        assert_eq!(expected.len(), 4, "vacuous: the input had no duplicates");
+        assert_ne!(
+            declared[..4].to_vec(),
+            expected,
+            "vacuous: the input was already in sorted order"
+        );
+        assert_eq!(
+            plan.fetches, expected,
+            "fetches followed the order the publisher sent, or kept duplicates"
+        );
+
+        // And a document whose closure happens to be sorted gives the same answer, so the
+        // end-to-end path is still covered.
+        let (d, root) = doc_with(&[cid(9), cid(3), cid(7), cid(1)]);
+        let via_doc = decide(
+            &declared_closure(&d, &root),
+            &BTreeSet::new(),
+            &Request::new(),
+            &Policy::new(),
+        );
+        assert_eq!(via_doc.fetches, plan.fetches);
     }
 
     /// A reader who wants to fetch nothing gets to.
