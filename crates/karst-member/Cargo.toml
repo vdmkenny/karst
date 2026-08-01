@@ -1,0 +1,12 @@
+[package]
+name = "karst-member"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L5 Membership: no roll to enumerate, and introduction by shared contact"
+
+[dependencies]
+karst-id.workspace = true
+blake3 = "1"
+rand = "0.8"
+curve25519-dalek = "4"
