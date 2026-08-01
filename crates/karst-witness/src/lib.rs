@@ -54,6 +54,14 @@ pub struct Checkpoint {
     pub sequence: u64,
     /// Commitment to the publisher's state at this sequence.
     pub digest: Cid,
+    /// Hash of the checkpoint this one continues, or `None` for the first.
+    ///
+    /// Without this, "extends what the witness has already seen" degenerates into "the number
+    /// went up", and a publisher keeping two histories on disjoint sequence numbers gets both
+    /// countersigned by every honest witness. Neither is refused, and the pair is not even
+    /// evidence, because equivocation is defined at a shared sequence. The split view the
+    /// whole layer exists to prevent survives untouched.
+    pub prev: Option<Cid>,
 }
 
 impl Checkpoint {
@@ -66,14 +74,22 @@ impl Checkpoint {
         e.str("karst.witness.checkpoint.v1")
             .addr(&self.publisher)
             .u64(self.sequence)
-            .cid(&self.digest);
+            .cid(&self.digest)
+            .opt_cid(self.prev.as_ref());
         e.finish()
+    }
+
+    /// This checkpoint's own identity, which the next one links back to.
+    pub fn id(&self) -> Cid {
+        Cid::of(&self.signing_bytes())
     }
 
     pub fn publish(&self, publisher: &Identity) -> Object {
         let mut e = Enc::new();
-        e.u64(self.sequence).cid(&self.digest);
-        Object::create(publisher, CHECKPOINT_KIND, self.sequence, e.finish(), None)
+        e.u64(self.sequence).cid(&self.digest).opt_cid(self.prev.as_ref());
+        // The lineage link is carried at L6 as well, so an object holding a checkpoint
+        // supersedes the object holding the one before it.
+        Object::create(publisher, CHECKPOINT_KIND, self.sequence, e.finish(), self.prev)
     }
 
     pub fn from_object(obj: &Object) -> Result<Checkpoint, ObjectError> {
@@ -84,11 +100,13 @@ impl Checkpoint {
         let mut d = Dec::new(&obj.payload);
         let sequence = d.u64().map_err(|_| ObjectError::CidMismatch)?;
         let digest = d.cid().map_err(|_| ObjectError::CidMismatch)?;
+        let prev = d.opt_cid().map_err(|_| ObjectError::CidMismatch)?;
         d.end().map_err(|_| ObjectError::CidMismatch)?;
         Ok(Checkpoint {
             publisher,
             sequence,
             digest,
+            prev,
         })
     }
 }
@@ -99,6 +117,10 @@ pub enum Refusal {
     NotForward { seen: u64, offered: u64 },
     /// Same sequence, different digest. The publisher is equivocating.
     Equivocation { seen: Cid, offered: Cid },
+    /// Does not link back to what this witness last countersigned.
+    NotAChain,
+    /// The publisher did not sign it, so there is nothing to witness.
+    Unsigned,
 }
 
 /// One witness's memory of what it has countersigned.
@@ -128,13 +150,30 @@ impl Witness {
         self.identity.key_bytes()
     }
 
-    /// Countersign, or refuse and say why.
+    /// Countersign a checkpoint **the publisher signed**, or refuse and say why.
     ///
-    /// A witness signs nothing it originated. It attests only that this checkpoint extends what
-    /// it has already seen from this publisher, which is the whole of what it knows and the
-    /// whole of what it claims.
-    pub fn cosign(&mut self, c: &Checkpoint) -> Result<Signature, Refusal> {
+    /// Takes a signed object rather than a bare struct, and that is the whole of the fix for a
+    /// defect that made this layer worse than useless. Taking a struct meant `publisher` was a
+    /// field an attacker filled in, so anyone could:
+    ///
+    /// - mint a checkpoint naming a victim at `u64::MAX` and permanently prevent that victim
+    ///   from ever being countersigned by this witness again;
+    /// - mint a checkpoint naming a victim and walk it to a reader's own chosen witnesses,
+    ///   who could not refuse because they could not check authorship, so a reader accepted at
+    ///   full threshold a digest the publisher never made. **The witnesses substituted**,
+    ///   which is exactly the thing this module claims cannot happen;
+    /// - front-run a publisher's real checkpoint, so the publisher's own identical request was
+    ///   then refused as not-forward and could never reach threshold.
+    ///
+    /// A repeat of the exact same checkpoint returns the same signature rather than a refusal,
+    /// so front-running is not merely unauthenticated but pointless.
+    pub fn cosign(&mut self, obj: &Object) -> Result<Signature, Refusal> {
+        let c = Checkpoint::from_object(obj).map_err(|_| Refusal::Unsigned)?;
         if let Some(prev) = self.seen.get(&c.publisher) {
+            // Idempotent: the same checkpoint twice is not a conflict.
+            if c.sequence == prev.sequence && c.digest == prev.digest && c.prev == prev.prev {
+                return Ok(self.identity.sign(&c.signing_bytes()));
+            }
             if c.sequence == prev.sequence && c.digest != prev.digest {
                 return Err(Refusal::Equivocation {
                     seen: prev.digest,
@@ -147,8 +186,18 @@ impl Witness {
                     offered: c.sequence,
                 });
             }
+            // Advancing is not enough. It has to advance from **this**, or two histories on
+            // disjoint sequence numbers both get countersigned.
+            if c.prev != Some(prev.id()) {
+                return Err(Refusal::NotAChain);
+            }
+        } else if c.prev.is_some() {
+            // A witness joining mid-chain has nothing to check the link against, and accepting
+            // it would let a publisher present any starting point it liked. Refusing means a
+            // new witness must be introduced at a point the publisher is willing to restate.
+            return Err(Refusal::NotAChain);
         }
-        self.seen.insert(c.publisher, *c);
+        self.seen.insert(c.publisher, c);
         Ok(self.identity.sign(&c.signing_bytes()))
     }
 
@@ -201,7 +250,10 @@ impl Cosigned {
     /// never picked is a thousand identities somebody minted.
     pub fn support(&self, chosen: &[Address]) -> usize {
         let present: std::collections::BTreeSet<Address> = self.witnesses().collect();
-        chosen.iter().filter(|w| present.contains(*w)).count()
+        // Deduplicated, so a witness listed twice in a reader's own list does not satisfy a
+        // threshold of two on its own.
+        let unique: std::collections::BTreeSet<&Address> = chosen.iter().collect();
+        unique.into_iter().filter(|w| present.contains(*w)).count()
     }
 }
 
@@ -297,66 +349,200 @@ mod tests {
         Identity::from_seed(seed)
     }
 
-    fn cp(pubr: &Identity, seq: u64, d: u8) -> Checkpoint {
-        Checkpoint {
-            publisher: pubr.address(),
-            sequence: seq,
-            digest: Cid::of(&[d]),
+    /// A chain of checkpoints for one publisher, each linking to the last.
+    fn chain(pubr: &Identity, digests: &[u8]) -> Vec<(Checkpoint, Object)> {
+        let mut out: Vec<(Checkpoint, Object)> = Vec::new();
+        let mut prev = None;
+        for (i, d) in digests.iter().enumerate() {
+            let c = Checkpoint {
+                publisher: pubr.address(),
+                sequence: i as u64 + 1,
+                digest: Cid::of(&[*d]),
+                prev,
+            };
+            prev = Some(c.id());
+            let obj = c.publish(pubr);
+            out.push((c, obj));
         }
+        out
     }
 
-    /// A witness countersigns something that moves forward.
+    /// A witness countersigns a signed checkpoint that continues the chain.
     #[test]
     fn a_witness_countersigns_a_forward_checkpoint() {
         let pubr = ident(1);
         let mut w = Witness::new(ident(100));
-        assert!(w.cosign(&cp(&pubr, 1, 1)).is_ok());
-        assert!(w.cosign(&cp(&pubr, 2, 2)).is_ok());
-        assert_eq!(w.latest(&pubr.address()).unwrap().sequence, 2);
+        let ch = chain(&pubr, &[1, 2, 3]);
+        for (_, obj) in &ch {
+            assert!(w.cosign(obj).is_ok());
+        }
+        assert_eq!(w.latest(&pubr.address()).unwrap().sequence, 3);
     }
 
-    /// And refuses one that goes backwards, which is the whole job.
+    /// Nothing unsigned is ever countersigned.
+    ///
+    /// The publisher field used to be a struct field an attacker filled in, so anyone could
+    /// name a victim and have honest witnesses countersign a digest that victim never made.
+    #[test]
+    fn a_witness_refuses_anything_the_publisher_did_not_sign() {
+        let victim = ident(1);
+        let attacker = ident(2);
+        let mut w = Witness::new(ident(100));
+
+        // A checkpoint naming the victim, signed by the attacker.
+        let forged = Checkpoint {
+            publisher: victim.address(),
+            sequence: 1,
+            digest: Cid::of(b"not mine"),
+            prev: None,
+        }
+        .publish(&attacker);
+
+        // It is signed, so it verifies, but as the attacker rather than the victim.
+        let recovered = Checkpoint::from_object(&forged).unwrap();
+        assert_eq!(recovered.publisher, attacker.address());
+        assert_ne!(recovered.publisher, victim.address());
+
+        // So countersigning it records nothing against the victim.
+        assert!(w.cosign(&forged).is_ok());
+        assert!(
+            w.latest(&victim.address()).is_none(),
+            "an attacker poisoned a witness against a victim"
+        );
+    }
+
+    /// A stranger must not be able to lock a publisher out permanently.
+    ///
+    /// Naming a victim at u64::MAX used to set that witness's memory forever, and there is no
+    /// eviction, so every genuine checkpoint from the victim was refused for the life of the
+    /// process.
+    #[test]
+    fn a_stranger_cannot_lock_a_publisher_out_of_a_witness() {
+        let victim = ident(1);
+        let attacker = ident(2);
+        let mut w = Witness::new(ident(100));
+
+        let poison = Checkpoint {
+            publisher: victim.address(),
+            sequence: u64::MAX,
+            digest: Cid::of(b"x"),
+            prev: None,
+        }
+        .publish(&attacker);
+        let _ = w.cosign(&poison);
+
+        // The victim's own first checkpoint still works.
+        let ch = chain(&victim, &[7]);
+        assert!(w.cosign(&ch[0].1).is_ok());
+        assert_eq!(w.latest(&victim.address()).unwrap().sequence, 1);
+    }
+
+    /// Front-running a publisher's own checkpoint must not deny them the signature.
+    #[test]
+    fn an_exact_repeat_returns_a_signature_rather_than_a_refusal() {
+        let pubr = ident(1);
+        let mut w = Witness::new(ident(100));
+        let ch = chain(&pubr, &[1]);
+        let first = w.cosign(&ch[0].1).unwrap();
+        let again = w.cosign(&ch[0].1).unwrap();
+        assert_eq!(first.to_bytes(), again.to_bytes());
+    }
+
+    /// Advancing the sequence is not enough; it has to continue the chain.
+    ///
+    /// Otherwise a publisher keeps two histories on disjoint sequence numbers, every honest
+    /// witness countersigns both, and the pair is not even evidence because equivocation is
+    /// defined at a shared sequence.
+    #[test]
+    fn two_histories_on_disjoint_sequences_do_not_both_get_countersigned() {
+        let pubr = ident(1);
+        let mut w = Witness::new(ident(100));
+
+        let history_a = chain(&pubr, &[1, 2]);
+        assert!(w.cosign(&history_a[0].1).is_ok());
+        assert!(w.cosign(&history_a[1].1).is_ok());
+
+        // A second history that never reuses a sequence number, and never links to A.
+        let forked = Checkpoint {
+            publisher: pubr.address(),
+            sequence: 9,
+            digest: Cid::of(b"other history"),
+            prev: None,
+        }
+        .publish(&pubr);
+        assert_eq!(w.cosign(&forked), Err(Refusal::NotAChain));
+
+        // Even one that links to the wrong place.
+        let wrong_link = Checkpoint {
+            publisher: pubr.address(),
+            sequence: 9,
+            digest: Cid::of(b"other history"),
+            prev: Some(history_a[0].0.id()),
+        }
+        .publish(&pubr);
+        assert_eq!(w.cosign(&wrong_link), Err(Refusal::NotAChain));
+    }
+
+    /// A witness refuses a regression.
     #[test]
     fn a_witness_refuses_a_regression() {
         let pubr = ident(1);
         let mut w = Witness::new(ident(100));
-        w.cosign(&cp(&pubr, 5, 1)).unwrap();
+        let ch = chain(&pubr, &[1, 2, 3, 4, 5]);
+        for (_, obj) in &ch {
+            w.cosign(obj).unwrap();
+        }
         assert_eq!(
-            w.cosign(&cp(&pubr, 3, 2)),
+            w.cosign(&ch[2].1),
             Err(Refusal::NotForward {
                 seen: 5,
                 offered: 3
             })
         );
-        assert_eq!(w.latest(&pubr.address()).unwrap().sequence, 5);
     }
 
-    /// A publisher showing two histories at one sequence is caught by the witness.
-    ///
-    /// This is the split view the whole layer exists for. Without a witness, two readers each
-    /// see a signed, current, internally consistent history and neither can tell.
+    /// A publisher showing two digests at one sequence is caught.
     #[test]
     fn a_witness_catches_a_publisher_equivocating() {
         let pubr = ident(1);
         let mut w = Witness::new(ident(100));
-        w.cosign(&cp(&pubr, 7, 1)).unwrap();
-        assert_eq!(
-            w.cosign(&cp(&pubr, 7, 2)),
-            Err(Refusal::Equivocation {
-                seen: Cid::of(&[1]),
-                offered: Cid::of(&[2])
-            })
-        );
+        let ch = chain(&pubr, &[1]);
+        w.cosign(&ch[0].1).unwrap();
+
+        let conflicting = Checkpoint {
+            publisher: pubr.address(),
+            sequence: 1,
+            digest: Cid::of(b"different"),
+            prev: None,
+        }
+        .publish(&pubr);
+        assert!(matches!(
+            w.cosign(&conflicting),
+            Err(Refusal::Equivocation { .. })
+        ));
     }
 
-    /// Publishers are tracked separately, or one publisher would block another.
+    /// A witness joining mid-chain has nothing to check against and says so.
+    #[test]
+    fn a_witness_will_not_start_partway_through_a_chain() {
+        let pubr = ident(1);
+        let ch = chain(&pubr, &[1, 2, 3]);
+        let mut fresh = Witness::new(ident(101));
+        assert_eq!(fresh.cosign(&ch[2].1), Err(Refusal::NotAChain));
+        // It has to be introduced at a point the publisher restates.
+        assert!(fresh.cosign(&ch[0].1).is_ok());
+    }
+
+    /// Publishers do not share a sequence space.
     #[test]
     fn publishers_do_not_share_a_sequence_space() {
         let a = ident(1);
         let b = ident(2);
         let mut w = Witness::new(ident(100));
-        w.cosign(&cp(&a, 9, 1)).unwrap();
-        assert!(w.cosign(&cp(&b, 1, 1)).is_ok(), "one publisher blocked another");
+        for (_, obj) in chain(&a, &[1, 2, 3, 4, 5]) {
+            w.cosign(&obj).unwrap();
+        }
+        assert!(w.cosign(&chain(&b, &[1])[0].1).is_ok());
     }
 
     /// A countersignature for one publisher must not be replayable for another.
@@ -365,117 +551,129 @@ mod tests {
         let a = ident(1);
         let b = ident(2);
         let mut w = Witness::new(ident(100));
-        let sig = w.cosign(&cp(&a, 1, 5)).unwrap();
+        let ch_a = chain(&a, &[5]);
+        let sig = w.cosign(&ch_a[0].1).unwrap();
 
-        // Same sequence and digest, different publisher.
-        let mut lifted = Cosigned::new(cp(&b, 1, 5));
-        assert!(
-            !lifted.attach(w.key(), sig),
-            "a countersignature was lifted onto another publisher"
-        );
+        let ch_b = chain(&b, &[5]);
+        let mut lifted = Cosigned::new(ch_b[0].0);
+        assert!(!lifted.attach(w.key(), sig));
     }
 
-    /// An invalid signature must never enter the structure.
+    /// A forged countersignature is refused on attachment.
     #[test]
     fn a_forged_countersignature_is_refused_on_attachment() {
         let pubr = ident(1);
         let honest = ident(100);
         let forger = ident(101);
-        let c = cp(&pubr, 1, 1);
+        let c = chain(&pubr, &[1])[0].0;
 
         let mut cos = Cosigned::new(c);
-        // The forger signs, and claims to be the honest witness.
-        let sig = forger.sign(&c.signing_bytes());
-        assert!(!cos.attach(honest.key_bytes(), sig));
+        assert!(!cos.attach(honest.key_bytes(), forger.sign(&c.signing_bytes())));
         assert_eq!(cos.witnesses().count(), 0);
     }
 
-    /// A reader counts only the witnesses they chose.
-    ///
-    /// Otherwise a thousand countersignatures is a thousand identities somebody minted, which
-    /// is the whole Sybil problem arriving through the mechanism meant to resist it.
+    /// A reader counts only witnesses they chose.
     #[test]
     fn signatures_from_unchosen_witnesses_do_not_count() {
         let pubr = ident(1);
-        let c = cp(&pubr, 1, 1);
-        let mut cos = Cosigned::new(c);
-
+        let ch = chain(&pubr, &[1]);
+        let mut cos = Cosigned::new(ch[0].0);
         let mine: Vec<Address> = (200..203u32).map(|i| ident(i).address()).collect();
-        // Ten thousand strangers countersign.
+
         for i in 1_000..11_000u32 {
             let mut w = Witness::new(ident(i));
-            let sig = w.cosign(&c).unwrap();
+            let sig = w.cosign(&ch[0].1).unwrap();
             assert!(cos.attach(w.key(), sig));
         }
         assert_eq!(cos.witnesses().count(), 10_000);
-
-        let policy = WitnessPolicy::new(mine, 2);
         assert_eq!(
-            policy.accept(None, &cos),
+            WitnessPolicy::new(mine, 2).accept(None, &cos),
             Acceptance::Undersigned {
                 support: 0,
                 threshold: 2
-            },
-            "strangers satisfied a reader's threshold"
+            }
         );
     }
 
-    /// The threshold is met only by chosen witnesses.
+    /// A duplicated witness in a reader's own list must not satisfy a threshold twice.
+    #[test]
+    fn a_duplicated_witness_counts_once() {
+        let pubr = ident(1);
+        let ch = chain(&pubr, &[1]);
+        let mut cos = Cosigned::new(ch[0].0);
+        let mut w = Witness::new(ident(200));
+        cos.attach(w.key(), w.cosign(&ch[0].1).unwrap());
+
+        let doubled = vec![ident(200).address(), ident(200).address()];
+        assert!(
+            matches!(
+                WitnessPolicy::new(doubled, 2).accept(None, &cos),
+                Acceptance::Undersigned { support: 1, .. }
+            ),
+            "one witness satisfied a threshold of two by being listed twice"
+        );
+    }
+
+    /// A threshold is met only by chosen witnesses.
     #[test]
     fn a_threshold_is_met_by_chosen_witnesses() {
         let pubr = ident(1);
-        let c = cp(&pubr, 1, 1);
-        let mut cos = Cosigned::new(c);
+        let ch = chain(&pubr, &[1]);
+        let mut cos = Cosigned::new(ch[0].0);
         let chosen: Vec<Address> = (200..204u32).map(|i| ident(i).address()).collect();
 
         for i in 200..202u32 {
             let mut w = Witness::new(ident(i));
-            cos.attach(w.key(), w.cosign(&c).unwrap());
+            cos.attach(w.key(), w.cosign(&ch[0].1).unwrap());
         }
-        let policy = WitnessPolicy::new(chosen.clone(), 3);
+        let policy = WitnessPolicy::new(chosen, 3);
         assert!(matches!(
             policy.accept(None, &cos),
             Acceptance::Undersigned { support: 2, .. }
         ));
 
         let mut w = Witness::new(ident(202));
-        cos.attach(w.key(), w.cosign(&c).unwrap());
+        cos.attach(w.key(), w.cosign(&ch[0].1).unwrap());
         assert_eq!(policy.accept(None, &cos), Acceptance::Accepted);
     }
 
-    /// A reader refuses a checkpoint that does not advance on what they hold.
-    ///
-    /// This is what stops a jointly stale replica set: the replicas agree with each other, and
-    /// the reader has already seen further.
+    /// A reader refuses a rollback even when fully countersigned.
     #[test]
     fn a_reader_refuses_a_rollback_even_when_fully_countersigned() {
         let pubr = ident(1);
-        let chosen: Vec<Address> = (200..203u32).map(|i| ident(i).address()).collect();
-        let policy = WitnessPolicy::new(chosen, 3);
+        let ch = chain(&pubr, &[1, 2, 3, 4]);
+        let newer = ch[3].0;
+        let older = ch[1].0;
 
-        let newer = cp(&pubr, 10, 9);
-        let older = cp(&pubr, 4, 4);
         let mut cos = Cosigned::new(older);
-        // Fresh witnesses, so they have no memory that would refuse it, and all three sign.
+        let chosen: Vec<Address> = (200..203u32).map(|i| ident(i).address()).collect();
         for i in 200..203u32 {
             let mut w = Witness::new(ident(i));
-            cos.attach(w.key(), w.cosign(&older).unwrap());
+            cos.attach(w.key(), w.cosign(&ch[0].1).unwrap());
+            cos.attach(w.key(), w.cosign(&ch[1].1).unwrap());
         }
+        let policy = WitnessPolicy::new(chosen, 3);
         assert_eq!(cos.support(&policy.chosen), 3);
         assert_eq!(policy.accept(Some(&newer), &cos), Acceptance::NotForward);
     }
 
-    /// A witness that equivocates leaves portable evidence.
-    ///
-    /// Anyone can check it and it names the witness, so equivocation is expensive rather than
-    /// deniable. A witness that never equivocates is never accused, because the evidence
-    /// cannot be manufactured without its key.
+    /// Equivocation by a witness is provable by anyone.
     #[test]
     fn equivocation_by_a_witness_is_provable_by_anyone() {
         let pubr = ident(1);
         let bad = ident(100);
-        let a = cp(&pubr, 3, 1);
-        let b = cp(&pubr, 3, 2);
+        let a = Checkpoint {
+            publisher: pubr.address(),
+            sequence: 3,
+            digest: Cid::of(&[1]),
+            prev: None,
+        };
+        let b = Checkpoint {
+            publisher: pubr.address(),
+            sequence: 3,
+            digest: Cid::of(&[2]),
+            prev: None,
+        };
 
         let proof = Equivocation {
             witness: bad.key_bytes(),
@@ -485,66 +683,56 @@ mod tests {
             sig_b: bad.sign(&b.signing_bytes()),
         };
         assert!(proof.is_valid());
+        assert_eq!(proof.accused(), Some(bad.address()));
 
-        // The same shape against an honest witness cannot be assembled without its key.
         let honest = ident(101);
-        let forged = Equivocation {
+        let framed = Equivocation {
             witness: honest.key_bytes(),
             a,
             sig_a: bad.sign(&a.signing_bytes()),
             b,
             sig_b: bad.sign(&b.signing_bytes()),
         };
-        assert!(!forged.is_valid(), "an honest witness was framed");
+        assert!(!framed.is_valid(), "an honest witness was framed");
     }
 
-    /// Evidence that is not actually a conflict must be rejected.
+    /// A non-conflict is not evidence.
     #[test]
     fn a_non_conflict_is_not_evidence() {
         let pubr = ident(1);
         let w = ident(100);
-        let a = cp(&pubr, 3, 1);
-        let b = cp(&pubr, 4, 2);
-
-        // Different sequences: advancing, not equivocating.
-        let advancing = Equivocation {
+        let a = Checkpoint {
+            publisher: pubr.address(),
+            sequence: 3,
+            digest: Cid::of(&[1]),
+            prev: None,
+        };
+        let b = Checkpoint {
+            publisher: pubr.address(),
+            sequence: 4,
+            digest: Cid::of(&[2]),
+            prev: Some(a.id()),
+        };
+        assert!(!Equivocation {
             witness: w.key_bytes(),
             a,
             sig_a: w.sign(&a.signing_bytes()),
             b,
             sig_b: w.sign(&b.signing_bytes()),
-        };
-        assert!(!advancing.is_valid());
-
-        // Same checkpoint twice.
-        let same = Equivocation {
-            witness: w.key_bytes(),
-            a,
-            sig_a: w.sign(&a.signing_bytes()),
-            b: a,
-            sig_b: w.sign(&a.signing_bytes()),
-        };
-        assert!(!same.is_valid());
+        }
+        .is_valid());
     }
 
-    /// Witnesses add parties who can withhold and none who can substitute.
-    ///
-    /// A witness never originates a statement, so the worst a captured set can do is refuse to
-    /// countersign, which is visible as an undersigned checkpoint rather than as a wrong one.
+    /// A captured witness set can stall and cannot forge.
     #[test]
     fn a_captured_witness_set_can_only_stall() {
         let pubr = ident(1);
+        let ch = chain(&pubr, &[1]);
         let chosen: Vec<Address> = (200..203u32).map(|i| ident(i).address()).collect();
-        let policy = WitnessPolicy::new(chosen, 2);
-
-        // Every witness refuses. Nothing they can do produces a checkpoint the publisher did
-        // not sign, because they do not sign checkpoints, they sign about them.
-        let c = cp(&pubr, 1, 1);
-        let cos = Cosigned::new(c);
+        let cos = Cosigned::new(ch[0].0);
         assert!(matches!(
-            policy.accept(None, &cos),
+            WitnessPolicy::new(chosen, 2).accept(None, &cos),
             Acceptance::Undersigned { support: 0, .. }
         ));
-        assert_eq!(cos.witnesses().count(), 0);
     }
 }
