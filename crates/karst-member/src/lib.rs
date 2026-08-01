@@ -406,6 +406,19 @@ mod tests {
         // And undecodable input to reblind produces the reserved value, not a usable point.
         let undecodable = vec![[0xffu8; 32]; 4];
         assert!(a.reblind(&undecodable).iter().all(|v| *v == [0u8; 32]));
+
+        // The case that matters: the sentinel appearing on BOTH sides. A malicious party
+        // offers undecodable points, so the victim's own reblind seeds its comparison set with
+        // the sentinel, and the reply does too. If the sentinel were a comparable value rather
+        // than one no real point can take, every such position would match every other.
+        let hostile_offer = vec![[0xffu8; 32]; BUCKET];
+        let mine_on_theirs = a.reblind(&hostile_offer);
+        let theirs_on_mine = vec![[0u8; 32]; BUCKET];
+        assert!(mine_on_theirs.iter().any(|v| *v == [0u8; 32]));
+        assert!(
+            a.intersect(&theirs_on_mine, &mine_on_theirs).is_empty(),
+            "the sentinel matched itself and manufactured an intersection"
+        );
     }
 
     /// A lying responder can misattribute a genuine share, and this records that it can.

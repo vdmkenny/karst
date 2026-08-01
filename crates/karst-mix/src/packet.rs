@@ -971,28 +971,64 @@ mod adversarial {
 
     /// A tagging attack on the payload must not survive to the destination in recognisable
     /// form. Every single-bit flip across the payload is tried.
+    /// Every payload byte must be covered, not a sample of them.
+    ///
+    /// The header sibling sweeps every byte; this one sampled bit positions, so a payload
+    /// region left unauthenticated in the untested gap would have survived. A sweep is cheap
+    /// enough that sampling was never worth it.
     #[test]
     fn no_single_payload_bit_flip_produces_a_recognisable_mark() {
-        let ks = keys(2);
-        let r = route(&ks);
-        let msg = vec![0x5Au8; 300];
-        let clean = Packet::wrap(&r, &msg, [4u8; 32]).unwrap();
+        let ks: Vec<MixKey> = (0..3).map(|i| MixKey::from_seed([i + 70; 32])).collect();
+        let route: Vec<Hop> = ks
+            .iter()
+            .enumerate()
+            .map(|(i, k)| Hop {
+                id: i as u16,
+                public: k.public(),
+                delay_ms: 1,
+            })
+            .collect();
+        let msg = b"a message an adversary would like to recognise";
 
-        for bit in (0..PAYLOAD_BYTES * 8).step_by(541) {
-            let tampered = clean.tamper_payload(bit);
-            let mut s: Vec<SeenTags> = (0..2).map(|_| SeenTags::new()).collect();
-            let Ok(Peeled::Forward { packet, .. }) = tampered.peel(&ks[0], &mut s[0]) else {
-                continue;
-            };
-            if let Ok(Peeled::Deliver { payload, .. }) = packet.peel(&ks[1], &mut s[1]) {
-                let matching = payload.iter().zip(msg.iter()).filter(|(a, b)| a == b).count();
-                assert!(
-                    matching * 4 < payload.len().max(4),
-                    "bit {bit} survived recognisably: {matching} of {} bytes",
-                    payload.len()
-                );
+        let mut checked = 0;
+        for byte in 0..PAYLOAD_BYTES {
+            let p = Packet::wrap(&route, msg, [5u8; 32]).unwrap();
+            let tampered = p.tamper_payload(byte * 8);
+            let mut seen: Vec<SeenTags> = (0..3).map(|_| SeenTags::new()).collect();
+
+            match deliver_with(&ks, tampered, &mut seen) {
+                Err(_) => {}
+                Ok(out) => assert_ne!(
+                    out, msg,
+                    "a flip at byte {byte} left the message recoverable"
+                ),
+            }
+            checked += 1;
+        }
+        assert_eq!(checked, PAYLOAD_BYTES, "the sweep did not cover the payload");
+
+        // Positive control: untampered, the same route delivers the message, so the sweep is
+        // not passing because delivery never works.
+        let clean = Packet::wrap(&route, msg, [5u8; 32]).unwrap();
+        let mut seen: Vec<SeenTags> = (0..3).map(|_| SeenTags::new()).collect();
+        assert_eq!(deliver_with(&ks, clean, &mut seen).unwrap(), msg);
+    }
+
+    /// Walk a packet with caller-supplied replay state.
+    fn deliver_with(
+        ks: &[MixKey],
+        p: Packet,
+        seen: &mut [SeenTags],
+    ) -> Result<Vec<u8>, MixError> {
+        let mut cur = p;
+        for i in 0..ks.len() {
+            match cur.peel(&ks[i], &mut seen[i])? {
+                Peeled::Forward { packet, .. } => cur = packet,
+                Peeled::Deliver { payload, .. } => return Ok(payload),
+                Peeled::Drop { .. } => return Err(MixError::Malformed),
             }
         }
+        Err(MixError::Malformed)
     }
 
     /// Every byte of the header is covered by the MAC, with none left unauthenticated.

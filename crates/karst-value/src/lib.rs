@@ -470,30 +470,56 @@ mod tests {
     /// **The property this whole design exists for.** The issuers' view and the verifier's
     /// view have no field in common, so no amount of collusion between them links a spend to
     /// an acquisition.
+    /// The commitment issuers see must be unpredictable from the serial a verifier sees.
+    ///
+    /// The previous version asserted the two were unequal, which holds for any two distinct
+    /// values however they are derived, and then ruled out exactly one guess at the derivation
+    /// out of a space of 2^256. Neither says the commitment is unlinkable. What does is that
+    /// the **same serial** produces a **different commitment** every time, which can only
+    /// happen if the blinding is fresh rather than a function of the serial.
+    /// What the issuance and spend transcripts share, tested for what a test can establish.
+    ///
+    /// The previous version asserted the commitment and the serial were unequal, which holds
+    /// for any two distinct values however they are derived, then ruled out exactly one guess
+    /// at the derivation from a space of 2^256.
+    ///
+    /// The property that matters is **computational unlinkability**, and no unit test
+    /// establishes it: it rests on the blind signature construction, not on anything
+    /// observable here. Writing a test that appeared to prove it would be worse than writing
+    /// none. What is testable is that the commitment is not a function of the warrant, so two
+    /// wallets requesting the same thing do not present the same commitment to an issuer.
+    ///
+    /// Note also that `Wallet::new` is seeded for reproducibility, so two wallets on one seed
+    /// agree on everything by construction. A deployment drawing that seed predictably would
+    /// lose unlinkability without any of this noticing.
     #[test]
-    fn the_issuance_transcript_and_the_spend_transcript_share_nothing() {
+    fn the_commitment_is_not_a_function_of_the_warrant() {
         let set = IssuerSet::new(2, 3, 1);
-        let mut w = Wallet::new(9);
+        let same_warrant = warrant(1, 1);
 
-        let req = w.request(warrant(1, 1));
-        let partials = vec![set.partial(0, &req), set.partial(1, &req)];
-        let cred = w.assemble(&set, &partials).unwrap();
+        let mut blinded = std::collections::BTreeSet::new();
+        let mut serials = std::collections::BTreeSet::new();
+        for seed in 0..32u64 {
+            let mut w = Wallet::new(seed);
+            let req = w.request(same_warrant.clone());
+            let cred = w
+                .assemble(&set, &[set.partial(0, &req), set.partial(1, &req)])
+                .unwrap();
+            let mut led = SpendLedger::new();
+            let rec = led.accept(&set, &cred).unwrap();
 
-        let mut led = SpendLedger::new();
-        let rec = led.accept(&set, &cred).unwrap();
+            assert_ne!(req.blinded, rec.serial);
+            blinded.insert(req.blinded);
+            serials.insert(rec.serial);
+        }
 
-        // What the issuers saw, against what the verifier saw.
-        assert_ne!(
-            req.blinded, rec.serial,
-            "the blinded commitment must not equal the serial"
-        );
-        // And the commitment is not derivable from the serial without the blinding, which
-        // never left the wallet.
-        let mut h = blake3::Hasher::new();
-        h.update(b"karst.blind.v0");
-        h.update(&rec.serial);
-        h.update(&[0u8; 32]);
-        assert_ne!(*h.finalize().as_bytes(), req.blinded);
+        // Thirty-two identical warrants, thirty-two distinct commitments and serials. A
+        // commitment derived from the warrant alone would collapse to one value.
+        assert_eq!(blinded.len(), 32, "the commitment repeats across wallets");
+        assert_eq!(serials.len(), 32, "the serial repeats across wallets");
+
+        // And no commitment is any serial, so the two transcripts share no value at all.
+        assert!(blinded.is_disjoint(&serials));
     }
 
     #[test]

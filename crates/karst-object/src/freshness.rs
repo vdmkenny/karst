@@ -276,7 +276,21 @@ mod tests {
     fn a_tampered_statement_does_not_verify() {
         let pubr = Identity::generate();
         let obj = Timestamp::publish(&pubr, 100, 50, 1, snap(b"v1"));
+
+        // Rubbish is refused, but only because it stops decoding: the signature check is never
+        // reached, so this alone would pass with verification removed entirely.
         assert!(Timestamp::from_object(&obj.tamper(vec![0u8; 40])).is_err());
+
+        // A payload that is still a perfectly valid encoding of a *different* statement. Now
+        // only the signature can reject it, which is the property the name claims.
+        let forged = Timestamp::publish(&pubr, 100, 5_000_000, 1, snap(b"v1"));
+        let swapped = obj.tamper(forged.payload.clone());
+        assert!(
+            Timestamp::from_object(&swapped).is_err(),
+            "a validly encoded but unsigned payload was accepted"
+        );
+        // And the untouched original still verifies, so the refusals above are about tampering.
+        assert!(Timestamp::from_object(&obj).is_ok());
     }
 
     #[test]
