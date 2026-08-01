@@ -9,26 +9,52 @@
 //! sources. Two readers with different weights get different orders from identical inputs, and
 //! that is the intended behaviour rather than a failure of consistency.
 //!
-//! # Sybil resistance is L16's mechanic, applied here
+//! # Sybil resistance, and the theorem that forces the shape
 //!
-//! An adversary with no standing can manufacture identities without limit, so any scheme where
-//! untrusted sources contribute additively is defeated by volume alone. Setting their
-//! contribution to zero defeats the adversary and also defeats every new author, which is a
-//! cold start problem severe enough to make the layer useless.
+//! Cheng and Friedman (*Sybilproof reputation mechanisms*, P2PECON 2005) prove there is **no
+//! symmetric sybilproof nontrivial reputation function**. The strengthening is worse than the
+//! headline: in any such function, *any* node not already holding the maximum value has a
+//! successful sybil strategy, and their Theorem 2 extends this to k-sybilproofness for every
+//! constant k, so capping identities does not rescue it either.
 //!
-//! The answer is the one L16 already uses against acquisition: **let it saturate.** The
-//! aggregate contribution of untrusted sources approaches a ceiling, so a thousand of them are
-//! worth barely more than one, while a single source the reader actually trusts outweighs all
-//! of them. Scale stops paying, and it stops paying without anyone having to detect who
-//! controls what.
+//! Symmetric means name-blind: the function treats all sources alike and knows nothing about
+//! who is asking. Every global ranking is symmetric, which is why every global ranking is
+//! manipulable by manufacturing identities, and why EigenTrust's own authors concede that
+//! without pre-trusted peers "forming a malicious collective in fact heavily boosts the trust
+//! values of malicious nodes".
+//!
+//! Their escape is the one thing that is left: **asymmetric, anchored at a source.** Ranking
+//! must be relative to who is asking. That is not a design preference here, it is the only
+//! remaining option, and it is the same conclusion L15 reaches from the anti-capture direction.
+//!
+//! ## Untrusted sources contribute once, not once each
+//!
+//! Anchoring is necessary and not sufficient. The first version of this ranker let the
+//! aggregate contribution of untrusted sources *saturate*, approaching a ceiling as `n/(n+K)`.
+//! A thousand strangers were worth barely more than one, which sounds like enough and is not:
+//! going from one identity to two still raised the score, so the mechanism was
+//! **sybil-bounded rather than sybilproof**, and Cheng and Friedman's result says a bounded
+//! gain is still a gain worth taking.
+//!
+//! Every untrusted source together is now worth exactly **one** untrusted voice.
 //!
 //! ```text
-//! untrusted(n) = ceiling * n / (n + K)
-//!
-//!   n=1     0.50 * ceiling
-//!   n=10    0.91 * ceiling
-//!   n=1000  0.999 * ceiling
+//! untrusted(0) = 0
+//! untrusted(n) = ceiling,  for every n >= 1
 //! ```
+//!
+//! Manufacturing the second identity gains nothing, and neither does the millionth.
+//!
+//! ## What that gives up, deliberately
+//!
+//! The step loses any signal in *how many* strangers said something. A thousand unknown people
+//! commending a new work now counts exactly as much as one. That is a real loss, and it is
+//! precisely the quantity Cheng and Friedman show cannot be counted safely: a popularity
+//! signal from unaccountable identities is a manipulation primitive with a friendly name.
+//!
+//! A reader who wants popularity back subscribes to someone who measures it against evidence
+//! an adversary cannot mint. That moves the problem to a party the reader chose, which is
+//! where every other judgement in this layer already lives.
 //!
 //! # What ranking cannot fix
 //!
@@ -48,10 +74,8 @@ use super::{normalise, Catalogue, Verdict};
 #[derive(Debug, Clone)]
 pub struct Trust {
     weights: BTreeMap<Address, f64>,
-    /// The ceiling that all untrusted sources together approach.
+    /// What all untrusted sources together are worth.
     untrusted_ceiling: f64,
-    /// How fast that ceiling is approached. Smaller means faster.
-    saturation: f64,
 }
 
 impl Default for Trust {
@@ -61,7 +85,6 @@ impl Default for Trust {
             // Below 1.0 on purpose: any single source the reader has actually chosen outweighs
             // every source they have not, no matter how many of the latter there are.
             untrusted_ceiling: 0.5,
-            saturation: 1.0,
         }
     }
 }
@@ -87,12 +110,15 @@ impl Trust {
     }
 
     /// What `n` untrusted sources are worth in total.
+    ///
+    /// A step, not a curve. Any positive number of them is worth the same, so no number of
+    /// manufactured identities is worth more than the first.
     pub fn untrusted(&self, n: usize) -> f64 {
         if n == 0 {
-            return 0.0;
+            0.0
+        } else {
+            self.untrusted_ceiling
         }
-        let n = n as f64;
-        self.untrusted_ceiling * n / (n + self.saturation)
     }
 }
 
@@ -293,15 +319,38 @@ mod tests {
         assert!(results[1].score <= 0.5, "saturation failed: {}", results[1].score);
     }
 
-    /// Untrusted contribution must saturate rather than accumulate.
+    /// Manufacturing an identity must gain exactly nothing.
+    ///
+    /// Cheng and Friedman (P2PECON 2005) prove no symmetric reputation function is sybilproof,
+    /// and that any node below the maximum has a successful sybil strategy. Anchoring the
+    /// function at the reader escapes the theorem; a *bounded* gain does not, because a
+    /// bounded gain is still a gain worth taking. An earlier version here let the untrusted
+    /// contribution approach its ceiling as n/(n+K), so the second identity was worth a third
+    /// more than the first. This asserts the gain is zero rather than small.
     #[test]
-    fn untrusted_sources_saturate() {
+    fn a_second_identity_is_worth_nothing_and_so_is_the_millionth() {
         let t = Trust::new();
         assert_eq!(t.untrusted(0), 0.0);
         let one = t.untrusted(1);
-        let many = t.untrusted(1_000_000);
-        assert!(many < 2.0 * one, "{many} is more than twice {one}");
-        assert!(many <= 0.5, "the ceiling was exceeded: {many}");
+        assert!(one > 0.0, "a stranger must be able to say something");
+        for n in [2usize, 3, 10, 1_000, 1_000_000, usize::MAX] {
+            assert_eq!(
+                t.untrusted(n),
+                one,
+                "{n} identities were worth more than one"
+            );
+        }
+    }
+
+    /// A source the reader chose must outweigh every source they did not.
+    #[test]
+    fn any_chosen_source_outweighs_all_unchosen_ones() {
+        let t = Trust::new();
+        let weakest_deliberate_trust = 0.51;
+        assert!(
+            weakest_deliberate_trust > t.untrusted(usize::MAX),
+            "an unbounded flood of strangers matched a barely trusted source"
+        );
     }
 
     /// Publishing more must not raise a source's own weight.

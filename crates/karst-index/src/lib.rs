@@ -278,6 +278,44 @@ impl Catalogue {
         }
     }
 
+    /// Drop a target from the term index for any term nothing says about it any more.
+    ///
+    /// Eviction removed statements and left their terms behind, so the term index grew without
+    /// bound while the statement store stayed bounded. The bound was therefore not a bound: it
+    /// moved the growth rather than stopping it, and `candidates` went on returning objects
+    /// the catalogue no longer held anything about.
+    ///
+    /// This is the shape of partial fix that eMule shipped, where a per-subnet limit on
+    /// identities was enforced when adding contacts and not during lookup, leaving the
+    /// mechanism it was meant to stop working perfectly well (Kohnen, Leske, Rathgeb, IFIP
+    /// Networking 2009). **A bound applied at one stage and not another is not a bound.**
+    fn forget_terms(&mut self, target: &Cid, terms: &[String]) {
+        for t in terms {
+            let still_claimed = self
+                .announcements
+                .range(span(target))
+                .any(|(_, a)| a.terms.iter().any(|x| x == t))
+                || self
+                    .claims
+                    .range(span(target))
+                    .any(|(_, c)| c.terms.iter().any(|x| x == t));
+            if still_claimed {
+                continue;
+            }
+            if let Some(set) = self.by_term.get_mut(t) {
+                set.remove(target);
+                if set.is_empty() {
+                    self.by_term.remove(t);
+                }
+            }
+        }
+    }
+
+    /// How many distinct terms the index holds. Bounded only by what is still held.
+    pub fn terms_indexed(&self) -> usize {
+        self.by_term.len()
+    }
+
     /// Make room for an untrusted statement, or refuse it.
     ///
     /// Returns false when the statement should not be stored at all. Eviction is arbitrary
@@ -296,8 +334,16 @@ impl Catalogue {
                 return false;
             }
             self.untrusted_keys.remove(&victim);
-            self.announcements.remove(&victim);
-            self.claims.remove(&victim);
+            let a = self.announcements.remove(&victim);
+            let c = self.claims.remove(&victim);
+            let mut terms: Vec<String> = Vec::new();
+            if let Some(a) = a {
+                terms.extend(a.terms);
+            }
+            if let Some(c) = c {
+                terms.extend(c.terms);
+            }
+            self.forget_terms(&victim.0, &terms);
         }
         self.untrusted_keys.insert(key);
         true
@@ -600,6 +646,99 @@ mod tests {
         c.announce(
             Announcement::new(target, who, "doc", &terms(&["topic"]), 0).unwrap(),
             trust,
+        );
+    }
+
+    /// The term index must shrink when statements are evicted.
+    ///
+    /// The statement store was bounded and the term index was not, so eviction removed the
+    /// statements and left their terms behind. Memory grew without limit at exactly the rate
+    /// an adversary chose, and `candidates` kept returning objects the catalogue held nothing
+    /// about, inflating the work of every subsequent search.
+    ///
+    /// A bound applied at one stage and not another is not a bound.
+    #[test]
+    fn evicting_a_statement_also_forgets_its_terms() {
+        let t = Trust::new();
+        let mut c = Catalogue::new().with_untrusted_capacity(64);
+        for i in 0..20_000u32 {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&i.to_le_bytes());
+            c.announce(
+                Announcement::new(
+                    Cid::of(&b),
+                    Address::from_raw(b),
+                    "doc",
+                    &[format!("term{i}")],
+                    0,
+                )
+                .unwrap(),
+                &t,
+            );
+        }
+        assert_eq!(c.untrusted_held(), 64);
+        assert!(
+            c.terms_indexed() <= 64,
+            "the statement store held 64 and the term index held {}",
+            c.terms_indexed()
+        );
+    }
+
+    /// Evicted objects must stop being candidates.
+    ///
+    /// Otherwise every search pays to consider objects nothing is known about, which is the
+    /// quadratic behaviour returning by another door.
+    #[test]
+    fn evicted_objects_stop_being_candidates() {
+        let t = Trust::new();
+        let mut c = Catalogue::new().with_untrusted_capacity(64);
+        for i in 0..20_000u32 {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&i.to_le_bytes());
+            c.announce(
+                Announcement::new(Cid::of(&b), Address::from_raw(b), "doc", &terms(&["x"]), 0)
+                    .unwrap(),
+                &t,
+            );
+        }
+        assert_eq!(
+            c.candidates(&terms(&["x"])).len(),
+            64,
+            "candidates outnumbered the statements the catalogue actually holds"
+        );
+    }
+
+    /// A term shared by a surviving statement must not be forgotten with an evicted one.
+    #[test]
+    fn a_term_still_in_use_survives_an_eviction_that_mentioned_it() {
+        let keeper = addr(200);
+        let mut t = Trust::new();
+        t.set(keeper, 1.0);
+        let mut c = Catalogue::new().with_untrusted_capacity(2);
+        let target = Cid::of(b"shared");
+
+        c.announce(
+            Announcement::new(target, keeper, "doc", &terms(&["shared"]), 0).unwrap(),
+            &t,
+        );
+        // An untrusted statement about the same target, using the same term, then evicted.
+        c.announce(
+            Announcement::new(target, addr(1), "doc", &terms(&["shared"]), 0).unwrap(),
+            &t,
+        );
+        for i in 0..50u32 {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&i.to_le_bytes());
+            b[31] = 3;
+            c.announce(
+                Announcement::new(Cid::of(&b), Address::from_raw(b), "doc", &terms(&["other"]), 0)
+                    .unwrap(),
+                &t,
+            );
+        }
+        assert!(
+            c.candidates(&terms(&["shared"])).contains(&target),
+            "a trusted statement's term was forgotten when an untrusted one was evicted"
         );
     }
 
