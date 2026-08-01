@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "crates/karst-id",
     "crates/karst-object",
+    "crates/karst-path",
     "crates/karst-doc",
     "crates/karst-agency",
     "crates/karst-blob",
@@ -41,6 +42,7 @@ num-bigint-dig = "0.8"
 
 karst-id = { path = "crates/karst-id" }
 karst-object = { path = "crates/karst-object" }
+karst-path = { path = "crates/karst-path" }
 karst-doc = { path = "crates/karst-doc" }
 karst-agency = { path = "crates/karst-agency" }
 karst-blob = { path = "crates/karst-blob" }

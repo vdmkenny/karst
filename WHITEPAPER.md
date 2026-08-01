@@ -208,7 +208,8 @@ participation. Whether physically carried storage can be made routine rather tha
 
 ### L1 Path
 
-*Fixes error 03. Status: sketched.*
+*Fixes error 03. Status: **built** (`karst-path`); segments, composition and accountability
+implemented, distribution of segments unbuilt.*
 
 **Lever removed.** BGP convergence, and the registry that allocated your prefix.
 
@@ -219,6 +220,23 @@ compliance becomes everybody's outage.
 the end to end path themselves and carry it in the packet. There is no global convergence,
 so there is no route leak, no hijack, and no national withdrawal. There is no allocation
 authority to revoke from, because nothing was ever allocated.
+
+**What a signature buys, stated narrowly.** A segment is a claim of willingness by a named
+party, not a promise of delivery. Signing removes exactly one thing: announcing a route you do
+not operate. It does not stop an operator dropping traffic it agreed to carry, and no signature
+can, because carriage is a future act and a signature is about the present. So the property is
+that **a path names, in advance and verifiably, every party that must misbehave for it to
+fail**: attribution rather than prevention, which is the shape this design keeps arriving at.
+
+The binding that carries this is narrower than it looks. A segment carries its operator's
+verifying key, an address is that key's hash, and the two must agree. Checking the signature
+alone is not enough, because an attacker can sign bytes that **name the victim** and present
+their own key: the signature verifies under the key given, and without the binding the segment
+reads as the victim's. That is announcing a route you do not operate, arriving through the
+check meant to stop it.
+
+**Two senders holding different segments are both correct**, and neither advertises anything
+onward. That is the absence of convergence rather than a weaker form of it.
 
 This is SCION's design. It is not a thought experiment and it carries production traffic.
 

@@ -47,6 +47,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 
 | Crate | Layer | What it does |
 |---|---|---|
+| [`karst-path`](crates/karst-path) | L1 Path | Senders compose paths from signed segments. Nothing converges, nothing is allocated. |
 | [`karst-id`](crates/karst-id) | L2 Identity | Address is the hash of a locally generated key. No registrar, nothing to seize. |
 | [`karst-member`](crates/karst-member) | L5 Membership | No roll to enumerate, and introduction by shared contact via private set intersection. |
 | [`karst-object`](crates/karst-object) | L6 Objects | Canonical encoding, signed immutable objects, offline verification. |
