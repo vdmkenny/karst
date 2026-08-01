@@ -18,12 +18,16 @@ use karst_mix::packet::MixKey;
 use karst_net::client::Client;
 use karst_net::directory::{Directory, NodeInfo};
 use karst_net::feed::{feed_tag, FeedReader};
+use karst_net::placement::{placement, DEFAULT_REPLICAS};
 use karst_net::runner::{ClientRunner, NodeRunner};
+use karst_net::watch::FeedWatch;
 use karst_node::MixNode;
 use karst_object::Object;
 
 const LAYERS: u8 = 4;
 const PER_LAYER: usize = 2;
+/// Providers in the last layer, so a feed can live on more than one of them.
+const PROVIDERS: usize = 4;
 const LAMBDA: f64 = 60.0;
 
 fn rule(t: &str) {
@@ -79,19 +83,19 @@ fn main() -> std::io::Result<()> {
     let mut runners = Vec::new();
     let mut infos = Vec::new();
     let mut id = 0u16;
-    let mut provider_id = 0u16;
-    let mut collect_at = None;
+    let mut provider_ids: Vec<u16> = Vec::new();
+    let mut collect_addrs: Vec<(u16, SocketAddr)> = Vec::new();
 
     for layer in 0..LAYERS {
-        let count = if layer == LAYERS - 1 { 1 } else { PER_LAYER };
+        let count = if layer == LAYERS - 1 { PROVIDERS } else { PER_LAYER };
         for _ in 0..count {
             let key = MixKey::from_seed(rand::random());
             let public = key.public();
             let mut r = NodeRunner::new(id, MixNode::new(key), local())?;
             if layer == LAYERS - 1 {
                 r = r.serving_mail(local())?;
-                provider_id = id;
-                collect_at = r.collect_addr();
+                provider_ids.push(id);
+                collect_addrs.push((id, r.collect_addr().expect("serving mail")));
             }
             infos.push(NodeInfo {
                 id,
@@ -110,15 +114,25 @@ fn main() -> std::io::Result<()> {
     for r in runners.iter_mut() {
         r.set_directory(dir.clone());
     }
-    println!("  {} mixes in {} layers, on real sockets", infos.len(), LAYERS);
+    println!(
+        "  {} mixes in {} layers, {} of them providers, on real sockets",
+        infos.len(),
+        LAYERS,
+        PROVIDERS
+    );
 
     let stop = Arc::new(AtomicBool::new(false));
     let mut threads = Vec::new();
+    let mut kill: Vec<(u16, Arc<AtomicBool>)> = Vec::new();
     for mut r in runners {
         let stop = Arc::clone(&stop);
+        let mine = Arc::new(AtomicBool::new(false));
+        kill.push((r.id, Arc::clone(&mine)));
         threads.push(std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                r.step();
+                if !mine.load(Ordering::Relaxed) {
+                    r.step();
+                }
                 std::thread::sleep(Duration::from_millis(1));
             }
         }));
@@ -168,19 +182,25 @@ fn main() -> std::io::Result<()> {
 
     rule("Alice publishes, into a feed anyone can find and nobody can write to");
 
+    let holders = placement(&alice_id.address(), 0, &provider_ids, DEFAULT_REPLICAS);
     let mut alice = ClientRunner::new(
-        Client::from_seed(alice_seed, provider_id),
+        Client::from_seed(alice_seed, holders[0]),
         local(),
         dir.clone(),
-        collect_at.unwrap(),
+        collect_addrs[0].1,
         LAMBDA,
     )?;
     let feed = feed_tag(&alice_id.address(), 0);
-    for o in &node_objs {
-        alice.publish(feed, &o.encode()).unwrap();
+    for p in &holders {
+        for o in &node_objs {
+            alice.publish_to(feed, *p, &o.encode()).unwrap();
+        }
+        alice.publish_to(feed, *p, &ann_obj.encode()).unwrap();
     }
-    alice.publish(feed, &ann_obj.encode()).unwrap();
     println!("  {} nodes and one index entry", node_objs.len());
+    println!("  replicated onto providers {holders:?}");
+    note("Nobody was told where. The set is rendezvous hashing over her address and the epoch,");
+    note("so a reader who has never met her computes exactly the same three.");
     println!("  feed tag {}", hex8(&feed));
     note("Derived from her address, so a reader who has never met her can compute it.");
     note("Anyone may deposit here; nobody else can sign as her, so a flood buys denial and");
@@ -189,28 +209,48 @@ fn main() -> std::io::Result<()> {
     rule("Bob, who knows only her address");
 
     let mut bob = ClientRunner::new(
-        Client::new(Identity::from_seed(rand::random()), provider_id),
+        Client::new(Identity::from_seed(rand::random()), holders[0]),
         local(),
         dir.clone(),
-        collect_at.unwrap(),
+        collect_addrs[0].1,
         LAMBDA,
     )?;
     println!("  alice  {}", alice_id.address().short());
     note("That address is the hash of a key she generated locally. Nobody issued it, so");
     note("nobody can revoke it, and there was no registry to ask.");
 
-    let mut reader = FeedReader::new(alice_id.address());
+    // One reader, one feed, several providers. Each gets its own reader so a divergent
+    // replica cannot desynchronise reassembly for the others.
+    let mut readers: Vec<(u16, SocketAddr, FeedReader)> = holders
+        .iter()
+        .map(|p| {
+            let at = collect_addrs.iter().find(|(i, _)| i == p).unwrap().1;
+            (*p, at, FeedReader::new(alice_id.address()))
+        })
+        .collect();
+    let mut watch = FeedWatch::new();
     let mut received: Vec<Object> = Vec::new();
+    let mut seen: std::collections::BTreeSet<karst_object::Cid> = Default::default();
     let want = node_objs.len() + 1;
-    let deadline = Instant::now() + Duration::from_secs(40);
-    while Instant::now() < deadline && received.len() < want {
+
+    // Read every replica to completion, not just until bob has what he wants. A replica that
+    // was never finished being read is indistinguishable from one that is withholding, so a
+    // caller that stops early manufactures its own false positives.
+    let deadline = Instant::now() + Duration::from_secs(45);
+    while Instant::now() < deadline && !(received.len() >= want && watch.agreed()) {
         alice.step();
         bob.step();
-        for env in bob.poll_tag(feed) {
-            if let Some(obj) = reader.accept(&mut bob.client, &env) {
-                received.push(obj);
+        for (p, at, reader) in readers.iter_mut() {
+            for env in bob.poll_tag_at(*at, feed) {
+                if let Some(obj) = reader.accept(&mut bob.client, &env) {
+                    watch.record(*p, obj.cid());
+                    if seen.insert(obj.cid()) {
+                        received.push(obj);
+                    }
+                }
             }
         }
+        watch.end_round(&holders);
         std::thread::sleep(Duration::from_millis(2));
     }
 
@@ -284,12 +324,56 @@ fn main() -> std::io::Result<()> {
         _ => println!("  \x1b[31mthe document did not reassemble\x1b[0m"),
     }
 
+    rule("One provider stops serving");
+
+    println!(
+        "  before: {} replicas, all agreeing on {} objects",
+        holders.len(),
+        watch.known().len()
+    );
+    let victim = holders[1];
+    for (id, flag) in &kill {
+        if *id == victim {
+            flag.store(true, Ordering::Relaxed);
+        }
+    }
+    println!("  provider {victim} is down, and alice publishes again");
+    let more = Object::create(&alice_id, "karst.doc.node.v1", 99, b"a later note".to_vec(), None);
+    for p in &holders {
+        alice.publish_to(feed, *p, &more.encode()).unwrap();
+    }
+    let deadline = Instant::now() + Duration::from_secs(25);
+    while Instant::now() < deadline && watch.persistently_behind(5).is_empty() {
+        alice.step();
+        bob.step();
+        for (p, at, reader) in readers.iter_mut() {
+            for env in bob.poll_tag_at(*at, feed) {
+                if let Some(obj) = reader.accept(&mut bob.client, &env) {
+                    watch.record(*p, obj.cid());
+                }
+            }
+        }
+        watch.end_round(&holders);
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    for l in watch.persistently_behind(5) {
+        println!(
+            "  \x1b[33mprovider {} is missing {} object(s), behind for {} rounds\x1b[0m",
+            l.provider,
+            l.missing.len(),
+            l.rounds_behind
+        );
+    }
+    note("Bob did not need to trust any provider to notice. He compared what several showed");
+    note("him, and one of them stopped agreeing. What he cannot detect is all of them showing");
+    note("him the same incomplete view, which needs comparison with other readers.");
+
     rule("What was never involved");
 
     for absent in [
         "DNS, or any name that resolves to a location",
         "a certificate authority, or any root of trust to compromise",
-        "a server, or any host that had to be running when bob asked",
+        "a server, or any single host whose seizure would stop the feed",
         "a crawler, or a search engine, or an index anyone else operates",
         "markup, or a script, or anything a document could run on his machine",
     ] {

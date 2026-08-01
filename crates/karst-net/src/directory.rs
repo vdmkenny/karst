@@ -26,8 +26,9 @@
 //! eventually draws a hostile one, and the guard trades a rising certainty of eventual
 //! compromise for a fixed chance of immediate compromise. Whether that trade is right here is
 //! open, and it is not merely a parameter: guard placement attacks defeat Counter-RAPTOR,
-//! DeNASA and LASTor, with 0.216% of bandwidth reaching 18.22% of guard selections (Hanley,
-//! Sun, Wagh, Mittal, PoPETs 2019). Selection is uniform within a layer until that is settled.
+//! DeNASA and LASTor, with 0.216% of bandwidth reaching 18.22% of guard selections (Wan,
+//! Johnson, Wails, Wagh, Mittal, *Guard Placement Attacks on Path Selection Algorithms for
+//! Tor*, PoPETs 2019(4)). Selection is uniform within a layer until that is settled.
 
 use karst_mix::packet::{Hop, MAX_HOPS};
 use karst_node::MixNode;
