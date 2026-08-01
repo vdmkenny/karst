@@ -548,8 +548,18 @@ so producing a split view requires corrupting witnesses rather than fooling a re
 the direction Certificate Transparency moved after client-to-client gossip failed to deploy
 (Syta et al., *Keeping Authorities Honest or Bust*, IEEE S&P 2016).
 
-**A witness can refuse and cannot lie.** It never originates a statement; it countersigns a
-publisher's own signed checkpoint or declines. So witnesses add parties who can **withhold** and
+**A witness can refuse and cannot lie**, and this is true only because it countersigns a
+**signed object** rather than a struct handed to it. An earlier version took a bare checkpoint
+whose publisher was a caller-supplied field, so anyone could name a victim and have honest
+witnesses countersign a digest that victim never made: the witnesses substituted, which is the
+one thing this claim says they cannot do. It never originates a statement; it countersigns a
+publisher's own signed checkpoint or declines.
+
+**Extending is not the same as advancing.** A checkpoint links back to the one it continues, and
+a witness refuses anything that does not. Comparing sequence numbers alone let a publisher keep
+two histories on disjoint numbers, get both countersigned by every honest witness, and leave no
+evidence, because equivocation is defined at a shared sequence. The split view this layer exists
+to prevent survived it untouched. So witnesses add parties who can **withhold** and
 none who can **substitute**, which is the same shape as adding replicas at L7 and the reason
 both are cheap to add. A captured witness set can stall and cannot forge.
 
