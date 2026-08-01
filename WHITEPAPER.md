@@ -1107,13 +1107,18 @@ behind it. Attenuation and spend caps bound each individual compromise, which is
 attempted abuse against a uniform discoverable priced action surface will exceed anything the scraping
 era produced.
 
-**6.10 A credential is worth one unit per verifier, not one in the universe.** The L14 and L4
+**6.10 A credential is worth one unit per verifier, and double spending identifies you.**
+Prevention needs an authority or a consensus, so the design does not prevent it. Following Chaum,
+Fiat and Naor (1988), a credential carries the holder's identity split into share pairs; one
+spend opens one half of each and discloses nothing, two spends against different verifier
+challenges reconstruct the holder. Honest spenders reveal nothing, and a double spender is linked
+back to an acquisition that was deliberately linkable anyway. The same answer covers L9's use
+counts, where two signed invocations are already evidence. See
+[`docs/20-three-decisions.md`](docs/20-three-decisions.md). The residual: The L14 and L4
 conflict resolves by separating acquisition from spending, so this is no longer the stack's largest
-open problem. What it leaves is double spending: a serial spent twice at one verifier is caught, and
-two verifiers that cannot see each other both accept the same credential. Closing that requires a
-shared ledger with its consensus cost, or short epochs that bound the damage, or accepting that each
-relay honours a credential once. The same limit applies to L9's use counts, for the same reason, and
-in both cases the design has to pick an option rather than imply the problem is solved.
+open problem. a verifier can identify a double spender but cannot *prove* it to a third party.
+Compact E-Cash (EUROCRYPT 2005) adds that exculpability and is not implemented, and it matters more
+here than in a banked setting because there is no authority whose word anyone takes.
 
 **6.11a Joining the network is observable, and everyone does it once.** Constant-rate cover
 protects a participant and not the act of becoming one. An adversary who was already watching
@@ -1121,6 +1126,12 @@ gets the absent-population baseline that statistical disclosure needs, and half 
 window of it is enough for full attribution. Joining before you need the network helps and
 costs the full bandwidth rate from that moment; joining in cohorts helps and needs coordination
 the design deliberately lacks.
+
+**Freeze detection is implemented**, which addresses the adjacent hazard the same case exposed: the
+Ricochet user was running a build without current guard protections, and nothing told them. Per TUF
+(Samuel, Mathewson, Cappos and Dingledine, CCS 2010), publishers emit short-expiry signed statements
+with monotonic sequence, so a client distinguishes silence from "nothing new" and detects its own
+staleness locally. No authority pushes anything, so there is nothing for L16 to object to.
 
 There is a known research direction and no deployed solution. Membership-concealing overlay
 networks (Vasserman et al., CCS 2009) hide who is participating at all, so the differencing

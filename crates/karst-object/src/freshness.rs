@@ -1,0 +1,255 @@
+//! Knowing that you have stopped hearing.
+//!
+//! Issue #57. The Ricochet user deanonymised in the BKA operation was running a build that
+//! lacked current guard protections. **Tor had shipped the defence. It was not on that
+//! endpoint.** A defence that exists and is not running is worth nothing, and that was the
+//! proximate cause in the only documented case where a real person was identified through a
+//! protocol weakness rather than an endpoint compromise.
+//!
+//! KARST makes this harder than usual, on purpose. There is no authority to push an update
+//! (error 03), no enumerable membership to count who runs what (L5), and no privileged client
+//! with standing to insist (L16).
+//!
+//! # The mechanism, from TUF
+//!
+//! Samuel, Mathewson, Cappos and Dingledine, *Survivable Key Compromise in Software Update
+//! Systems* (CCS 2010), designed exactly for adversarial update distribution. Two of the four
+//! authors are Tor.
+//!
+//! The piece that matters here is the **timestamp role and its defence against freeze
+//! attacks**. An adversary who simply withholds updates leaves a client believing it is
+//! current, forever, with no error to notice. TUF's answer is short-expiry signed metadata: a
+//! client knows what fresh metadata looks like and how often to expect it, so **silence is
+//! distinguishable from "nothing new"**.
+//!
+//! That resolves the tension with L16 that made this hard to decide. It is not a
+//! privileged-client mechanism and nobody pushes anything: the client pulls, and detects its
+//! own staleness locally. No authority is required for a client to notice it has stopped
+//! hearing.
+//!
+//! # What is here and what is not
+//!
+//! Freeze detection is implemented. TUF's other mechanisms map onto primitives that already
+//! exist and are not wired up: threshold signing (`karst-value::shamir`), role separation, and
+//! key rotation ([`crate::Rotation`]). Advisories themselves are ordinary objects distributed
+//! as label sets at L15.
+
+use core::fmt;
+
+use karst_id::{Address, Identity};
+
+use crate::{Dec, Enc, Object, ObjectError};
+
+pub const TIMESTAMP_KIND: &str = "karst.timestamp.v1";
+
+/// A signed statement that a publisher was alive and had nothing newer to say.
+///
+/// Expiry is the whole point. A statement without one can be replayed forever, which is the
+/// freeze attack it exists to prevent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timestamp {
+    pub publisher: Address,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    /// Monotonic, so an old statement cannot be replayed as a new one.
+    pub sequence: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Staleness {
+    /// Heard recently and the statement has not expired.
+    Fresh,
+    /// The most recent statement has expired. **Assume something is wrong**, because a
+    /// publisher with nothing to say still says so.
+    Expired { since: u64 },
+    /// A statement arrived with a sequence at or below one already seen, which is a replay.
+    Rollback { seen: u64, offered: u64 },
+    /// Nothing has ever been heard, which is not the same as being current.
+    NeverHeard,
+}
+
+impl fmt::Display for Staleness {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Staleness::Fresh => write!(f, "current"),
+            Staleness::Expired { since } => {
+                write!(f, "no fresh statement since t{since}; assume withheld")
+            }
+            Staleness::Rollback { seen, offered } => {
+                write!(f, "replay: already saw sequence {seen}, offered {offered}")
+            }
+            Staleness::NeverHeard => write!(f, "never heard from this publisher"),
+        }
+    }
+}
+
+impl Staleness {
+    /// Whether a client should act as though it may be missing a defence.
+    pub fn suspect(&self) -> bool {
+        !matches!(self, Staleness::Fresh)
+    }
+}
+
+impl Timestamp {
+    pub fn publish(
+        publisher: &Identity,
+        issued_at: u64,
+        valid_for: u64,
+        sequence: u64,
+    ) -> Object {
+        let mut e = Enc::new();
+        e.u64(issued_at).u64(issued_at + valid_for).u64(sequence);
+        Object::create(publisher, TIMESTAMP_KIND, sequence, e.finish(), None)
+    }
+
+    pub fn from_object(obj: &Object) -> Result<Timestamp, ObjectError> {
+        if obj.kind != TIMESTAMP_KIND {
+            return Err(ObjectError::CidMismatch);
+        }
+        let publisher = obj.verify()?;
+        let mut d = Dec::new(&obj.payload);
+        let issued_at = d.u64().map_err(|_| ObjectError::CidMismatch)?;
+        let expires_at = d.u64().map_err(|_| ObjectError::CidMismatch)?;
+        let sequence = d.u64().map_err(|_| ObjectError::CidMismatch)?;
+        d.end().map_err(|_| ObjectError::CidMismatch)?;
+        Ok(Timestamp {
+            publisher,
+            issued_at,
+            expires_at,
+            sequence,
+        })
+    }
+}
+
+/// A client's view of one publisher it expects to hear from.
+#[derive(Clone, Debug)]
+pub struct FreshnessMonitor {
+    pub publisher: Address,
+    latest: Option<Timestamp>,
+}
+
+impl FreshnessMonitor {
+    pub fn new(publisher: Address) -> Self {
+        FreshnessMonitor {
+            publisher,
+            latest: None,
+        }
+    }
+
+    /// Accept a statement, rejecting replays and statements from anyone else.
+    pub fn accept(&mut self, ts: Timestamp) -> Result<(), Staleness> {
+        if ts.publisher != self.publisher {
+            return Err(Staleness::NeverHeard);
+        }
+        if let Some(prev) = self.latest {
+            if ts.sequence <= prev.sequence {
+                return Err(Staleness::Rollback {
+                    seen: prev.sequence,
+                    offered: ts.sequence,
+                });
+            }
+        }
+        self.latest = Some(ts);
+        Ok(())
+    }
+
+    /// **The freeze check.** Silence is not evidence of being current.
+    pub fn status(&self, now: u64) -> Staleness {
+        match self.latest {
+            None => Staleness::NeverHeard,
+            Some(ts) if now > ts.expires_at => Staleness::Expired {
+                since: ts.expires_at,
+            },
+            Some(_) => Staleness::Fresh,
+        }
+    }
+
+    pub fn latest(&self) -> Option<Timestamp> {
+        self.latest
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ts(id: &Identity, at: u64, valid: u64, seq: u64) -> Timestamp {
+        Timestamp::from_object(&Timestamp::publish(id, at, valid, seq)).unwrap()
+    }
+
+    #[test]
+    fn a_fresh_statement_is_current() {
+        let pubr = Identity::generate();
+        let mut m = FreshnessMonitor::new(pubr.address());
+        m.accept(ts(&pubr, 100, 50, 1)).unwrap();
+        assert_eq!(m.status(120), Staleness::Fresh);
+        assert!(!m.status(120).suspect());
+    }
+
+    /// **The freeze attack.** An adversary withholding updates leaves a client believing it is
+    /// current, forever, with no error to notice. Expiry is what turns silence into a signal.
+    #[test]
+    fn withheld_updates_become_visible_rather_than_silent() {
+        let pubr = Identity::generate();
+        let mut m = FreshnessMonitor::new(pubr.address());
+        m.accept(ts(&pubr, 100, 50, 1)).unwrap();
+
+        assert_eq!(m.status(150), Staleness::Fresh);
+        assert_eq!(m.status(151), Staleness::Expired { since: 150 });
+        assert!(m.status(151).suspect(), "a starved client must know it is starved");
+    }
+
+    #[test]
+    fn never_hearing_is_not_the_same_as_being_current() {
+        let pubr = Identity::generate();
+        let m = FreshnessMonitor::new(pubr.address());
+        assert_eq!(m.status(0), Staleness::NeverHeard);
+        assert!(m.status(0).suspect());
+    }
+
+    /// A publisher with nothing to say still says so, so an old statement cannot be replayed
+    /// to keep a client quiet.
+    #[test]
+    fn an_old_statement_cannot_be_replayed() {
+        let pubr = Identity::generate();
+        let mut m = FreshnessMonitor::new(pubr.address());
+        m.accept(ts(&pubr, 100, 50, 5)).unwrap();
+
+        assert_eq!(
+            m.accept(ts(&pubr, 90, 50, 3)),
+            Err(Staleness::Rollback { seen: 5, offered: 3 })
+        );
+        assert_eq!(
+            m.accept(ts(&pubr, 100, 50, 5)),
+            Err(Staleness::Rollback { seen: 5, offered: 5 }),
+            "the same sequence again is also a replay"
+        );
+    }
+
+    #[test]
+    fn a_statement_from_somebody_else_is_not_accepted() {
+        let pubr = Identity::generate();
+        let impostor = Identity::generate();
+        let mut m = FreshnessMonitor::new(pubr.address());
+        assert!(m.accept(ts(&impostor, 100, 50, 1)).is_err());
+        assert_eq!(m.status(100), Staleness::NeverHeard);
+    }
+
+    #[test]
+    fn a_tampered_statement_does_not_verify() {
+        let pubr = Identity::generate();
+        let obj = Timestamp::publish(&pubr, 100, 50, 1);
+        let evil = obj.tamper(vec![0u8; 24]);
+        assert!(Timestamp::from_object(&evil).is_err());
+    }
+
+    #[test]
+    fn continuing_to_hear_keeps_a_client_current() {
+        let pubr = Identity::generate();
+        let mut m = FreshnessMonitor::new(pubr.address());
+        for i in 1..10u64 {
+            m.accept(ts(&pubr, i * 100, 150, i)).unwrap();
+            assert_eq!(m.status(i * 100 + 10), Staleness::Fresh);
+        }
+    }
+}
