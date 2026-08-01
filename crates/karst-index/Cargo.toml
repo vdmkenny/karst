@@ -1,0 +1,19 @@
+[package]
+name = "karst-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L15 Discovery: publishing and indexing are one act"
+
+[dependencies]
+karst-id.workspace = true
+karst-object.workspace = true
+rand = "0.8"
+
+[[bin]]
+name = "karst-search"
+path = "src/bin/karst-search.rs"
+
+[[bin]]
+name = "karst-indexscale"
+path = "src/bin/karst-indexscale.rs"
