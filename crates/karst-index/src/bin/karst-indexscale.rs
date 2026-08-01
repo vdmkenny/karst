@@ -10,14 +10,14 @@
 
 use std::time::Instant;
 
-use karst_id::Address;
+use karst_id::Identity;
 use karst_index::{Announcement, Catalogue, Ranker, Trust};
 use karst_object::Cid;
 
-fn addr(n: u32) -> Address {
-    let mut b = [0u8; 32];
-    b[..4].copy_from_slice(&n.to_le_bytes());
-    Address::from_raw(b)
+fn ident(n: u32) -> Identity {
+    let mut seed = [0u8; 32];
+    seed[..4].copy_from_slice(&n.to_le_bytes());
+    Identity::from_seed(seed)
 }
 
 fn cid(n: u32) -> Cid {
@@ -40,15 +40,20 @@ fn terms_for(doc: u32, vocab: u32) -> Vec<String> {
     v
 }
 
-fn build(n: u32, vocab: u32, trust: &Trust) -> Catalogue {
+fn build(n: u32, vocab: u32, trust: &Trust) -> (Catalogue, f64) {
+    let ids: Vec<Identity> = (0..256u32).map(ident).collect();
     let mut cat = Catalogue::new().with_untrusted_capacity(n as usize * 2);
+    let t0 = Instant::now();
     for i in 0..n {
-        cat.announce(
-            Announcement::new(cid(i), addr(i % 5_000), "doc", &terms_for(i, vocab), 0).unwrap(),
-            trust,
-        );
+        let id = &ids[(i % 256) as usize];
+        let obj = Announcement::new(cid(i), id.address(), "doc", &terms_for(i, vocab), 0)
+            .unwrap()
+            .publish(id, i as u64);
+        // Verification is on the ingest path, deliberately. A reader who skips it is a reader
+        // whose trust weights mean nothing.
+        cat.announce(Announcement::from_object(&obj).unwrap(), trust);
     }
-    cat
+    (cat, t0.elapsed().as_secs_f64() * 1000.0)
 }
 
 fn main() {
@@ -57,18 +62,18 @@ fn main() {
 
     let mut trust = Trust::new();
     for i in 0..64u32 {
-        trust.set(addr(i), 1.0);
+        trust.set(ident(i).address(), 1.0);
     }
 
     println!(
-        "  {:>10}  {:>12}  {:>14}  {:>14}",
-        "objects", "rare query", "common query", "ratio"
+        "  {:>10}  {:>12}  {:>12}  {:>14}  {:>12}",
+        "objects", "ingest", "rare query", "common query", "ratio"
     );
-    println!("  {}", "-".repeat(56));
+    println!("  {}", "-".repeat(72));
 
     let mut prev: Option<(u32, f64)> = None;
-    for n in [1_000u32, 4_000, 16_000, 64_000, 256_000] {
-        let cat = build(n, 20_000, &trust);
+    for n in [1_000u32, 4_000, 16_000, 64_000] {
+        let (cat, ingest_ms) = build(n, 20_000, &trust);
         let r = Ranker::new(trust.clone());
 
         // A rare term: few results, so a well-built index should be nearly free.
@@ -92,8 +97,8 @@ fn main() {
         prev = Some((n, common_ms));
 
         println!(
-            "  {:>10}  {:>9.2}ms  {:>11.2}ms  {:>14}",
-            n, rare_ms, common_ms, growth
+            "  {:>10}  {:>9.0}ms  {:>9.2}ms  {:>11.2}ms  {:>12}",
+            n, ingest_ms, rare_ms, common_ms, growth
         );
         let _ = (rare_hits, common_hits);
 

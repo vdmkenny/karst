@@ -42,8 +42,13 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use karst_id::Address;
-use karst_object::Cid;
+use karst_id::{Address, Identity};
+use karst_object::{Cid, Dec, Enc, Object, ObjectError};
+
+/// Object kinds. A statement is an ordinary signed object, so it travels, verifies and
+/// supersedes exactly like everything else at L6.
+pub const ANNOUNCE_KIND: &str = "karst.index.announce.v1";
+pub const CLAIM_KIND: &str = "karst.index.claim.v1";
 
 pub mod rank;
 
@@ -66,6 +71,15 @@ pub enum IndexError {
     EmptyTerm,
     /// Terms must be sorted and unique, so one statement cannot weigh more by repeating itself.
     TermsNotCanonical,
+    /// The signature did not check out, or the object was not a statement at all.
+    Unsigned,
+    Malformed,
+}
+
+impl From<ObjectError> for IndexError {
+    fn from(_: ObjectError) -> Self {
+        IndexError::Unsigned
+    }
 }
 
 /// The key range covering every statement about one target.
@@ -114,6 +128,11 @@ pub struct Announcement {
 }
 
 impl Announcement {
+    /// Build an unsigned statement, for signing.
+    ///
+    /// `author` is what the caller intends to sign as, and it is worth nothing until an object
+    /// carrying it is verified. Only [`Announcement::from_object`] produces one a catalogue
+    /// will accept.
     pub fn new(
         target: Cid,
         author: Address,
@@ -130,6 +149,58 @@ impl Announcement {
         })
     }
 
+    /// Sign it.
+    pub fn publish(&self, author: &Identity, seq: u64) -> Object {
+        let mut e = Enc::new();
+        e.cid(&self.target)
+            .str(&self.kind)
+            .u64(self.published_at)
+            .u64(self.terms.len() as u64);
+        for t in &self.terms {
+            e.str(t);
+        }
+        Object::create(author, ANNOUNCE_KIND, seq, e.finish(), None)
+    }
+
+    /// Recover it from a signed object, or refuse.
+    ///
+    /// The author is taken from the **verified signature** and never from the payload. An
+    /// index whose entries name their own author is an index anyone can write in anyone's
+    /// name, which would make every trust weight in this crate meaningless: a reader weights
+    /// sources, and a source that can be impersonated is not a source.
+    pub fn from_object(obj: &Object) -> Result<Verified<Announcement>, IndexError> {
+        if obj.kind != ANNOUNCE_KIND {
+            return Err(IndexError::Malformed);
+        }
+        let author = obj.verify()?;
+        let mut d = Dec::new(&obj.payload);
+        let target = d.cid().map_err(|_| IndexError::Malformed)?;
+        let kind = d.str().map_err(|_| IndexError::Malformed)?;
+        let published_at = d.u64().map_err(|_| IndexError::Malformed)?;
+        let n = d.u64().map_err(|_| IndexError::Malformed)? as usize;
+        if n > MAX_TERMS {
+            return Err(IndexError::TooManyTerms);
+        }
+        let mut raw = Vec::with_capacity(n);
+        for _ in 0..n {
+            raw.push(d.str().map_err(|_| IndexError::Malformed)?);
+        }
+        d.end().map_err(|_| IndexError::Malformed)?;
+        let terms = canonical_terms(&raw)?;
+        // Canonicalising must be idempotent on the wire, or two encodings of one statement
+        // would carry different weight.
+        if terms != raw {
+            return Err(IndexError::TermsNotCanonical);
+        }
+        Ok(Verified(Announcement {
+            target,
+            author,
+            kind,
+            terms,
+            published_at,
+        }))
+    }
+
     pub fn matches(&self, query: &[String]) -> usize {
         query
             .iter()
@@ -140,13 +211,14 @@ impl Announcement {
 
 /// What a third party is saying about somebody else's content.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[repr(u8)]
 pub enum Verdict {
     /// Worth reading. Raises rank for readers who weight this source.
-    Commend,
+    Commend = 0,
     /// Accurate on these terms, without judgement of quality.
-    Corroborate,
+    Corroborate = 1,
     /// Mislabelled, spam, or otherwise not what it claims.
-    Dispute,
+    Dispute = 2,
 }
 
 /// Anyone's statement about anyone's content.
@@ -179,6 +251,55 @@ impl Claim {
             made_at,
         })
     }
+
+    pub fn publish(&self, claimant: &Identity, seq: u64) -> Object {
+        let mut e = Enc::new();
+        e.cid(&self.target)
+            .u8(self.verdict as u8)
+            .u64(self.made_at)
+            .u64(self.terms.len() as u64);
+        for t in &self.terms {
+            e.str(t);
+        }
+        Object::create(claimant, CLAIM_KIND, seq, e.finish(), None)
+    }
+
+    /// As with [`Announcement::from_object`], the claimant comes from the signature.
+    pub fn from_object(obj: &Object) -> Result<Verified<Claim>, IndexError> {
+        if obj.kind != CLAIM_KIND {
+            return Err(IndexError::Malformed);
+        }
+        let claimant = obj.verify()?;
+        let mut d = Dec::new(&obj.payload);
+        let target = d.cid().map_err(|_| IndexError::Malformed)?;
+        let verdict = match d.u8().map_err(|_| IndexError::Malformed)? {
+            0 => Verdict::Commend,
+            1 => Verdict::Corroborate,
+            2 => Verdict::Dispute,
+            _ => return Err(IndexError::Malformed),
+        };
+        let made_at = d.u64().map_err(|_| IndexError::Malformed)?;
+        let n = d.u64().map_err(|_| IndexError::Malformed)? as usize;
+        if n > MAX_TERMS {
+            return Err(IndexError::TooManyTerms);
+        }
+        let mut raw = Vec::with_capacity(n);
+        for _ in 0..n {
+            raw.push(d.str().map_err(|_| IndexError::Malformed)?);
+        }
+        d.end().map_err(|_| IndexError::Malformed)?;
+        let terms = canonical_terms(&raw)?;
+        if terms != raw {
+            return Err(IndexError::TermsNotCanonical);
+        }
+        Ok(Verified(Claim {
+            target,
+            claimant,
+            verdict,
+            terms,
+            made_at,
+        }))
+    }
 }
 
 /// Everything a client has heard.
@@ -206,6 +327,24 @@ impl Claim {
 /// they do not hold, including the absence of things evicted on someone else's behalf. Two
 /// readers who disagree keep two catalogues. That is the cost of there being no global index,
 /// and it is the same cost that makes there be no global index to capture.
+/// A statement whose signature has been checked.
+///
+/// The only way to build one is [`Announcement::from_object`] or [`Claim::from_object`], both
+/// of which verify. A catalogue accepts nothing else, so "did anyone check this signature" is
+/// answered by the type rather than by remembering to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Verified<T>(T);
+
+impl<T> Verified<T> {
+    pub fn get(&self) -> &T {
+        &self.0
+    }
+
+    pub fn into_inner(self) -> T {
+        self.0
+    }
+}
+
 /// Statements are keyed by **target first**.
 ///
 /// The obvious key is `(source, target)`, and it is wrong. Ranking asks "what has anyone said
@@ -225,6 +364,11 @@ pub struct Catalogue {
     /// How many untrusted statements to keep. Trusted ones are not counted against it.
     untrusted_capacity: usize,
     untrusted_keys: BTreeSet<Key>,
+    /// Which untrusted keys each source holds, so eviction can charge the biggest occupant.
+    untrusted_by_source: BTreeMap<Address, BTreeSet<Key>>,
+    /// Occupancy ordered for a cheap maximum.
+    occupancy: BTreeSet<(usize, Address)>,
+    rng: rand::rngs::StdRng,
 }
 
 impl Default for Catalogue {
@@ -243,6 +387,9 @@ impl Catalogue {
             by_term: BTreeMap::new(),
             untrusted_capacity: Self::DEFAULT_UNTRUSTED_CAPACITY,
             untrusted_keys: BTreeSet::new(),
+            untrusted_by_source: BTreeMap::new(),
+            occupancy: BTreeSet::new(),
+            rng: <rand::rngs::StdRng as rand::SeedableRng>::from_entropy(),
         }
     }
 
@@ -265,15 +412,21 @@ impl Catalogue {
     ///
     /// Call this whenever trust changes.
     pub fn retrust(&mut self, trust: &rank::Trust) {
-        self.untrusted_keys.retain(|(_, who)| trust.weight_of(who).is_none());
-        for key in self.announcements.keys() {
+        // Rebuild every structure that indexes the untrusted pool, not just the key set.
+        // Leaving the per-source occupancy behind would make the quota and eviction disagree
+        // with what is actually held, which is how a bound stops binding.
+        self.untrusted_keys.clear();
+        self.untrusted_by_source.clear();
+        self.occupancy.clear();
+        let keys: Vec<Key> = self
+            .announcements
+            .keys()
+            .chain(self.claims.keys())
+            .copied()
+            .collect();
+        for key in keys {
             if trust.weight_of(&key.1).is_none() {
-                self.untrusted_keys.insert(*key);
-            }
-        }
-        for key in self.claims.keys() {
-            if trust.weight_of(&key.1).is_none() {
-                self.untrusted_keys.insert(*key);
+                self.track_untrusted(key);
             }
         }
     }
@@ -326,14 +479,26 @@ impl Catalogue {
         if self.untrusted_keys.contains(&key) {
             return true;
         }
-        if self.untrusted_keys.len() >= self.untrusted_capacity {
-            let Some(victim) = self.untrusted_keys.iter().next().copied() else {
-                return false;
-            };
+        // The quota binds always, not only once the pool is full. Enforcing it at capacity
+        // alone let one source fill every slot first and then defend what it had taken.
+        let quota = self.per_source_quota();
+        let mine = self
+            .untrusted_by_source
+            .get(&key.1)
+            .map_or(0, |set| set.len());
+        let victim = if mine >= quota {
+            self.random_from(&key.1)
+        } else if self.untrusted_keys.len() >= self.untrusted_capacity {
+            self.choose_victim(&key)
+        } else {
+            None
+        };
+
+        if let Some(victim) = victim {
             if victim == key {
                 return false;
             }
-            self.untrusted_keys.remove(&victim);
+            self.drop_untrusted_key(&victim);
             let a = self.announcements.remove(&victim);
             let c = self.claims.remove(&victim);
             let mut terms: Vec<String> = Vec::new();
@@ -344,41 +509,140 @@ impl Catalogue {
                 terms.extend(c.terms);
             }
             self.forget_terms(&victim.0, &terms);
+        } else if self.untrusted_keys.len() >= self.untrusted_capacity {
+            return false;
         }
-        self.untrusted_keys.insert(key);
+        self.track_untrusted(key);
         true
     }
 
-    pub fn announce(&mut self, a: Announcement, trust: &rank::Trust) {
+    /// A random key held by one source.
+    fn random_from(&mut self, who: &Address) -> Option<Key> {
+        use rand::Rng;
+        let set = self.untrusted_by_source.get(who)?;
+        if set.is_empty() {
+            return None;
+        }
+        let n = self.rng.gen_range(0..set.len());
+        set.iter().nth(n).copied()
+    }
+
+    /// Pick what to evict.
+    ///
+    /// Not the smallest key. Keys are `(Cid, Address)` and a Cid is the hash of content its
+    /// author chose, so evicting the minimum hands the eviction order to whoever is writing
+    /// the content: grind a nonce until the digest starts with `0xff` and the entry is
+    /// permanently unevictable while every honest entry is driven out. **An ordering an
+    /// adversary can compute is an ordering an adversary controls.**
+    ///
+    /// Charge the largest occupant instead, breaking ties at random. Holding many slots is
+    /// what a flood does and what a single honest source does not, so the cost falls where the
+    /// pressure comes from, and grinding a digest changes nothing because it does not change
+    /// how many slots a source holds.
+    fn choose_victim(&mut self, incoming: &Key) -> Option<Key> {
+        use rand::Rng;
+        let (count, worst) = self.occupancy.iter().next_back().copied()?;
+        // An incoming statement from the current largest occupant is itself the thing to
+        // refuse, so a flood cannot displace others once it is already the heaviest.
+        if worst == incoming.1 && count >= self.per_source_quota() {
+            return Some(*incoming);
+        }
+        let set = self.untrusted_by_source.get(&worst)?;
+        if set.is_empty() {
+            return None;
+        }
+        let n = self.rng.gen_range(0..set.len());
+        set.iter().nth(n).copied()
+    }
+
+    /// The most slots one untrusted source may hold.
+    ///
+    /// Random eviction alone is not enough: a source holding N of H slots keeps N/(N+H) of the
+    /// pool, so an adversary willing to keep publishing still crowds everyone out slowly. A
+    /// quota caps that directly.
+    fn per_source_quota(&self) -> usize {
+        (self.untrusted_capacity / 16).max(1)
+    }
+
+    fn track_untrusted(&mut self, key: Key) {
+        self.untrusted_keys.insert(key);
+        let set = self.untrusted_by_source.entry(key.1).or_default();
+        let before = set.len();
+        set.insert(key);
+        let after = set.len();
+        if before > 0 {
+            self.occupancy.remove(&(before, key.1));
+        }
+        self.occupancy.insert((after, key.1));
+    }
+
+    fn drop_untrusted_key(&mut self, key: &Key) {
+        self.untrusted_keys.remove(key);
+        if let Some(set) = self.untrusted_by_source.get_mut(&key.1) {
+            let before = set.len();
+            set.remove(key);
+            let after = set.len();
+            self.occupancy.remove(&(before, key.1));
+            if after > 0 {
+                self.occupancy.insert((after, key.1));
+            } else {
+                self.untrusted_by_source.remove(&key.1);
+            }
+        }
+    }
+
+    pub fn announce(&mut self, a: Verified<Announcement>, trust: &rank::Trust) {
+        let a = a.into_inner();
         let key = (a.target, a.author);
+        let mut superseded: Option<Vec<String>> = None;
         if let Some(prev) = self.announcements.get(&key) {
             if prev.published_at > a.published_at {
                 return;
             }
+            superseded = Some(prev.terms.clone());
         }
-        if trust.weight_of(&a.author).is_none() && !self.admit_untrusted(key) {
+        if superseded.is_none() && trust.weight_of(&a.author).is_none() && !self.admit_untrusted(key)
+        {
             return;
         }
         for t in &a.terms {
             self.by_term.entry(t.clone()).or_default().insert(a.target);
         }
+        let target = a.target;
         self.announcements.insert(key, a);
+        // Replacing a statement drops the terms it used to assert. Pruning only on eviction
+        // left one identity holding one slot able to grow the term index without limit by
+        // restating with fresh terms, which is the same bound-at-one-stage-only mistake the
+        // eviction path already made once.
+        if let Some(old) = superseded {
+            self.forget_terms(&target, &old);
+        }
     }
 
-    pub fn claim(&mut self, c: Claim, trust: &rank::Trust) {
+    pub fn claim(&mut self, c: Verified<Claim>, trust: &rank::Trust) {
+        let c = c.into_inner();
         let key = (c.target, c.claimant);
+        let mut superseded: Option<Vec<String>> = None;
         if let Some(prev) = self.claims.get(&key) {
             if prev.made_at > c.made_at {
                 return;
             }
+            superseded = Some(prev.terms.clone());
         }
-        if trust.weight_of(&c.claimant).is_none() && !self.admit_untrusted(key) {
+        if superseded.is_none()
+            && trust.weight_of(&c.claimant).is_none()
+            && !self.admit_untrusted(key)
+        {
             return;
         }
         for t in &c.terms {
             self.by_term.entry(t.clone()).or_default().insert(c.target);
         }
+        let target = c.target;
         self.claims.insert(key, c);
+        if let Some(old) = superseded {
+            self.forget_terms(&target, &old);
+        }
     }
 
     pub fn announcements(&self) -> impl Iterator<Item = &Announcement> {
@@ -426,10 +690,62 @@ impl Catalogue {
 mod tests {
     use super::*;
     use crate::rank::Trust;
+    use karst_id::Identity;
 
-    fn addr(n: u8) -> Address {
-        Address::from_raw([n; 32])
+    fn ident(n: u32) -> Identity {
+        let mut seed = [0u8; 32];
+        seed[..4].copy_from_slice(&n.to_le_bytes());
+        Identity::from_seed(seed)
     }
+
+    fn addr(n: u32) -> Address {
+        ident(n).address()
+    }
+
+    /// Publish and verify. Nothing reaches a catalogue any other way.
+    fn ann(
+        target: Cid,
+        who: u32,
+        kind: &str,
+        terms: &[String],
+        at: u64,
+    ) -> Verified<Announcement> {
+        let id = ident(who);
+        let obj = Announcement::new(target, id.address(), kind, terms, at)
+            .unwrap()
+            .publish(&id, at);
+        Announcement::from_object(&obj).unwrap()
+    }
+
+    fn clm(
+        target: Cid,
+        who: u32,
+        verdict: Verdict,
+        terms: &[String],
+        at: u64,
+    ) -> Verified<Claim> {
+        let id = ident(who);
+        let obj = Claim::new(target, id.address(), verdict, terms, at)
+            .unwrap()
+            .publish(&id, at);
+        Claim::from_object(&obj).unwrap()
+    }
+
+    /// Same, for tests that build a distinct source per iteration from a byte pattern.
+    fn ann_raw(
+        target: Cid,
+        seed: [u8; 32],
+        kind: &str,
+        terms: &[String],
+        at: u64,
+    ) -> Verified<Announcement> {
+        let id = Identity::from_seed(seed);
+        let obj = Announcement::new(target, id.address(), kind, terms, at)
+            .unwrap()
+            .publish(&id, at);
+        Announcement::from_object(&obj).unwrap()
+    }
+
 
     fn terms(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -440,8 +756,7 @@ mod tests {
         let mut c = Catalogue::new();
         let target = Cid::of(b"a paper about mixing");
         c.announce(
-            Announcement::new(target, addr(1), "doc", &terms(&["mixing", "anonymity"]), 10)
-                .unwrap(),
+            ann(target, 1, "doc", &terms(&["mixing", "anonymity"]), 10),
             &Trust::new(),
         );
         assert_eq!(c.candidates(&terms(&["mixing"])), [target].into());
@@ -501,7 +816,7 @@ mod tests {
         let target = Cid::of(b"x");
         for i in 0..1_000 {
             c.announce(
-                Announcement::new(target, addr(1), "doc", &terms(&["spam"]), i).unwrap(),
+                ann(target, 1, "doc", &terms(&["spam"]), i),
                 &Trust::new(),
             );
         }
@@ -513,10 +828,10 @@ mod tests {
     fn an_older_statement_does_not_replace_a_newer_one() {
         let mut c = Catalogue::new();
         let target = Cid::of(b"x");
-        c.announce(Announcement::new(target, addr(1), "doc", &terms(&["new"]), 100).unwrap(), &Trust::new());
-        c.announce(Announcement::new(target, addr(1), "doc", &terms(&["old"]), 1).unwrap(), &Trust::new());
-        let held = c.announcement_of(&addr(1), &target).unwrap();
-        assert_eq!(held.terms, vec!["new".to_string()]);
+        c.announce(ann(target, 1, "doc", &terms(&["new"]), 100), &Trust::new());
+        c.announce(ann(target, 1, "doc", &terms(&["old"]), 1), &Trust::new());
+        let held = c.announcement_of(&addr(1), &target);
+        assert_eq!(held.unwrap().terms, vec!["new".to_string()]);
     }
 
     /// Two authors announcing the same object are two statements, not one.
@@ -524,8 +839,8 @@ mod tests {
     fn different_sources_about_one_target_are_kept_separately() {
         let mut c = Catalogue::new();
         let target = Cid::of(b"x");
-        c.announce(Announcement::new(target, addr(1), "doc", &terms(&["a"]), 0).unwrap(), &Trust::new());
-        c.announce(Announcement::new(target, addr(2), "doc", &terms(&["b"]), 0).unwrap(), &Trust::new());
+        c.announce(ann(target, 1, "doc", &terms(&["a"]), 0), &Trust::new());
+        c.announce(ann(target, 2, "doc", &terms(&["b"]), 0), &Trust::new());
         assert_eq!(c.len(), 2);
     }
 
@@ -534,7 +849,7 @@ mod tests {
         let mut c = Catalogue::new();
         let target = Cid::of(b"x");
         c.claim(
-            Claim::new(target, addr(9), Verdict::Dispute, &terms(&["spam"]), 5).unwrap(),
+            clm(target, 9, Verdict::Dispute, &terms(&["spam"]), 5),
             &Trust::new(),
         );
         let about: Vec<&Claim> = c.claims_about(&target).collect();
@@ -550,8 +865,7 @@ mod tests {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
             c.announce(
-                Announcement::new(Cid::of(&b), Address::from_raw(b), "doc", &terms(&["x"]), 0)
-                    .unwrap(),
+                ann_raw(Cid::of(&b), b, "doc", &terms(&["x"]), 0),
                 &t,
             );
         }
@@ -565,14 +879,14 @@ mod tests {
     /// counted against the untrusted bound at all.
     #[test]
     fn a_flood_of_strangers_cannot_displace_a_trusted_source() {
-        let trusted = addr(7);
+        let trusted = 7u32;
         let mut t = Trust::new();
-        t.set(trusted, 1.0);
+        t.set(addr(trusted), 1.0);
 
         let mut c = Catalogue::new().with_untrusted_capacity(32);
         let mine = Cid::of(b"the thing i wanted");
         c.announce(
-            Announcement::new(mine, trusted, "doc", &terms(&["topic"]), 0).unwrap(),
+            ann(mine, trusted, "doc", &terms(&["topic"]), 0),
             &t,
         );
 
@@ -581,14 +895,13 @@ mod tests {
             b[..4].copy_from_slice(&i.to_le_bytes());
             b[31] = 1;
             c.announce(
-                Announcement::new(Cid::of(&b), Address::from_raw(b), "doc", &terms(&["topic"]), 0)
-                    .unwrap(),
+                ann_raw(Cid::of(&b), b, "doc", &terms(&["topic"]), 0),
                 &t,
             );
         }
 
         assert!(
-            c.announcement_of(&trusted, &mine).is_some(),
+            c.announcement_of(&addr(trusted), &mine).is_some(),
             "50k strangers evicted the entry the reader actually trusted"
         );
         assert_eq!(c.untrusted_held(), 32);
@@ -602,7 +915,7 @@ mod tests {
         let target = Cid::of(b"x");
         for i in 0..1_000 {
             c.announce(
-                Announcement::new(target, addr(1), "doc", &terms(&["x"]), i).unwrap(),
+                ann(target, 1, "doc", &terms(&["x"]), i),
                 &t,
             );
         }
@@ -618,11 +931,11 @@ mod tests {
     /// indication that something was removed before they ever looked.
     #[test]
     fn a_catalogue_is_shaped_by_its_owners_trust_and_is_not_shareable() {
-        let alices_favourite = addr(1);
-        let bobs_favourite = addr(2);
+        let alices_favourite = 1u32;
+        let bobs_favourite = 2u32;
 
         let mut alice = Trust::new();
-        alice.set(alices_favourite, 1.0);
+        alice.set(addr(alices_favourite), 1.0);
 
         let mut cat = Catalogue::new().with_untrusted_capacity(4);
         let bobs_thing = Cid::of(b"what bob wanted");
@@ -633,20 +946,21 @@ mod tests {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
             b[31] = 9;
-            c_announce(&mut cat, Cid::of(&b), Address::from_raw(b), &alice);
+            c_announce_raw(&mut cat, Cid::of(&b), b, &alice);
         }
 
         assert!(
-            cat.announcement_of(&bobs_favourite, &bobs_thing).is_none(),
+            cat.announcement_of(&addr(bobs_favourite), &bobs_thing).is_none(),
             "vacuous: nothing was evicted"
         );
     }
 
-    fn c_announce(c: &mut Catalogue, target: Cid, who: Address, trust: &Trust) {
-        c.announce(
-            Announcement::new(target, who, "doc", &terms(&["topic"]), 0).unwrap(),
-            trust,
-        );
+    fn c_announce(c: &mut Catalogue, target: Cid, who: u32, trust: &Trust) {
+        c.announce(ann(target, who, "doc", &terms(&["topic"]), 0), trust);
+    }
+
+    fn c_announce_raw(c: &mut Catalogue, target: Cid, seed: [u8; 32], trust: &Trust) {
+        c.announce(ann_raw(target, seed, "doc", &terms(&["topic"]), 0), trust);
     }
 
     /// The term index must shrink when statements are evicted.
@@ -665,14 +979,7 @@ mod tests {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
             c.announce(
-                Announcement::new(
-                    Cid::of(&b),
-                    Address::from_raw(b),
-                    "doc",
-                    &[format!("term{i}")],
-                    0,
-                )
-                .unwrap(),
+                ann_raw(Cid::of(&b), b, "doc", &[format!("term{i}")], 0),
                 &t,
             );
         }
@@ -696,8 +1003,7 @@ mod tests {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
             c.announce(
-                Announcement::new(Cid::of(&b), Address::from_raw(b), "doc", &terms(&["x"]), 0)
-                    .unwrap(),
+                ann_raw(Cid::of(&b), b, "doc", &terms(&["x"]), 0),
                 &t,
             );
         }
@@ -711,19 +1017,19 @@ mod tests {
     /// A term shared by a surviving statement must not be forgotten with an evicted one.
     #[test]
     fn a_term_still_in_use_survives_an_eviction_that_mentioned_it() {
-        let keeper = addr(200);
+        let keeper = 200u32;
         let mut t = Trust::new();
-        t.set(keeper, 1.0);
+        t.set(addr(keeper), 1.0);
         let mut c = Catalogue::new().with_untrusted_capacity(2);
         let target = Cid::of(b"shared");
 
         c.announce(
-            Announcement::new(target, keeper, "doc", &terms(&["shared"]), 0).unwrap(),
+            ann(target, keeper, "doc", &terms(&["shared"]), 0),
             &t,
         );
         // An untrusted statement about the same target, using the same term, then evicted.
         c.announce(
-            Announcement::new(target, addr(1), "doc", &terms(&["shared"]), 0).unwrap(),
+            ann(target, 1, "doc", &terms(&["shared"]), 0),
             &t,
         );
         for i in 0..50u32 {
@@ -731,14 +1037,152 @@ mod tests {
             b[..4].copy_from_slice(&i.to_le_bytes());
             b[31] = 3;
             c.announce(
-                Announcement::new(Cid::of(&b), Address::from_raw(b), "doc", &terms(&["other"]), 0)
-                    .unwrap(),
+                ann_raw(Cid::of(&b), b, "doc", &terms(&["other"]), 0),
                 &t,
             );
         }
         assert!(
             c.candidates(&terms(&["shared"])).contains(&target),
             "a trusted statement's term was forgotten when an untrusted one was evicted"
+        );
+    }
+
+    /// Nobody may write an index entry in somebody else's name.
+    ///
+    /// This is the defect the whole trust model rested on and did not have. The author was a
+    /// caller-supplied field and nothing verified a signature, so an adversary could mint
+    /// entries as any source a reader trusted, and every weight in this crate would have been
+    /// applied to whatever the adversary wrote. **A source that can be impersonated is not a
+    /// source.** The author now comes from the verified signature and never from the payload.
+    #[test]
+    fn an_entry_cannot_be_minted_in_someone_elses_name() {
+        let victim = ident(1);
+        let forger = ident(2);
+
+        // The forger writes the victim's address into the payload and signs with their own key.
+        let forged = Announcement::new(Cid::of(b"malware"), victim.address(), "doc", &terms(&["safe"]), 0)
+            .unwrap()
+            .publish(&forger, 0);
+
+        let recovered = Announcement::from_object(&forged).unwrap();
+        assert_eq!(
+            recovered.get().author,
+            forger.address(),
+            "the claimed author survived verification"
+        );
+        assert_ne!(recovered.get().author, victim.address());
+
+        // And a reader trusting the victim gives the forgery nothing.
+        let mut t = Trust::new();
+        t.set(victim.address(), 1.0);
+        let mut cat = Catalogue::new();
+        cat.announce(recovered, &t);
+        let hits = crate::Ranker::new(t).search(&cat, &terms(&["safe"]));
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].trusted_support, 0, "a forgery was counted as trusted");
+    }
+
+    /// A tampered object must not decode at all.
+    #[test]
+    fn a_tampered_statement_is_refused() {
+        let id = ident(1);
+        let obj = Announcement::new(Cid::of(b"x"), id.address(), "doc", &terms(&["a"]), 0)
+            .unwrap()
+            .publish(&id, 0);
+        let mut bad = obj.clone();
+        bad.payload[0] ^= 1;
+        assert_eq!(
+            Announcement::from_object(&bad).unwrap_err(),
+            IndexError::Unsigned
+        );
+        // And a claim object is not an announcement.
+        let c = Claim::new(Cid::of(b"x"), id.address(), Verdict::Dispute, &terms(&["a"]), 0)
+            .unwrap()
+            .publish(&id, 0);
+        assert_eq!(
+            Announcement::from_object(&c).unwrap_err(),
+            IndexError::Malformed
+        );
+    }
+
+    /// Eviction order must not be something an adversary can compute.
+    ///
+    /// Keys are `(Cid, Address)` and a Cid is the hash of content its author chose. Evicting
+    /// the smallest key therefore handed the eviction order to whoever writes the content:
+    /// grind a nonce until the digest starts with 0xff and the entry is unevictable while
+    /// every honest entry is driven out. An ordering an adversary can compute is an ordering
+    /// an adversary controls.
+    #[test]
+    fn grinding_a_content_address_does_not_buy_a_permanent_slot() {
+        let t = Trust::new();
+        let mut c = Catalogue::new().with_untrusted_capacity(64);
+
+        // The adversary grinds for the highest digests they can find and takes many slots.
+        let mut ground: Vec<Cid> = Vec::new();
+        let mut n = 0u32;
+        while ground.len() < 200 {
+            let cid = Cid::of(&n.to_le_bytes());
+            if cid.as_bytes()[0] > 0xf0 {
+                ground.push(cid);
+            }
+            n += 1;
+            assert!(n < 200_000, "could not grind enough digests");
+        }
+        for (k, cid) in ground.iter().enumerate() {
+            c.announce(ann(*cid, 900_000 + k as u32, "doc", &terms(&["x"]), 0), &t);
+        }
+
+        // Honest sources arrive afterwards.
+        let mut honest_admitted = 0;
+        for i in 0..200u32 {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&i.to_le_bytes());
+            b[31] = 7;
+            c.announce(ann_raw(Cid::of(&b), b, "doc", &terms(&["x"]), 0), &t);
+            if c.announcement_of(&Identity::from_seed(b).address(), &Cid::of(&b)).is_some() {
+                honest_admitted += 1;
+            }
+        }
+        assert!(
+            honest_admitted > 0,
+            "ground digests locked every honest entry out of the pool"
+        );
+    }
+
+    /// One source must not be able to hold the whole untrusted pool.
+    #[test]
+    fn one_untrusted_source_cannot_occupy_the_whole_pool() {
+        let t = Trust::new();
+        let capacity = 64;
+        let mut c = Catalogue::new().with_untrusted_capacity(capacity);
+        for i in 0..10_000u32 {
+            c.announce(ann(Cid::of(&i.to_le_bytes()), 5, "doc", &terms(&["x"]), 0), &t);
+        }
+        let held = c.untrusted_held();
+        assert!(
+            held <= capacity / 16 + 1,
+            "one source held {held} of {capacity} slots"
+        );
+    }
+
+    /// Restating with fresh terms must not grow the term index without limit.
+    ///
+    /// Pruning only on eviction left one identity, holding one slot, able to add terms for
+    /// ever. That is the same bound-at-one-stage-only mistake as the eviction path, made
+    /// again in the very next code path.
+    #[test]
+    fn restating_with_fresh_terms_does_not_grow_the_index_without_limit() {
+        let t = Trust::new();
+        let mut c = Catalogue::new().with_untrusted_capacity(64);
+        let target = Cid::of(b"one target");
+        for i in 0..5_000u64 {
+            c.announce(ann(target, 1, "doc", &[format!("term{i}")], i), &t);
+        }
+        assert_eq!(c.untrusted_held(), 1);
+        assert!(
+            c.terms_indexed() <= 2,
+            "one source restating grew the term index to {}",
+            c.terms_indexed()
         );
     }
 

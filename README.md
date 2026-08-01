@@ -57,7 +57,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`karst-wire`](crates/karst-wire) | L3 Wire | One datagram size, Poisson emission drawn without reference to the queue. |
 | [`karst-seal`](crates/karst-seal) | L4/L6 | HPKE base mode. Sealing keys are separate from identity keys, on purpose. |
 | [`karst-net`](crates/karst-net) | L3-L5 | Directory, stratified routes, providers, clients. The network, running. |
-| [`karst-index`](crates/karst-index) | L15 Discovery | Publishing is announcing. Ranking is the reader's, and untrusted sources saturate. |
+| [`karst-index`](crates/karst-index) | L15 Discovery | Publishing is announcing. Ranking is the reader's, and every stranger together counts once. |
 | [`karst-symmetry`](crates/karst-symmetry) | L16 Symmetry | Does flattening returns to scale actually prevent capture? Partly. |
 | [`karst-value`](crates/karst-value) | L14 Value | Capacity credentials, earned by relaying and spent unlinkably. No bank. |
 | [`karst-fuzz`](crates/karst-fuzz) | commitment 4 | Property tests for reject-never-recover across every decoder. |

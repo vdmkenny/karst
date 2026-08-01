@@ -882,12 +882,20 @@ willing to run enough relays. v3 fixed it with blinded keys, so a directory stor
 it cannot identify. Any lookup infrastructure learns the set of things being looked up unless you
 design specifically against it.
 
-**Sybil resistance is L16's mechanic, applied here.** Identities are free, so any scheme where
-untrusted sources contribute additively loses to volume alone, and one where they contribute
-nothing defeats every new author as well as the adversary. The aggregate contribution of
-untrusted sources therefore **saturates**: a thousand of them are worth barely more than one,
-and any single source the reader chose outweighs all of them. Measured, not asserted: 100,000
-identities announcing the same object do not outrank one trusted source.
+**Ranking is anchored at the reader because a theorem leaves nothing else.** Cheng and Friedman
+(P2PECON 2005) prove there is no *symmetric* sybilproof nontrivial reputation function, and that
+any node below the maximum has a successful sybil strategy; their Theorem 2 extends it to every
+constant k, so capping identities does not rescue it. Symmetric means name-blind, which every
+global ranking is. Their escape is asymmetric reputation anchored at a source, so ranking
+relative to who is asking is the only remaining option rather than a preference.
+
+Every untrusted source **together** is worth exactly one voice. Letting the contribution merely
+saturate would be sybil-bounded rather than sybilproof, and a bounded gain is still a gain worth
+taking. This gives up any signal in how many strangers said something, which is precisely the
+quantity the theorem shows cannot be counted safely.
+
+**Statements are signed objects.** The author comes from the verified signature and never from
+the payload, because a source that can be impersonated is not a source.
 
 A catalogue is bounded, and admission is a trust decision. An unbounded one is a memory
 exhaustion primitive available to anyone; a plain size cap is the defence Tor withdrew after

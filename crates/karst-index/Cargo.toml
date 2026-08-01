@@ -8,6 +8,7 @@ description = "L15 Discovery: publishing and indexing are one act"
 [dependencies]
 karst-id.workspace = true
 karst-object.workspace = true
+rand = "0.8"
 
 [[bin]]
 name = "karst-search"

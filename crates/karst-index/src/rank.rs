@@ -197,6 +197,11 @@ impl Ranker {
             let mut trusted_support = 0;
             let mut trusted_disputes = 0;
             let mut untrusted = 0;
+            // How well the best untrusted statement matches, so that trusted and untrusted
+            // contributions are measured on the same axis. Scaling one by relevance and not
+            // the other made the comparison meaningless: a trusted source at weight 0.8
+            // matching half the query scored 0.4 and lost to a stranger flood at 0.5.
+            let mut untrusted_relevance: f64 = 0.0;
 
             // The author's own announcement establishes that the object exists and claims
             // terms. It is worth the reader's weight for that author and nothing more.
@@ -212,7 +217,10 @@ impl Ranker {
                         score += w * relevance;
                         trusted_support += 1;
                     }
-                    None => untrusted += 1,
+                    None => {
+                        untrusted += 1;
+                        untrusted_relevance = untrusted_relevance.max(relevance);
+                    }
                 }
             }
 
@@ -232,13 +240,24 @@ impl Ranker {
                             trusted_support += 1;
                         }
                     }
-                    None => untrusted += 1,
+                    None => {
+                        untrusted += 1;
+                        // A claim speaks about the target rather than about the query, so it
+                        // counts at the relevance of whatever it is talking about.
+                        untrusted_relevance = untrusted_relevance.max(
+                            c.terms
+                                .iter()
+                                .filter(|t| q.iter().any(|x| x == *t))
+                                .count() as f64
+                                / q.len().max(1) as f64,
+                        );
+                    }
                 }
             }
 
-            // Everything the reader has no opinion about, together, is worth at most the
-            // ceiling. This is the whole Sybil defence, and it is the same shape as L16.
-            score += self.trust.untrusted(untrusted);
+            // Everything the reader has no opinion about, together, is worth one voice, at
+            // the relevance of the best thing any of them said.
+            score += self.trust.untrusted(untrusted) * untrusted_relevance;
 
             out.push(Ranked {
                 target,
@@ -264,24 +283,73 @@ impl Ranker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Announcement, Claim};
+    use crate::{Announcement, Claim, Verdict, Verified};
+    use karst_id::Identity;
+
+    fn ident(n: u32) -> Identity {
+        let mut seed = [0u8; 32];
+        seed[..4].copy_from_slice(&n.to_le_bytes());
+        Identity::from_seed(seed)
+    }
 
     fn addr(n: u32) -> Address {
-        let mut b = [0u8; 32];
-        b[..4].copy_from_slice(&n.to_le_bytes());
-        Address::from_raw(b)
+        ident(n).address()
     }
+
+    fn ann(
+        target: Cid,
+        who: u32,
+        kind: &str,
+        terms: &[String],
+        at: u64,
+    ) -> Verified<Announcement> {
+        let id = ident(who);
+        let obj = Announcement::new(target, id.address(), kind, terms, at)
+            .unwrap()
+            .publish(&id, at);
+        Announcement::from_object(&obj).unwrap()
+    }
+
+    fn clm(
+        target: Cid,
+        who: u32,
+        verdict: Verdict,
+        terms: &[String],
+        at: u64,
+    ) -> Verified<Claim> {
+        let id = ident(who);
+        let obj = Claim::new(target, id.address(), verdict, terms, at)
+            .unwrap()
+            .publish(&id, at);
+        Claim::from_object(&obj).unwrap()
+    }
+
+    /// Same, for tests that build a distinct source per iteration from a byte pattern.
+    fn ann_raw(
+        target: Cid,
+        seed: [u8; 32],
+        kind: &str,
+        terms: &[String],
+        at: u64,
+    ) -> Verified<Announcement> {
+        let id = Identity::from_seed(seed);
+        let obj = Announcement::new(target, id.address(), kind, terms, at)
+            .unwrap()
+            .publish(&id, at);
+        Announcement::from_object(&obj).unwrap()
+    }
+
 
     fn terms(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
     }
 
-    fn announce(c: &mut Catalogue, target: Cid, who: Address, t: &[&str]) {
+    fn announce(c: &mut Catalogue, target: Cid, who: u32, t: &[&str]) {
         announce_as(c, target, who, t, &Trust::new());
     }
 
-    fn announce_as(c: &mut Catalogue, target: Cid, who: Address, t: &[&str], trust: &Trust) {
-        c.announce(Announcement::new(target, who, "doc", &terms(t), 0).unwrap(), trust);
+    fn announce_as(c: &mut Catalogue, target: Cid, who: u32, t: &[&str], trust: &Trust) {
+        c.announce(ann(target, who, "doc", &terms(t), 0), trust);
     }
 
     /// A hundred thousand Sybils must not outrank one source the reader chose.
@@ -295,13 +363,13 @@ mod tests {
         let good = Cid::of(b"the real thing");
         let spam = Cid::of(b"the spam");
 
-        let trusted = addr(1);
+        let trusted = 1u32;
         let mut t = Trust::new();
-        t.set(trusted, 1.0);
+        t.set(addr(trusted), 1.0);
         announce_as(&mut cat, good, trusted, &["mixing"], &t);
 
         for i in 0..100_000u32 {
-            announce_as(&mut cat, spam, addr(1000 + i), &["mixing"], &t);
+            announce_as(&mut cat, spam, 1000 + i, &["mixing"], &t);
         }
 
         let results = Ranker::new(t).search(&cat, &terms(&["mixing"]));
@@ -342,13 +410,43 @@ mod tests {
         }
     }
 
-    /// A source the reader chose must outweigh every source they did not.
+    /// A chosen source must outweigh strangers **at the same relevance**.
+    ///
+    /// The earlier version of this claim was false, and the shipped demo printed the
+    /// counterexample two lines above a note asserting it could not happen: a trusted source
+    /// weighted 0.8 matching half a query scored 0.4 and ranked *below* a stranger flood at
+    /// 0.5, because trusted contributions were scaled by relevance and untrusted ones were
+    /// not. Two quantities on different axes are not comparable, and the invariant that was
+    /// stated cannot hold while they are.
     #[test]
-    fn any_chosen_source_outweighs_all_unchosen_ones() {
+    fn a_chosen_source_outweighs_strangers_at_equal_relevance() {
+        let mut cat = Catalogue::new();
+        let mine = Cid::of(b"partial match, trusted");
+        let theirs = Cid::of(b"partial match, strangers");
+        let chosen = 1u32;
+        let mut t = Trust::new();
+        t.set(addr(chosen), 0.8);
+
+        // Both match exactly half of a two-term query.
+        announce_as(&mut cat, mine, chosen, &["mixing"], &t);
+        for i in 0..5_000u32 {
+            announce_as(&mut cat, theirs, 9_000 + i, &["mixing"], &t);
+        }
+
+        let r = Ranker::new(t).search(&cat, &terms(&["mixing", "anonymity"]));
+        assert_eq!(
+            r[0].target, mine,
+            "a stranger flood outranked a chosen source at equal relevance: {:.3} vs {:.3}",
+            r[0].score, r[1].score
+        );
+    }
+
+    /// Weight above the untrusted ceiling is what the invariant actually requires.
+    #[test]
+    fn the_ceiling_is_what_a_weight_must_beat() {
         let t = Trust::new();
-        let weakest_deliberate_trust = 0.51;
         assert!(
-            weakest_deliberate_trust > t.untrusted(usize::MAX),
+            0.51 > t.untrusted(usize::MAX),
             "an unbounded flood of strangers matched a barely trusted source"
         );
     }
@@ -357,21 +455,18 @@ mod tests {
     #[test]
     fn volume_does_not_buy_rank() {
         let target = Cid::of(b"x");
-        let me = addr(1);
+        let me = 1u32;
 
         let mut once = Catalogue::new();
         announce(&mut once, target, me, &["thing"]);
 
         let mut often = Catalogue::new();
         for i in 0..5_000 {
-            often.announce(
-                Announcement::new(target, me, "doc", &terms(&["thing"]), i).unwrap(),
-                &Trust::new(),
-            );
+            often.announce(ann(target, me, "doc", &terms(&["thing"]), i), &Trust::new());
         }
 
         let mut t = Trust::new();
-        t.set(me, 1.0);
+        t.set(addr(me), 1.0);
         let r = Ranker::new(t);
         let a = r.search(&once, &terms(&["thing"]));
         let b = r.search(&often, &terms(&["thing"]));
@@ -387,8 +482,8 @@ mod tests {
         let mut cat = Catalogue::new();
         let a_doc = Cid::of(b"a");
         let b_doc = Cid::of(b"b");
-        announce(&mut cat, a_doc, addr(1), &["topic"]);
-        announce(&mut cat, b_doc, addr(2), &["topic"]);
+        announce(&mut cat, a_doc, 1, &["topic"]);
+        announce(&mut cat, b_doc, 2, &["topic"]);
 
         let mut alice = Trust::new();
         alice.set(addr(1), 1.0);
@@ -410,8 +505,8 @@ mod tests {
         let mut cat = Catalogue::new();
         let honest = Cid::of(b"honest");
         let liar = Cid::of(b"liar");
-        announce(&mut cat, honest, addr(1), &["recipes"]);
-        announce(&mut cat, liar, addr(2), &["recipes"]);
+        announce(&mut cat, honest, 1, &["recipes"]);
+        announce(&mut cat, liar, 2, &["recipes"]);
 
         let mut t = Trust::new();
         t.set(addr(1), 1.0);
@@ -420,12 +515,9 @@ mod tests {
         let before = Ranker::new(t.clone()).search(&cat, &terms(&["recipes"]));
         assert_eq!(before[0].score, before[1].score);
 
-        let moderator = addr(50);
-        t.set(moderator, 1.0);
-        cat.claim(
-            Claim::new(liar, moderator, Verdict::Dispute, &terms(&["recipes"]), 1).unwrap(),
-            &t,
-        );
+        let moderator = 50u32;
+        t.set(addr(moderator), 1.0);
+        cat.claim(clm(liar, moderator, Verdict::Dispute, &terms(&["recipes"]), 1), &t);
         let after = Ranker::new(t).search(&cat, &terms(&["recipes"]));
         assert_eq!(after[0].target, honest);
         assert_eq!(after[1].target, liar);
@@ -440,7 +532,7 @@ mod tests {
     fn an_untrusted_disputer_cannot_censor() {
         let mut cat = Catalogue::new();
         let target = Cid::of(b"target");
-        announce(&mut cat, target, addr(1), &["topic"]);
+        announce(&mut cat, target, 1, &["topic"]);
 
         let mut t = Trust::new();
         t.set(addr(1), 1.0);
@@ -448,8 +540,7 @@ mod tests {
 
         for i in 0..50_000u32 {
             cat.claim(
-                Claim::new(target, addr(9000 + i), Verdict::Dispute, &terms(&["topic"]), 1)
-                    .unwrap(),
+                clm(target, 9000 + i, Verdict::Dispute, &terms(&["topic"]), 1),
                 &t,
             );
         }
@@ -465,7 +556,7 @@ mod tests {
     fn a_reader_who_trusts_nobody_sees_an_unfiltered_catalogue() {
         let mut cat = Catalogue::new();
         for i in 0..10u32 {
-            announce(&mut cat, Cid::of(&[i as u8]), addr(i), &["topic"]);
+            announce(&mut cat, Cid::of(&[i as u8]), i, &["topic"]);
         }
         let r = Ranker::new(Trust::new());
         let a = r.search(&cat, &terms(&["topic"]));
@@ -480,8 +571,8 @@ mod tests {
         let mut cat = Catalogue::new();
         let both = Cid::of(b"both");
         let one = Cid::of(b"one");
-        announce(&mut cat, both, addr(1), &["mixing", "anonymity"]);
-        announce(&mut cat, one, addr(2), &["mixing"]);
+        announce(&mut cat, both, 1, &["mixing", "anonymity"]);
+        announce(&mut cat, one, 2, &["mixing"]);
 
         let mut t = Trust::new();
         t.set(addr(1), 1.0);
@@ -499,7 +590,7 @@ mod tests {
     /// an edge one.
     #[test]
     fn deciding_to_trust_a_source_protects_what_was_already_heard() {
-        let source = addr(1);
+        let source = 1u32;
         let target = Cid::of(b"heard before trusted");
         let mut cat = Catalogue::new().with_untrusted_capacity(8);
 
@@ -508,12 +599,12 @@ mod tests {
 
         // The reader decides.
         let mut t = Trust::new();
-        t.set(source, 1.0);
+        t.set(addr(source), 1.0);
         cat.retrust(&t);
 
         // Now the flood.
         for i in 0..5_000u32 {
-            announce_as(&mut cat, Cid::of(&i.to_le_bytes()), addr(9000 + i), &["topic"], &t);
+            announce_as(&mut cat, Cid::of(&i.to_le_bytes()), 9000 + i, &["topic"], &t);
         }
 
         let r = Ranker::new(t).search(&cat, &terms(&["topic"]));
@@ -546,21 +637,13 @@ mod tests {
                 let mut b = [0u8; 32];
                 b[..4].copy_from_slice(&i.to_le_bytes());
                 cat.announce(
-                    Announcement::new(
-                        Cid::of(&b),
-                        Address::from_raw(b),
-                        "doc",
-                        &terms(&["common"]),
-                        0,
-                    )
-                    .unwrap(),
+                    ann_raw(Cid::of(&b), b, "doc", &terms(&["common"]), 0),
                     &trust,
                 );
             }
             // One object, and only one, carries the rare term.
             cat.announce(
-                Announcement::new(Cid::of(b"needle"), addr(7), "doc", &terms(&["rare"]), 0)
-                    .unwrap(),
+                ann(Cid::of(b"needle"), 7, "doc", &terms(&["rare"]), 0),
                 &trust,
             );
         }
@@ -589,8 +672,7 @@ mod tests {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
             cat.announce(
-                Announcement::new(Cid::of(&b), Address::from_raw(b), "doc", &terms(&["the"]), 0)
-                    .unwrap(),
+                ann_raw(Cid::of(&b), b, "doc", &terms(&["the"]), 0),
                 &trust,
             );
         }
@@ -616,8 +698,7 @@ mod tests {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
             cat.announce(
-                Announcement::new(Cid::of(&b), Address::from_raw(b), "doc", &terms(&["t"]), 0)
-                    .unwrap(),
+                ann_raw(Cid::of(&b), b, "doc", &terms(&["t"]), 0),
                 &trust,
             );
         }
@@ -637,12 +718,12 @@ mod tests {
     fn truncation_keeps_the_highest_ranked() {
         let mut cat = Catalogue::new();
         let favourite = Cid::of(b"the one i want");
-        let chosen = addr(1);
+        let chosen = 1u32;
         let mut t = Trust::new();
-        t.set(chosen, 1.0);
+        t.set(addr(chosen), 1.0);
         announce_as(&mut cat, favourite, chosen, &["t"], &t);
         for i in 0..300u32 {
-            announce_as(&mut cat, Cid::of(&i.to_le_bytes()), addr(500 + i), &["t"], &t);
+            announce_as(&mut cat, Cid::of(&i.to_le_bytes()), 500 + i, &["t"], &t);
         }
         let (hits, cost) = Ranker::new(t).search_top(&cat, &terms(&["t"]), 3);
         assert_eq!(hits[0].target, favourite);
