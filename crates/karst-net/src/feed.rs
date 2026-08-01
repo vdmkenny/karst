@@ -62,8 +62,15 @@ pub struct FeedStats {
 }
 
 /// One publisher's feed, as a subscriber sees it.
+///
+/// Each feed reassembles into **its own buffer**. Sharing one with private mail let fragments
+/// from a world-writable public box occupy and evict state belonging to sealed mail, so the
+/// secrecy of a mailbox tag stopped being what gated reach into a client's reassembly. Sharing
+/// one *between feeds* would be nearly as bad: a single flooded publisher would deny every
+/// other publisher a subscriber follows.
 pub struct FeedReader {
     publisher: Address,
+    inbox: crate::frame::Reassembler,
     stats: FeedStats,
 }
 
@@ -71,8 +78,20 @@ impl FeedReader {
     pub fn new(publisher: Address) -> Self {
         FeedReader {
             publisher,
+            inbox: crate::frame::Reassembler::new(),
             stats: FeedStats::default(),
         }
+    }
+
+    /// Parse an open envelope. Open only: a sealed envelope has no business in a feed box, and
+    /// dispatching on the kind byte is what put an unauthenticated path into private mail.
+    fn open(&mut self, envelope: &[u8]) -> Option<Vec<u8>> {
+        use crate::frame::{Fragment, ENVELOPE_BYTES, ENV_OPEN, INNER_BYTES};
+        if envelope.len() != ENVELOPE_BYTES || envelope[0] != ENV_OPEN {
+            return None;
+        }
+        let f = Fragment::decode(&envelope[1..1 + INNER_BYTES]).ok()?;
+        self.inbox.accept(f).ok().flatten()
     }
 
     pub fn publisher(&self) -> Address {
@@ -92,8 +111,8 @@ impl FeedReader {
     /// Returns an object only when it reassembled, decoded, verified, **and** was signed by
     /// the publisher whose feed this is. Anyone may deposit here, so the last check is what
     /// makes a flood useless for anything but denial.
-    pub fn accept(&mut self, client: &mut Client, envelope: &[u8]) -> Option<Object> {
-        let bytes = client.accept_open(envelope)?;
+    pub fn accept(&mut self, _client: &mut Client, envelope: &[u8]) -> Option<Object> {
+        let bytes = self.open(envelope)?;
         let Ok(obj) = Object::decode(&bytes) else {
             self.stats.undecodable += 1;
             return None;

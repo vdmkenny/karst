@@ -38,11 +38,30 @@ use crate::directory::Directory;
 use crate::frame::ENVELOPE_BYTES;
 use crate::provider::{Provider, Tag};
 
-/// A collection request: a bare tag.
-pub const REQUEST_BYTES: usize = 32;
+/// A collection request: kind, a 32 byte credential or tag, and a cursor.
+///
+/// Fixed width, because a request whose length varied with what it asked for would tell an
+/// observer which kind it was.
+pub const REQUEST_BYTES: usize = 1 + 32 + 4;
 
-/// A collection response: one status byte and a fixed body, whether or not there was mail.
-pub const RESPONSE_BYTES: usize = 1 + ENVELOPE_BYTES;
+/// A collection response: status, the refusal count, the cursor it answers, and a fixed body.
+///
+/// The refusal count is on the wire because the design justifies world-writable feed boxes on
+/// the grounds that denial is visible, and a count that never left the provider made that
+/// justification circular.
+///
+/// The cursor is echoed because a client polling in a loop has several requests in flight, and
+/// a response that did not say which index it answered was counted as progress whichever index
+/// it was. That produced duplicates and silently lost the items in between.
+pub const RESPONSE_BYTES: usize = 1 + 8 + 4 + ENVELOPE_BYTES;
+
+/// Offset of the body within a response.
+const RESP_BODY: usize = 1 + 8 + 4;
+
+/// Drain one item from a box, proving the right to do so with the collection key.
+pub const REQ_DRAIN: u8 = 1;
+/// Read one item of a public feed at a cursor, without removing it.
+pub const REQ_READ: u8 = 2;
 
 const STATUS_EMPTY: u8 = 0;
 const STATUS_ITEM: u8 = 1;
@@ -146,28 +165,38 @@ impl NodeRunner {
                 // Not a request. No reply, for the same reason the mix port never replies.
                 continue;
             }
-            let mut tag: Tag = [0u8; 32];
-            tag.copy_from_slice(&buf);
+            let mut cred = [0u8; 32];
+            cred.copy_from_slice(&buf[1..33]);
+            let cursor = u32::from_le_bytes([buf[33], buf[34], buf[35], buf[36]]) as usize;
 
-            // One item per request, and the same size either way, so the link does not report
-            // whether mail was waiting.
+            let (item, refused) = match buf[0] {
+                // Draining needs the preimage of the tag, so a correspondent who knows where
+                // to deposit still cannot delete what is there.
+                REQ_DRAIN => {
+                    let tag = crate::client::mailbox_tag(&cred);
+                    store.take_one(&tag)
+                }
+                // Reading a feed needs nothing, because a feed tag is public. It also takes
+                // nothing away, or any stranger could delete a publisher one packet at a time.
+                REQ_READ => store.peek(&cred, cursor),
+                _ => (None, 0),
+            };
+
+            // One item per request, the same size either way, so the link does not report
+            // whether anything was waiting.
             let mut resp = vec![0u8; RESPONSE_BYTES];
-            let got = store.collect(&tag);
-            let mut items = got.items;
-            if items.is_empty() {
-                resp[0] = STATUS_EMPTY;
-                // Random, so an empty response is not a block of zeroes an observer can spot.
-                use rand::Rng;
-                rand::thread_rng().fill(&mut resp[1..]);
-            } else {
-                resp[0] = STATUS_ITEM;
-                let first = items.remove(0);
-                resp[1..].copy_from_slice(&first);
-                // Put the rest back, so one request does not drain a box.
-                for rest in items {
-                    let mut payload = tag.to_vec();
-                    payload.extend_from_slice(&rest);
-                    let _ = store.deposit(&payload);
+            resp[1..9].copy_from_slice(&refused.to_le_bytes());
+            resp[9..13].copy_from_slice(&(cursor as u32).to_le_bytes());
+            match item {
+                None => {
+                    resp[0] = STATUS_EMPTY;
+                    // Random, so an empty response is not a block of zeroes an observer spots.
+                    use rand::Rng;
+                    rand::thread_rng().fill(&mut resp[RESP_BODY..]);
+                }
+                Some(body) => {
+                    resp[0] = STATUS_ITEM;
+                    resp[RESP_BODY..].copy_from_slice(&body);
                 }
             }
             let _ = sock.send_to(&resp, from);
@@ -251,6 +280,8 @@ pub struct ClientRunner {
     started: Instant,
     cover_toward: u16,
     sentinel: Option<crate::sentinel::Sentinel>,
+    feed_cursor: usize,
+    refused_seen: u64,
     pub received: Vec<Vec<u8>>,
 }
 
@@ -275,6 +306,8 @@ impl ClientRunner {
             started: Instant::now(),
             cover_toward,
             sentinel: None,
+            feed_cursor: 0,
+            refused_seen: 0,
             client,
             received: Vec::new(),
         })
@@ -381,31 +414,54 @@ impl ClientRunner {
     /// close, and calling it out here rather than in a comment somewhere else is deliberate:
     /// it is the same gap as #53, reached by a different road.
     pub fn poll_tag(&mut self, tag: Tag) -> Vec<Vec<u8>> {
-        let _ = self.collect_sock.send_to(&tag, self.provider_collect);
+        let mut req = [0u8; REQUEST_BYTES];
+        req[0] = REQ_READ;
+        req[1..33].copy_from_slice(&tag);
+        req[33..].copy_from_slice(&(self.feed_cursor as u32).to_le_bytes());
+        let _ = self.collect_sock.send_to(&req, self.provider_collect);
+
         let mut out = Vec::new();
         let mut buf = [0u8; RESPONSE_BYTES];
-        while let Ok((n, _)) = self.collect_sock.recv_from(&mut buf) {
-            if n != RESPONSE_BYTES || buf[0] != STATUS_ITEM {
+        while let Ok((n, from)) = self.collect_sock.recv_from(&mut buf) {
+            // Only the provider this client asked. Discarding the source address let anyone
+            // who could reach the port answer on the provider's behalf.
+            if n != RESPONSE_BYTES || from != self.provider_collect || buf[0] != STATUS_ITEM {
                 continue;
             }
-            out.push(buf[1..].to_vec());
+            self.refused_seen = u64::from_le_bytes(buf[1..9].try_into().expect("8 bytes"));
+            let answered =
+                u32::from_le_bytes(buf[9..13].try_into().expect("4 bytes")) as usize;
+            // Only an answer at or beyond the cursor is progress. A late reply to an earlier
+            // request would otherwise be counted twice and skip whatever came after it.
+            if answered < self.feed_cursor {
+                continue;
+            }
+            self.feed_cursor = answered + 1;
+            out.push(buf[RESP_BODY..].to_vec());
         }
         out
+    }
+
+    /// Deposits the provider refused, as last reported. Non-zero means content was lost.
+    pub fn refused_seen(&self) -> u64 {
+        self.refused_seen
     }
 
     /// Ask the provider for one item.
     pub fn poll_mail(&mut self) {
         let now = self.now_ms();
-        let _ = self
-            .collect_sock
-            .send_to(&self.client.mailbox(), self.provider_collect);
+        let mut req = [0u8; REQUEST_BYTES];
+        req[0] = REQ_DRAIN;
+        req[1..33].copy_from_slice(&self.client.collect_key());
+        let _ = self.collect_sock.send_to(&req, self.provider_collect);
 
         let mut buf = [0u8; RESPONSE_BYTES];
-        while let Ok((n, _)) = self.collect_sock.recv_from(&mut buf) {
-            if n != RESPONSE_BYTES || buf[0] != STATUS_ITEM {
+        while let Ok((n, from)) = self.collect_sock.recv_from(&mut buf) {
+            if n != RESPONSE_BYTES || from != self.provider_collect || buf[0] != STATUS_ITEM {
                 continue;
             }
-            if let Some(m) = self.client.accept(&buf[1..]) {
+            self.refused_seen = u64::from_le_bytes(buf[1..9].try_into().expect("8 bytes"));
+            if let Some(m) = self.client.accept(&buf[RESP_BODY..]) {
                 // Loops are absorbed rather than surfaced. An application must never see
                 // them, or the detector becomes visible in the application's behaviour.
                 let is_loop = self.sentinel.as_mut().is_some_and(|s| s.absorb(&m));

@@ -141,12 +141,17 @@ pub fn split(msg_id: [u8; 16], message: &[u8]) -> Result<Vec<Fragment>, FrameErr
 pub struct Reassembler {
     partial: std::collections::BTreeMap<[u8; 16], Partial>,
     capacity: usize,
+    /// Monotonic arrival counter. Nothing here reads a clock, because a clock is one more
+    /// thing an adversary might influence and ordering is all this needs.
+    clock: u64,
 }
 
 #[derive(Debug)]
 struct Partial {
     total: u16,
     parts: std::collections::BTreeMap<u16, Vec<u8>>,
+    /// When this entry was first seen, so eviction can be by age.
+    arrived: u64,
 }
 
 impl Reassembler {
@@ -156,12 +161,19 @@ impl Reassembler {
     /// the bound is what stops a stranger's first fragments from exhausting memory. Oldest
     /// goes first, because a message that has been incomplete longest is the one least likely
     /// to complete.
+    ///
+    /// **Oldest, and not smallest.** Evicting `partial.keys().next()` takes the numerically
+    /// smallest message id, and a message id is chosen by whoever sent the fragment, so that
+    /// ordering is the adversary's to pick: send high ids and your entries outlive everyone
+    /// else's. It is the same defect as evicting by content address at L15, in a different
+    /// module, found the same way.
     pub const DEFAULT_CAPACITY: usize = 256;
 
     pub fn new() -> Self {
         Reassembler {
             partial: Default::default(),
             capacity: Self::DEFAULT_CAPACITY,
+            clock: 0,
         }
     }
 
@@ -169,6 +181,7 @@ impl Reassembler {
         Reassembler {
             partial: Default::default(),
             capacity,
+            clock: 0,
         }
     }
 
@@ -182,13 +195,21 @@ impl Reassembler {
             return Err(FrameError::Malformed);
         }
         if !self.partial.contains_key(&f.msg_id) && self.partial.len() >= self.capacity {
-            let oldest = *self.partial.keys().next().expect("non-empty");
+            let oldest = self
+                .partial
+                .iter()
+                .min_by_key(|(_, p)| p.arrived)
+                .map(|(k, _)| *k)
+                .expect("non-empty");
             self.partial.remove(&oldest);
         }
 
+        self.clock += 1;
+        let arrived = self.clock;
         let e = self.partial.entry(f.msg_id).or_insert_with(|| Partial {
             total: f.total,
             parts: Default::default(),
+            arrived,
         });
         if e.total != f.total {
             // Two fragments under one id disagreeing about the message is either corruption

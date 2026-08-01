@@ -72,13 +72,75 @@ someone else, and unparseable junk, directly into the victim's box, and asserts 
 yields exactly one thing.
 
 Denial is real and is not fixed. A full box refuses genuine deposits, and a publisher's
-publications are lost. It is **visible**: a provider reports refusals to whoever collects, so a
-subscriber sees a feed lost deposits and a publisher watching their own feed sees it too. That
-is weaker than prevention, and the mechanism that would prevent it is named rather than
-gestured at: per-fragment authorisation, so a provider can refuse a deposit into a feed it is
-not signed for, at 64 bytes per fragment.
+publications are lost. It is **visible**: the refusal count travels in the collection response,
+so a subscriber sees that a feed lost deposits and a publisher watching their own feed sees it
+too. That is weaker than prevention, and the mechanism that would prevent it is named rather
+than gestured at: per-fragment authorisation, so a provider can refuse a deposit into a feed it
+is not signed for, at 64 bytes per fragment.
+
+That claim was **false when first written**, and the way it was false is the interesting part.
+The count was computed and then dropped; the collection response had no field for it; and
+handing back one item emptied the box and re-deposited the remainder, which recreated the entry
+through `or_default()` and reset the count to zero. The entire justification for making feed
+tags public rested on a number nobody could read. Reading no longer dismantles a box, and the
+count is on the wire.
 
 ---
+
+## Adding a kind byte opened the private inbox
+
+The worst defect in this work was created by it. `Client::accept` dispatched on the envelope's
+kind byte, and once `ENV_OPEN` existed that branch was reachable from a client's **own
+mailbox** — so anything that could write bytes into the box could put chosen content into the
+application's inbox with no key, no seal and no signature. A hostile provider is exactly such a
+party, and so is anyone who can land a datagram on the collect port.
+
+The test that claimed to cover this missed it by one bit. It flipped `0x40` in a genuine sealed
+envelope, turning `ENV_SEALED` (1) into `0x41`, which falls through to the reject arm. It never
+tried `1 ^ 0x03 = 2`.
+
+There is now no dispatch on an attacker-controlled byte at all. The mailbox path takes sealed
+only, feeds have their own entry point, and a test sweeps **every one of the 256 kind values**
+rather than the one the author happened to think of.
+
+The general lesson is not "check the kind byte". It is that **adding a case to a shared
+dispatch changes every caller of that dispatch**, including the ones whose security argument
+assumed the old set of cases.
+
+## Reading and draining are different rights
+
+Collection required only the tag, and the tag is what a sender needs in order to deposit. So
+every correspondent could permanently delete the mail they had sent, and because a feed tag is
+computable from a public address, **any stranger could delete any publication with one 32-byte
+datagram**. Read access and delete access were the same capability.
+
+They are separate now:
+
+| | Deposit needs | Collect needs | Removes on read |
+|---|---|---|---|
+| Mailbox | the tag | the **preimage** of the tag | yes |
+| Feed | the tag | nothing, the tag is public | **no** |
+
+A mailbox tag is the hash of a collection key its owner keeps and never puts in a `Contact`, so
+holding the tag lets you write and not drain. A feed has no such key, because its tag is public
+by construction, so feed reads are non-destructive and served by cursor. Content published for
+everyone has no confidentiality reason to vanish when one reader takes it.
+
+## Two buffers, and an eviction order the adversary was choosing
+
+A `Client` held one `Reassembler` fed by sealed mail, every feed, and whatever a provider chose
+to hand back. Fragments are keyed only by a 16-byte message id the **sender** picks, so a flood
+into a world-writable feed box could occupy and evict state belonging to private mail. The
+secrecy of a mailbox tag stopped being what gated reach into a client's reassembly.
+
+Each `FeedReader` now has its own buffer, and sealed mail keeps its own.
+
+Eviction was worse than shared. The comment said oldest-first; the code took
+`partial.keys().next()`, which on a map keyed by message id is the numerically **smallest** id,
+and the id is chosen by whoever sent the fragment. Send high ids and your entries outlive
+everyone else's. That is the same defect as evicting by content address at L15 — an ordering an
+adversary can compute is an ordering an adversary controls — in a different module, found the
+same way, one week apart. Entries now carry an arrival counter and eviction is genuinely by age.
 
 ## A defence that matches its exposure
 
@@ -129,6 +191,8 @@ Not proved, and stated in the demo rather than left implied:
 - **Who reads is not hidden.** Polling a feed tells the provider which publisher a client
   follows. That is #53 reached by a different road.
 - **Denial is not prevented**, only made visible.
+- **Anyone can still read any feed**, which is what publishing means, and anyone can still
+  flood one. What they cannot do is forge, delete, or be counted twice.
 - **Nothing replicates.** One provider holds the feed. If it stops, the feed stops, and the
   objects survive only where someone kept them. Permanence is L6's problem and is not wired to
   this.
