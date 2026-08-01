@@ -1107,19 +1107,21 @@ mod tests {
         );
     }
 
-    /// Eviction order must not be something an adversary can compute.
+    /// Ground content addresses must be evictable, and honest entries must survive.
     ///
-    /// Keys are `(Cid, Address)` and a Cid is the hash of content its author chose. Evicting
-    /// the smallest key therefore handed the eviction order to whoever writes the content:
-    /// grind a nonce until the digest starts with 0xff and the entry is unevictable while
-    /// every honest entry is driven out. An ordering an adversary can compute is an ordering
-    /// an adversary controls.
+    /// The previous version counted, immediately after each insert, whether that insert had
+    /// landed. A fresh source holds no slots, so it never trips the quota and is always
+    /// stored; the counter was measuring "was the thing I just inserted inserted" and read
+    /// 200/200 under **every** eviction rule, including the minimum-key rule the fix exists to
+    /// replace. It would have passed with the defect fully restored.
+    ///
+    /// What has to be measured is what survives at the end.
     #[test]
-    fn grinding_a_content_address_does_not_buy_a_permanent_slot() {
+    fn ground_content_addresses_do_not_hold_the_pool_against_honest_entries() {
         let t = Trust::new();
         let mut c = Catalogue::new().with_untrusted_capacity(64);
 
-        // The adversary grinds for the highest digests they can find and takes many slots.
+        // The adversary grinds for the highest digests it can find.
         let mut ground: Vec<Cid> = Vec::new();
         let mut n = 0u32;
         while ground.len() < 200 {
@@ -1128,26 +1130,53 @@ mod tests {
                 ground.push(cid);
             }
             n += 1;
-            assert!(n < 200_000, "could not grind enough digests");
+            assert!(n < 400_000, "could not grind enough digests");
         }
         for (k, cid) in ground.iter().enumerate() {
             c.announce(ann(*cid, 900_000 + k as u32, "doc", &terms(&["x"]), 0), &t);
         }
+        // Positive control: the ground entries really did get in, so a later count of zero
+        // means they were evicted rather than never stored.
+        let ground_before = ground
+            .iter()
+            .filter(|cid| c.announcement_of(&addr(900_000), cid).is_some()
+                || c.candidates(&terms(&["x"])).contains(cid))
+            .count();
+        assert!(ground_before > 0, "vacuous: no ground entry was ever admitted");
 
         // Honest sources arrive afterwards.
-        let mut honest_admitted = 0;
+        let mut honest_keys = Vec::new();
         for i in 0..200u32 {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
             b[31] = 7;
             c.announce(ann_raw(Cid::of(&b), b, "doc", &terms(&["x"]), 0), &t);
-            if c.announcement_of(&Identity::from_seed(b).address(), &Cid::of(&b)).is_some() {
-                honest_admitted += 1;
-            }
+            honest_keys.push((Cid::of(&b), Identity::from_seed(b).address()));
         }
+
+        // What survives, which is the property the name claims.
+        let honest_held = honest_keys
+            .iter()
+            .filter(|(cid, who)| c.announcement_of(who, cid).is_some())
+            .count();
+        let ground_held = ground
+            .iter()
+            .filter(|cid| c.candidates(&terms(&["x"])).contains(cid))
+            .count();
+
+        // A share, not a survivor. Asserting `> 0` accepts the defect: under minimum-key
+        // eviction the ground digests sort high and are never the minimum, so the pool ends
+        // holding one honest entry and sixty-three ground ones, and `> 0` is satisfied by that
+        // single entry. Two hundred honest sources arriving last, into a pool of sixty-four,
+        // should hold most of it.
         assert!(
-            honest_admitted > 0,
-            "ground digests locked every honest entry out of the pool"
+            honest_held >= 24,
+            "honest sources hold only {honest_held} of 64 slots after arriving last, \
+             which is what minimum-key eviction produces"
+        );
+        assert!(
+            ground_held < ground.len(),
+            "every ground digest survived, so they are not evictable"
         );
     }
 
