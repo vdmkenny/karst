@@ -1,0 +1,10 @@
+[package]
+name = "karst-wire"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L3 Wire: fixed-size datagrams emitted on a schedule that does not depend on demand"
+
+[dependencies]
+karst-mix.workspace = true
+rand.workspace = true

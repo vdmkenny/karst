@@ -18,50 +18,9 @@
 
 use std::collections::BTreeMap;
 
+use karst_mix::clock::Clock;
 use karst_mix::packet::{MixError, MixKey, Packet, Peeled, SeenTags};
 use rand::seq::SliceRandom;
-
-/// A clock a node can defend.
-///
-/// A node reads time from one source and cannot detect that source lying, so the source must
-/// be a **monotonic** reading rather than wall time. Monotonic clocks are not settable and are
-/// not stepped by NTP, which matters because NTP is attacker-influenceable (Malhotra, Cohen,
-/// Brakke, Goldberg, NDSS 2016) and a node whose time can be pushed forward releases its whole
-/// queue with no delay. That is a mixing bypass costing an adversary nothing.
-///
-/// This is defence in depth behind that requirement. Time never runs backwards, and it never
-/// advances faster than `MAX_ADVANCE_MS` per reading, so a wrong or hostile reading costs
-/// throughput rather than anonymity.
-struct Clock {
-    internal: u64,
-    last_reading: Option<u64>,
-}
-
-impl Clock {
-    /// The most the internal clock moves for one reading. Well above any sane poll interval
-    /// and well below `MixNode::MAX_DELAY_MS`, so no single reading can flush a full queue.
-    const MAX_ADVANCE_MS: u64 = 5_000;
-
-    fn new() -> Self {
-        Clock {
-            internal: 0,
-            last_reading: None,
-        }
-    }
-
-    fn advance(&mut self, reading: u64) -> u64 {
-        if let Some(prev) = self.last_reading {
-            let delta = reading.saturating_sub(prev).min(Self::MAX_ADVANCE_MS);
-            self.internal = self.internal.saturating_add(delta);
-        }
-        self.last_reading = Some(reading);
-        self.internal
-    }
-
-    fn now(&self) -> u64 {
-        self.internal
-    }
-}
 
 /// Why a node refused a packet.
 ///
@@ -87,6 +46,7 @@ impl From<MixError> for NodeError {
 enum Held {
     Forward { next: u16, packet: Packet },
     Deliver { payload: Vec<u8> },
+    Absorb,
 }
 
 /// An item waiting for its delay to elapse.
@@ -106,9 +66,12 @@ pub enum Outbound {
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct NodeStats {
+    /// Packets evicted to make room. Loss, and detectable as loss by loop cover at L4.
+    pub evicted: u64,
     pub accepted: u64,
     pub forwarded: u64,
     pub delivered: u64,
+    pub cover_absorbed: u64,
     pub rejected_mac: u64,
     pub rejected_replay: u64,
     pub dropped_full: u64,
@@ -122,8 +85,8 @@ pub struct MixNode {
     /// a defined order without revealing arrival order to anyone outside.
     queue: BTreeMap<(u64, u64), Pending>,
     ticket: u64,
-    /// Refuse rather than grow without bound. A queue an adversary can inflate is a memory
-    /// exhaustion primitive, exactly as unbounded replay state was.
+    /// A queue an adversary can inflate is a memory exhaustion primitive. Bounded, but see
+    /// `admit` for why the bound is enforced by eviction rather than by refusal.
     capacity: usize,
     epoch_ms: u64,
     stats: NodeStats,
@@ -186,10 +149,6 @@ impl MixNode {
         let now_ms = self.clock.advance(reading_ms);
         self.seen.rotate(now_ms / self.epoch_ms);
 
-        if self.queue.len() >= self.capacity {
-            self.stats.dropped_full += 1;
-            return Err(NodeError::Congested);
-        }
 
         match packet.peel(&self.key, &mut self.seen) {
             Err(MixError::BadMac) => {
@@ -210,34 +169,30 @@ impl MixNode {
                     return Err(NodeError::DelayTooLong);
                 }
                 self.stats.accepted += 1;
-                self.ticket += 1;
                 let release_at = now_ms.saturating_add(delay_ms as u64);
-                self.queue.insert(
-                    (release_at, self.ticket),
-                    Pending {
-                        release_at,
-                        what: Held::Forward { next, packet },
-                    },
-                );
-                Ok(())
+                self.admit(release_at, Held::Forward { next, packet })
+            }
+            // Cover ends here. It is still delayed and still counted, because a node that
+            // discarded it on arrival would emit a timing signature distinguishing the hop
+            // where cover dies, which is the one thing cover must not reveal.
+            Ok(Peeled::Drop { delay_ms }) => {
+                if delay_ms > Self::MAX_DELAY_MS {
+                    return Err(NodeError::DelayTooLong);
+                }
+                self.stats.accepted += 1;
+                self.stats.cover_absorbed += 1;
+                let release_at = now_ms.saturating_add(delay_ms as u64);
+                self.admit(release_at, Held::Absorb)
             }
             Ok(Peeled::Deliver { delay_ms, payload }) => {
                 if delay_ms > Self::MAX_DELAY_MS {
                     return Err(NodeError::DelayTooLong);
                 }
                 self.stats.accepted += 1;
-                self.ticket += 1;
                 let release_at = now_ms.saturating_add(delay_ms as u64);
                 // Local delivery is delayed too. Releasing it immediately would make the
                 // final hop distinguishable by timing, which is the whole thing L4 prevents.
-                self.queue.insert(
-                    (release_at, self.ticket),
-                    Pending {
-                        release_at,
-                        what: Held::Deliver { payload },
-                    },
-                );
-                Ok(())
+                self.admit(release_at, Held::Deliver { payload })
             }
         }
     }
@@ -256,6 +211,7 @@ impl MixNode {
         for k in ready {
             let p = self.queue.remove(&k).expect("key came from the map");
             match p.what {
+                Held::Absorb => {}
                 Held::Deliver { payload } => {
                     self.stats.delivered += 1;
                     out.push(Outbound::Deliver { payload });
@@ -272,6 +228,48 @@ impl MixNode {
         // per-packet delay decorrelates across polls, and this decorrelates within one.
         out.shuffle(&mut self.rng);
         out
+    }
+
+    /// Put something in the queue, evicting if the queue is full.
+    ///
+    /// Refusing when full is the defence Tor tried and withdrew. Jansen, Tschorsch, Johnson and
+    /// Scheuermann (*The Sniper Attack*, NDSS 2014) found a size cap is not merely insufficient
+    /// but exploitable: an adversary holds many entries so that memory sits just below the
+    /// limit, and then honest traffic is what trips it. The adversary's entries survive and
+    /// everyone else's are turned away. Tor replaced the cap with age-ordered killing.
+    ///
+    /// A mix cannot evict by age, because waiting is what a mix is for and the packet waiting
+    /// longest is often the one closest to leaving. The equivalent here is **remaining hold**.
+    /// Queue occupancy is delay, so the packet costing the queue most is the one with the
+    /// longest time still to serve, and that is also exactly the packet a squatter chooses.
+    /// Evicting it makes occupancy cost proportional to volume: an adversary who instead draws
+    /// delays from the honest distribution gains no leverage per packet and is merely flooding,
+    /// which costs them what it costs everyone.
+    ///
+    /// A new arrival that is itself the longest-held is the one dropped, so the rule cannot be
+    /// turned into a way to push others out for free.
+    fn admit(&mut self, release_at: u64, what: Held) -> Result<(), NodeError> {
+        if self.queue.len() >= self.capacity {
+            let worst = self
+                .queue
+                .keys()
+                .next_back()
+                .copied()
+                .expect("capacity is non-zero, so the queue is non-empty");
+            self.stats.dropped_full += 1;
+            if worst.0 <= release_at {
+                // The arrival is the longest-held. It loses.
+                return Err(NodeError::Congested);
+            }
+            self.queue.remove(&worst);
+            self.stats.evicted += 1;
+        }
+        self.ticket += 1;
+        self.queue.insert(
+            (release_at, self.ticket),
+            Pending { release_at, what },
+        );
+        Ok(())
     }
 
     /// How long until the next packet is due, for a caller that would rather sleep than spin.
@@ -540,19 +538,80 @@ mod adversarial {
         let mut n = MixNode::with_capacity(MixKey::from_seed([7u8; 32]), 2);
         assert!(n.accept(pkt(&n, 500, 10), 0).is_ok());
         assert!(n.accept(pkt(&n, 500, 11), 0).is_ok());
-        assert_eq!(n.accept(pkt(&n, 500, 12), 0), Err(NodeError::Congested));
+        // Longest-held itself, so it is the one refused rather than evicting anyone.
+        assert_eq!(n.accept(pkt(&n, 900, 12), 0), Err(NodeError::Congested));
         assert_eq!(n.stats().dropped_full, 1);
         assert_eq!(n.stats().rejected_replay, 0);
     }
 
-    /// Flooding a continuous-time mix must not flush it.
+    /// A squatter must not be able to lock honest traffic out of a full queue.
     ///
-    /// The n-1 (blending) attack works against threshold and pool mixes: fill the batch with
-    /// known packets and the one unknown packet is forced out alone. A mix where each packet
-    /// carries its own independent delay has no batch to fill, and this asserts the property
-    /// holds in the implementation rather than only in the design.
+    /// This is the sniper attack's second lesson, which is that the obvious defence has the
+    /// wrong sign. With a plain size cap the adversary's long holds survive and every honest
+    /// packet arriving afterwards is refused, so the cap does the adversary's work.
     #[test]
-    fn flooding_does_not_flush_a_held_packet() {
+    fn a_squatter_cannot_lock_honest_traffic_out_of_a_full_queue() {
+        let mut n = MixNode::with_capacity(MixKey::from_seed([7u8; 32]), 32);
+        // The adversary fills every slot with the longest hold a node allows.
+        for i in 0..32u8 {
+            n.accept(pkt(&n, MixNode::MAX_DELAY_MS, i + 1), 0).unwrap();
+        }
+        assert_eq!(n.queued(), 32);
+
+        // Honest traffic, with ordinary delays, still gets in.
+        for i in 0..32u8 {
+            assert!(
+                n.accept(pkt(&n, 40, i + 100), 0).is_ok(),
+                "honest packet {i} refused while a squatter held the queue"
+            );
+        }
+        assert_eq!(n.stats().evicted, 32, "the squatter should have been displaced");
+
+        // And all of what is left is the honest traffic, leaving on its own schedule.
+        let out = n.due(40);
+        assert_eq!(out.len(), 32);
+        assert_eq!(n.queued(), 0);
+    }
+
+    /// Eviction must not be usable as a way to push others out for free.
+    ///
+    /// If a new arrival always won, an adversary would send max-delay packets to evict
+    /// max-delay packets and the rule would just be a slower refusal. The longest hold loses
+    /// whether it is already queued or arriving.
+    #[test]
+    fn the_longest_hold_loses_even_when_it_is_the_new_arrival() {
+        let mut n = MixNode::with_capacity(MixKey::from_seed([7u8; 32]), 4);
+        for i in 0..4u8 {
+            n.accept(pkt(&n, 100, i + 1), 0).unwrap();
+        }
+        assert_eq!(
+            n.accept(pkt(&n, MixNode::MAX_DELAY_MS, 50), 0),
+            Err(NodeError::Congested)
+        );
+        assert_eq!(n.stats().evicted, 0);
+        assert_eq!(n.queued(), 4);
+    }
+
+    /// Flooding must not flush a held packet **on demand**.
+    ///
+    /// This is a narrower claim than it is tempting to make. Against a threshold or pool mix
+    /// the n-1 attack is exact: fill the batch and the one unknown packet is forced out alone.
+    /// A mix where every packet carries its own independent delay has no batch boundary to
+    /// force, which is what this asserts.
+    ///
+    /// It is **not** immunity to n-1, and the literature is clear that no such immunity
+    /// exists. Kesdogan, Egner and Buschkes note in their own paper that random delay alone
+    /// does not stop the attack, because an adversary can flood and keep flooding until the
+    /// real packet emerges. Serjantov, Dingledine and Syverson (*From a Trickle to a Flood*,
+    /// IH 2002) explicitly decline to clear stop-and-go mixes, deferring the analysis. Loopix
+    /// treats n-1 as live and answers it with detection rather than structure: mixes send
+    /// self-loops and compare the returning fraction against a threshold, following Danezis
+    /// and Sassaman (*Heartbeat Traffic to Counter (n-1) Attacks*, WPES 2003).
+    ///
+    /// So the honest claim is that a continuous mix converts an exact attack into a
+    /// probabilistic one, and the residue is handled at L4 by `loops`, not here.
+    #[test]
+    fn flooding_does_not_flush_a_held_packet_on_demand() {
         let mut n = node();
         // The target, held for 400ms.
         let target = Packet::wrap(&one_hop(&n, 400), b"target", [200u8; 32]).unwrap();
