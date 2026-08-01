@@ -246,16 +246,44 @@ mod tests {
         IdentityShares::split(id.address(), &[42u8; 32])
     }
 
+    /// One spend must reveal nothing about the holder, on any reading of the halves.
+    ///
+    /// The previous version passed the same opening to `recover_holder` twice. That function
+    /// needs two openings under **different** challenges, so handing it one twice exercises the
+    /// no-overlap path and says nothing about whether a single opening leaks. What has to hold
+    /// is that no combination of what a single verifier receives reconstructs the address.
     #[test]
     fn a_single_spend_reveals_nothing() {
         let holder = Identity::generate();
+        let addr = *holder.address().as_bytes();
         let s = shares_for(&holder);
         let opening = s.open(&Challenge::from_seed(b"verifier one"));
 
-        // Every half is present exactly once, and no pair is complete.
         assert_eq!(opening.len(), SHARES);
-        // Recovering from one opening is not even expressible: it takes two.
-        assert!(recover_holder(&opening, &opening, [0u8; 32]).is_none());
+
+        // No half is the address, and no pair of halves XORs to it. The scheme reconstructs by
+        // combining the two halves of one pair, and a single opening holds exactly one of each.
+        for (i, a) in opening.halves.iter().enumerate() {
+            assert_ne!(a, &addr, "half {i} was the address itself");
+            for (j, b) in opening.halves.iter().enumerate().skip(i + 1) {
+                let mut x = [0u8; 32];
+                for k in 0..32 {
+                    x[k] = a[k] ^ b[k];
+                }
+                assert_ne!(x, addr, "halves {i} and {j} combined to the address");
+            }
+        }
+
+        // Every half is distinct, so a verifier cannot infer a pair from a repeat.
+        let uniq: std::collections::BTreeSet<[u8; 32]> =
+            opening.halves.iter().copied().collect();
+        assert_eq!(uniq.len(), SHARES, "halves repeat within one opening");
+
+        // And two openings under the *same* challenge still reveal nothing, which is the case
+        // a verifier can force by choosing a challenge it has used before.
+        let again = s.open(&Challenge::from_seed(b"verifier one"));
+        assert!(recover_holder(&opening, &again, addr).is_none());
+        assert_eq!(consistency(&opening, &again), Consistency::NoOverlap);
     }
 
     /// **The mechanism.** Two verifiers, two independent challenges, and the holder falls out.

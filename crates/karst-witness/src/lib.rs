@@ -880,4 +880,91 @@ mod tests {
         );
     }
 
+    /// A tampered object must be refused as unsigned, which the existing test never reaches.
+    ///
+    /// `a_witness_refuses_anything_the_publisher_did_not_sign` only ever feeds `cosign` objects
+    /// that are correctly signed by *somebody*, so `Refusal::Unsigned` is never returned and
+    /// the branch that produces it is untested. Deleting the `from_object` call and trusting
+    /// the payload would have left that test passing.
+    #[test]
+    fn a_tampered_checkpoint_object_is_refused_as_unsigned() {
+        let pubr = ident(1);
+        let mut w = Witness::new(ident(100));
+        let ch = chain(&pubr, &[1]);
+
+        let mut bad = ch[0].1.clone();
+        bad.payload[0] ^= 0x01;
+        assert_eq!(w.cosign(&bad), Err(Refusal::Unsigned));
+        // Nothing was recorded, so a tampered offer cannot poison the witness either.
+        assert!(w.latest(&pubr.address()).is_none());
+
+        // Wrong kind entirely.
+        let not_a_checkpoint =
+            karst_object::Object::create(&pubr, "karst.something.else", 0, vec![1, 2, 3], None);
+        assert_eq!(w.cosign(&not_a_checkpoint), Err(Refusal::Unsigned));
+
+        // And the untampered one still works, so the refusals above are about the tampering.
+        assert!(w.cosign(&ch[0].1).is_ok());
+    }
+
+    /// Two more non-conflicts that are not evidence.
+    ///
+    /// The existing test tries only differing sequences. A pair naming two different publishers
+    /// at one sequence, and a pair that is the same checkpoint twice, are both shapes an
+    /// accuser could assemble, and neither is equivocation.
+    #[test]
+    fn a_pair_across_publishers_or_a_repeat_is_not_evidence() {
+        let a_pub = ident(1);
+        let b_pub = ident(2);
+        let w = ident(100);
+
+        let a = Checkpoint {
+            publisher: a_pub.address(),
+            sequence: 3,
+            digest: Cid::of(&[1]),
+            prev: None,
+        };
+        let b = Checkpoint {
+            publisher: b_pub.address(),
+            sequence: 3,
+            digest: Cid::of(&[2]),
+            prev: None,
+        };
+        // Different publishers: a witness may sign for both and has contradicted nothing.
+        assert!(!Equivocation {
+            witness: w.key_bytes(),
+            a,
+            sig_a: w.sign(&a.signing_bytes()),
+            b,
+            sig_b: w.sign(&b.signing_bytes()),
+        }
+        .is_valid());
+
+        // The same checkpoint twice is not two statements.
+        assert!(!Equivocation {
+            witness: w.key_bytes(),
+            a,
+            sig_a: w.sign(&a.signing_bytes()),
+            b: a,
+            sig_b: w.sign(&a.signing_bytes()),
+        }
+        .is_valid());
+
+        // Positive control: a genuine conflict at one sequence for one publisher is evidence.
+        let conflicting = Checkpoint {
+            publisher: a_pub.address(),
+            sequence: 3,
+            digest: Cid::of(&[9]),
+            prev: None,
+        };
+        assert!(Equivocation {
+            witness: w.key_bytes(),
+            a,
+            sig_a: w.sign(&a.signing_bytes()),
+            b: conflicting,
+            sig_b: w.sign(&conflicting.signing_bytes()),
+        }
+        .is_valid());
+    }
+
 }
