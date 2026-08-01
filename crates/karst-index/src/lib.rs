@@ -194,6 +194,13 @@ impl Claim {
 /// trusted source is never displaced by an untrusted one. An adversary with a million
 /// identities competes with the other untrusted sources for one bounded pool and cannot touch
 /// what the reader chose.
+///
+/// A consequence worth stating, because it is easy to get wrong: **a catalogue belongs to one
+/// reader.** Eviction has already happened according to that reader's trust, so handing the
+/// same catalogue to a reader with different trust gives them answers shaped by preferences
+/// they do not hold, including the absence of things evicted on someone else's behalf. Two
+/// readers who disagree keep two catalogues. That is the cost of there being no global index,
+/// and it is the same cost that makes there be no global index to capture.
 #[derive(Debug)]
 pub struct Catalogue {
     announcements: BTreeMap<(Address, Cid), Announcement>,
@@ -536,6 +543,46 @@ mod tests {
             );
         }
         assert_eq!(c.untrusted_held(), 1);
+    }
+
+    /// A catalogue is one reader's, and cannot be handed to another.
+    ///
+    /// Eviction has already happened according to the owner's trust. A second reader with
+    /// different trust would be reading a store shaped by preferences they do not hold,
+    /// including the absence of whatever was evicted on someone else's behalf. Stating it as a
+    /// test because the failure is silent: the second reader sees a plausible answer with no
+    /// indication that something was removed before they ever looked.
+    #[test]
+    fn a_catalogue_is_shaped_by_its_owners_trust_and_is_not_shareable() {
+        let alices_favourite = addr(1);
+        let bobs_favourite = addr(2);
+
+        let mut alice = Trust::new();
+        alice.set(alices_favourite, 1.0);
+
+        let mut cat = Catalogue::new().with_untrusted_capacity(4);
+        let bobs_thing = Cid::of(b"what bob wanted");
+        c_announce(&mut cat, bobs_thing, bobs_favourite, &alice);
+
+        // Alice's ordinary browsing evicts it, because to her it came from a stranger.
+        for i in 0..64u32 {
+            let mut b = [0u8; 32];
+            b[..4].copy_from_slice(&i.to_le_bytes());
+            b[31] = 9;
+            c_announce(&mut cat, Cid::of(&b), Address::from_raw(b), &alice);
+        }
+
+        assert!(
+            cat.announcement_of(&bobs_favourite, &bobs_thing).is_none(),
+            "vacuous: nothing was evicted"
+        );
+    }
+
+    fn c_announce(c: &mut Catalogue, target: Cid, who: Address, trust: &Trust) {
+        c.announce(
+            Announcement::new(target, who, "doc", &terms(&["topic"]), 0).unwrap(),
+            trust,
+        );
     }
 
 }

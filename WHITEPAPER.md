@@ -842,7 +842,7 @@ either a shared ledger with its consensus cost or an always-online authority. Se
 
 ### L15 Discovery
 
-*Fixes errors 03 and 04. Status: specified.*
+*Fixes errors 03 and 04. Status: **built** (`karst-index`).*
 
 **Lever removed.** One search index, and the national delisting and erasure orders served on it.
 
@@ -881,6 +881,24 @@ be positioned to harvest descriptors, so the full set of onion addresses was enu
 willing to run enough relays. v3 fixed it with blinded keys, so a directory stores a descriptor
 it cannot identify. Any lookup infrastructure learns the set of things being looked up unless you
 design specifically against it.
+
+**Sybil resistance is L16's mechanic, applied here.** Identities are free, so any scheme where
+untrusted sources contribute additively loses to volume alone, and one where they contribute
+nothing defeats every new author as well as the adversary. The aggregate contribution of
+untrusted sources therefore **saturates**: a thousand of them are worth barely more than one,
+and any single source the reader chose outweighs all of them. Measured, not asserted: 100,000
+identities announcing the same object do not outrank one trusted source.
+
+A catalogue is bounded, and admission is a trust decision. An unbounded one is a memory
+exhaustion primitive available to anyone; a plain size cap is the defence Tor withdrew after
+the sniper attack, because an adversary fills it and honest entries are then what gets refused.
+Trusted statements are not counted against the untrusted bound, so strangers compete only with
+each other.
+
+**A catalogue belongs to one reader.** Eviction has already happened according to that reader's
+trust, so it cannot be handed to a reader with different trust without giving them absences
+chosen on someone else's behalf. That is the cost of there being no global index, and it is the
+same property that makes there be no global index to capture.
 
 **Cost.** §6.7: mandatory announcement still tells everyone what you authored.
 
