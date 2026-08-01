@@ -363,8 +363,15 @@ fn routing_block(flag: u8, next: u16, delay_ms: u32) -> [u8; ROUTING_BYTES] {
 
 impl Packet {
     /// Derive the per-hop shared secrets the sender needs, and the element each hop sees.
+    /// Derive the per-hop shared secrets and the ephemeral public keys that accompany them.
+    ///
+    /// The seed is hashed rather than used as a scalar directly. X25519 clamps a scalar by
+    /// clearing its low three bits and forcing bit 254, so eight distinct seeds map to one
+    /// key. A caller deriving seeds from a counter would then emit byte-identical packets,
+    /// which every node on the route drops as replays, losing the message with no error at
+    /// send time. Hashing makes the seed space genuinely 2^256 as its type implies.
     fn derive_path(route: &[Hop], seed: [u8; 32]) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
-        let mut eph = StaticSecret::from(seed);
+        let mut eph = StaticSecret::from(subkey(&seed, "eph"));
         let mut alpha = PublicKey::from(&eph).to_bytes();
         let mut secrets = Vec::with_capacity(route.len());
         let mut alphas = Vec::with_capacity(route.len());
@@ -954,4 +961,27 @@ mod adversarial {
         // And a genuine packet still gets through afterwards.
         assert!(p.peel(&ks[0], &mut seen).is_ok());
     }
+    /// Seeds that differ at all must produce packets that differ.
+    ///
+    /// X25519 clamping discards three bits of a scalar. Using a seed as a scalar directly
+    /// therefore collapses eight seeds onto one key, and two sends with counter-derived seeds
+    /// produce the same packet, which is dropped as a replay. The message is lost and the
+    /// sender is told nothing.
+    #[test]
+    fn adjacent_seeds_produce_distinct_packets() {
+        let k = MixKey::from_seed([3u8; 32]);
+        let route = vec![Hop {
+            id: 0,
+            public: k.public(),
+            delay_ms: 1,
+        }];
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 0..64u8 {
+            let mut seed = [0u8; 32];
+            seed[0] = i;
+            let p = Packet::wrap(&route, b"m", seed).unwrap();
+            assert!(seen.insert(p.to_bytes()), "seed {i} collided with an earlier one");
+        }
+    }
+
 }

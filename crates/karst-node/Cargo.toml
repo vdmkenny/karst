@@ -1,0 +1,11 @@
+[package]
+name = "karst-node"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "A running mix node: delay queue, forwarding, local delivery"
+
+[dependencies]
+karst-mix.workspace = true
+rand.workspace = true
+x25519-dalek = { version = "2", features = ["static_secrets"] }

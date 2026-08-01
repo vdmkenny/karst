@@ -309,6 +309,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "karst-node"
+version = "0.1.0"
+dependencies = [
+ "karst-mix",
+ "rand",
+ "x25519-dalek",
+]
+
+[[package]]
 name = "karst-object"
 version = "0.1.0"
 dependencies = [
