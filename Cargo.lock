@@ -284,6 +284,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "karst-agency"
+version = "0.1.0"
+dependencies = [
+ "karst-doc",
+ "karst-object",
+]
+
+[[package]]
 name = "karst-attest"
 version = "0.1.0"
 dependencies = [

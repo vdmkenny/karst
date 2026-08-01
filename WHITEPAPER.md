@@ -662,7 +662,7 @@ as to legitimate agents.
 
 ### L12 Agency
 
-*Fixes error 02. Status: specified.*
+*Fixes error 02. Status: **built** (`karst-agency`).*
 
 **Lever removed.** None directly. This layer is aimed at companies rather than states.
 
@@ -675,8 +675,22 @@ A publisher's stylesheet is a suggestion with no privileged standing. Anything t
 move, play sound, or take the viewport must hold a capability for it, and the default grant is
 none of them.
 
-This also carries fingerprint resistance: a page cannot probe what rendering it received,
-because it never had the authority to ask.
+This also carries fingerprint resistance, and the mechanism is not where it first appears to
+be. A document cannot probe what rendering it received, and it does not need to: it can
+arrange to **need different things depending on the answer**, referencing one image for a wide
+viewport and another for a narrow one, so the client's fetch pattern reports the property
+without the document observing anything. Media queries are exactly this, and no care inside a
+renderer touches it, because the channel is the network rather than the page.
+
+Resolution is therefore **unconditional**. What a document references is fetched or not fetched
+according to the client's own policy and never according to a property of the client, the fetch
+set is computed before any grant is consulted, and the order is by content address rather than
+document order so the sequence does not report the document's shape either. Measured, not
+asserted: four wildly different client policies produce byte-identical fetch patterns.
+
+**Cost.** A client on a small screen still fetches the large image, or fetches neither.
+Adaptive delivery and unlinkability are the same trade this design keeps making, and it takes
+unlinkability.
 
 ---
 

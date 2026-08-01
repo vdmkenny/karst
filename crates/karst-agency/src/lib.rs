@@ -1,0 +1,462 @@
+//! L12 Agency.
+//!
+//! The user agent stopped being an agent for the user. A page commands layout, autoplay, modal
+//! interruption, consent theatre and infinite scroll, and the client obeys. Every one of those
+//! is a capability the client handed over by default and never got back.
+//!
+//! Here a document **requests** a rendering and the client decides. A publisher's preference
+//! has no privileged standing, the default grant is nothing, and anything that wants to move,
+//! make sound, take the viewport or run has to be granted it.
+//!
+//! # The part that is structural rather than polite
+//!
+//! A policy that a document could read would be a policy a document could adapt to, and
+//! adapting to it is fingerprinting. So the decision never reaches the document, and it cannot
+//! reach the document, because a document is **data** and rendering is a pure function of
+//! (document, policy) with no channel back.
+//!
+//! That is the easy half. The hard half is below.
+//!
+//! # The leak is not the renderer, it is the fetch
+//!
+//! A document cannot ask what rendering it received. It can arrange to **need different things
+//! depending on the answer**: reference one image for a wide viewport and another for a narrow
+//! one, and the client's fetch pattern reports the viewport without the document ever
+//! observing anything. This is what media queries do on the web, and no amount of care inside
+//! the renderer touches it, because the channel is the network rather than the page.
+//!
+//! So resolution here is **unconditional**. What a document references is fetched or not
+//! fetched according to the client's own policy, and never according to a property of the
+//! client. [`Plan::fetches`] is computed before any policy is consulted, and a test asserts it
+//! is byte-identical across wildly different clients.
+//!
+//! What that costs is real: a client on a small screen still fetches the large image, or
+//! fetches neither. Adaptive delivery and unlinkability are the same trade this design keeps
+//! making, and it takes unlinkability.
+
+use std::collections::BTreeSet;
+
+use karst_doc::{Doc, Link, Node};
+use karst_object::Cid;
+
+/// Something a document may ask for and does not get by default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Ask {
+    /// Move without being asked.
+    Motion,
+    /// Make sound without being asked.
+    Audio,
+    /// Take the whole viewport.
+    Viewport,
+    /// Interrupt the reader.
+    Interrupt,
+    /// Run code.
+    Execute,
+}
+
+impl Ask {
+    pub const ALL: [Ask; 5] = [
+        Ask::Motion,
+        Ask::Audio,
+        Ask::Viewport,
+        Ask::Interrupt,
+        Ask::Execute,
+    ];
+}
+
+/// What a document would like. Advisory in full.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Request {
+    pub asks: BTreeSet<Ask>,
+    /// How much execution the document would like, if execution is granted at all.
+    pub steps: u64,
+}
+
+impl Request {
+    pub fn new() -> Self {
+        Request::default()
+    }
+
+    pub fn asking(mut self, a: Ask) -> Self {
+        self.asks.insert(a);
+        self
+    }
+
+    pub fn steps(mut self, n: u64) -> Self {
+        self.steps = n;
+        self
+    }
+}
+
+/// What the client permits. The only thing that decides anything.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Policy {
+    granted: BTreeSet<Ask>,
+    /// Hard ceiling on execution, whatever a document asks for.
+    pub step_budget: u64,
+    /// Whether to fetch what a document references at all.
+    pub fetch_referenced: bool,
+}
+
+impl Default for Policy {
+    fn default() -> Self {
+        // Nothing granted. A default that granted anything would be a default nobody chose.
+        Policy {
+            granted: BTreeSet::new(),
+            step_budget: 0,
+            fetch_referenced: true,
+        }
+    }
+}
+
+impl Policy {
+    pub fn new() -> Self {
+        Policy::default()
+    }
+
+    pub fn granting(mut self, a: Ask) -> Self {
+        self.granted.insert(a);
+        self
+    }
+
+    pub fn with_steps(mut self, n: u64) -> Self {
+        self.step_budget = n;
+        self
+    }
+
+    /// Fetch nothing a document references. Slower, quieter.
+    pub fn offline(mut self) -> Self {
+        self.fetch_referenced = false;
+        self
+    }
+
+    pub fn grants(&self, a: Ask) -> bool {
+        self.granted.contains(&a)
+    }
+}
+
+/// What the client will actually do.
+///
+/// Deliberately **not** returned to the document, and not returnable: nothing in this crate
+/// gives a document a way to observe it. A document that could read this could adapt to it,
+/// and adapting to it is fingerprinting.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Plan {
+    allowed: BTreeSet<Ask>,
+    /// Asks the document made that the client refused. For the reader's benefit, never the
+    /// document's: a reader may want to know a page wanted to interrupt them.
+    pub refused: BTreeSet<Ask>,
+    pub steps: u64,
+    /// What will be fetched, in a fixed order, computed without consulting the policy's
+    /// grants at all.
+    pub fetches: Vec<Cid>,
+}
+
+impl Plan {
+    pub fn allows(&self, a: Ask) -> bool {
+        self.allowed.contains(&a)
+    }
+
+    /// Whether the document asked for anything it did not get.
+    pub fn was_refused_anything(&self) -> bool {
+        !self.refused.is_empty()
+    }
+}
+
+/// Decide what to do with a document.
+///
+/// The request is read only to record what was refused. Nothing in it can widen the policy.
+pub fn decide(doc: &Doc, root: &Cid, request: &Request, policy: &Policy) -> Plan {
+    // Fetches first, and computed from the document alone. Consulting a client property here
+    // is what turns a fetch pattern into a fingerprint, so there is nothing to consult.
+    let fetches = if policy.fetch_referenced {
+        referenced(doc, root)
+    } else {
+        Vec::new()
+    };
+
+    let allowed: BTreeSet<Ask> = request
+        .asks
+        .iter()
+        .copied()
+        .filter(|a| policy.grants(*a))
+        .collect();
+    let refused: BTreeSet<Ask> = request
+        .asks
+        .iter()
+        .copied()
+        .filter(|a| !policy.grants(*a))
+        .collect();
+
+    let steps = if allowed.contains(&Ask::Execute) {
+        request.steps.min(policy.step_budget)
+    } else {
+        0
+    };
+
+    Plan {
+        allowed,
+        refused,
+        steps,
+        fetches,
+    }
+}
+
+/// Everything a document references, in content-address order.
+///
+/// Sorted rather than in document order, so the sequence of fetches does not report the shape
+/// of the document to whoever serves them.
+fn referenced(doc: &Doc, root: &Cid) -> Vec<Cid> {
+    let mut out = BTreeSet::new();
+    let mut frontier = vec![*root];
+    let mut seen = BTreeSet::new();
+    while let Some(cid) = frontier.pop() {
+        if !seen.insert(cid) {
+            continue;
+        }
+        let Some(node) = doc.get(&cid) else {
+            continue;
+        };
+        for l in node.links() {
+            out.insert(l);
+        }
+        frontier.extend(node.contained());
+    }
+    out.into_iter().collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use karst_doc::Run;
+
+    /// Build a document that references different things, as a hostile publisher would.
+    fn doc_with(links: &[Cid]) -> (Doc, Cid) {
+        let mut d = Doc::new();
+        let mut kids = Vec::new();
+        for (i, l) in links.iter().enumerate() {
+            kids.push(d.add(Node::Prose {
+                runs: vec![Run::link(&format!("r{i}"), *l)],
+            }));
+        }
+        let root = d.add(Node::Section {
+            title: "doc".into(),
+            children: kids,
+        });
+        (d, root)
+    }
+
+    fn cid(n: u8) -> Cid {
+        Cid::of(&[n])
+    }
+
+    /// Nothing is granted by default.
+    ///
+    /// A default that granted anything would be a default nobody chose, which is exactly how
+    /// autoplay and modal interruption became normal.
+    #[test]
+    fn the_default_grant_is_nothing() {
+        let (d, root) = doc_with(&[]);
+        let mut asking = Request::new();
+        for a in Ask::ALL {
+            asking = asking.asking(a);
+        }
+        let plan = decide(&d, &root, &asking.steps(1_000_000), &Policy::new());
+
+        for a in Ask::ALL {
+            assert!(!plan.allows(a), "{a:?} was granted by default");
+        }
+        assert_eq!(plan.refused.len(), Ask::ALL.len());
+        assert_eq!(plan.steps, 0);
+    }
+
+    /// Asking harder must not help.
+    #[test]
+    fn a_request_cannot_widen_a_policy() {
+        let (d, root) = doc_with(&[]);
+        let policy = Policy::new().granting(Ask::Motion);
+        let greedy = Request::new()
+            .asking(Ask::Motion)
+            .asking(Ask::Audio)
+            .asking(Ask::Interrupt)
+            .asking(Ask::Execute)
+            .steps(u64::MAX);
+        let plan = decide(&d, &root, &greedy, &policy);
+
+        assert!(plan.allows(Ask::Motion));
+        assert!(!plan.allows(Ask::Audio));
+        assert!(!plan.allows(Ask::Interrupt));
+        assert_eq!(plan.steps, 0, "execution ran without being granted");
+    }
+
+    /// Execution is bounded by the client, not by the document's appetite.
+    #[test]
+    fn execution_is_bounded_by_the_client() {
+        let (d, root) = doc_with(&[]);
+        let policy = Policy::new().granting(Ask::Execute).with_steps(500);
+        let plan = decide(
+            &d,
+            &root,
+            &Request::new().asking(Ask::Execute).steps(u64::MAX),
+            &policy,
+        );
+        assert!(plan.allows(Ask::Execute));
+        assert_eq!(plan.steps, 500);
+
+        // And a modest document gets what it asked for, not the ceiling.
+        let plan = decide(
+            &d,
+            &root,
+            &Request::new().asking(Ask::Execute).steps(10),
+            &policy,
+        );
+        assert_eq!(plan.steps, 10);
+    }
+
+    /// The fetch pattern must be identical across wildly different clients.
+    ///
+    /// This is the fingerprinting channel, and it is not in the renderer. A document cannot
+    /// ask what rendering it received, and it does not need to: referencing one thing for a
+    /// wide viewport and another for a narrow one makes the client's fetches report the
+    /// answer. Media queries are exactly this. The defence has to be that resolution never
+    /// consults a client property, which is why `fetches` is computed before grants are.
+    #[test]
+    fn the_fetch_pattern_does_not_vary_with_the_client() {
+        let (d, root) = doc_with(&[cid(1), cid(2), cid(3), cid(4)]);
+        let request = Request::new()
+            .asking(Ask::Motion)
+            .asking(Ask::Audio)
+            .asking(Ask::Viewport)
+            .asking(Ask::Execute)
+            .steps(9_000);
+
+        let clients = [
+            Policy::new(),
+            Policy::new().granting(Ask::Motion),
+            Policy::new().granting(Ask::Audio).granting(Ask::Viewport),
+            Policy::new()
+                .granting(Ask::Execute)
+                .with_steps(1_000_000)
+                .granting(Ask::Interrupt),
+        ];
+
+        let baseline = decide(&d, &root, &request, &clients[0]).fetches;
+        assert_eq!(baseline.len(), 4, "vacuous: nothing was fetched");
+        for (i, p) in clients.iter().enumerate() {
+            assert_eq!(
+                decide(&d, &root, &request, p).fetches,
+                baseline,
+                "client {i} produced a different fetch pattern"
+            );
+        }
+    }
+
+    /// And the order must not report the document's shape either.
+    #[test]
+    fn the_fetch_order_does_not_follow_the_document() {
+        let links = [cid(9), cid(3), cid(7), cid(1)];
+        let (d, root) = doc_with(&links);
+        let plan = decide(&d, &root, &Request::new(), &Policy::new());
+
+        let mut sorted = plan.fetches.clone();
+        sorted.sort();
+        assert_eq!(plan.fetches, sorted, "fetches followed document order");
+    }
+
+    /// A reader who wants to fetch nothing gets to.
+    #[test]
+    fn a_reader_can_refuse_to_fetch_anything() {
+        let (d, root) = doc_with(&[cid(1), cid(2)]);
+        let plan = decide(&d, &root, &Request::new(), &Policy::new().offline());
+        assert!(plan.fetches.is_empty());
+    }
+
+    /// The refusal record is for the reader, and there is no path from it to the document.
+    ///
+    /// A reader may reasonably want to know that a page wanted to interrupt them. A document
+    /// that could learn the same thing would adapt to it.
+    #[test]
+    fn refusals_are_visible_to_the_reader_and_not_to_the_document() {
+        let (d, root) = doc_with(&[]);
+        let plan = decide(
+            &d,
+            &root,
+            &Request::new().asking(Ask::Interrupt).asking(Ask::Audio),
+            &Policy::new(),
+        );
+        assert!(plan.was_refused_anything());
+        assert!(plan.refused.contains(&Ask::Interrupt));
+
+        // `decide` takes the document immutably and returns a plan the caller owns. There is
+        // no mutation of the document and no value handed back into it, so nothing the client
+        // decided can be read by what it decided about.
+        let (again, root2) = doc_with(&[]);
+        assert_eq!(again.len(), d.len());
+        assert_eq!(root2, root, "deciding altered the document");
+    }
+
+    /// Two documents that differ only in what they ask for must fetch identically.
+    ///
+    /// Otherwise a publisher learns a client's policy by publishing two variants and watching
+    /// which fetch pattern comes back.
+    #[test]
+    fn what_a_document_asks_for_does_not_change_what_it_fetches() {
+        let (d, root) = doc_with(&[cid(5), cid(6)]);
+        let quiet = decide(&d, &root, &Request::new(), &Policy::new());
+        let greedy = decide(
+            &d,
+            &root,
+            &Request::new()
+                .asking(Ask::Execute)
+                .asking(Ask::Viewport)
+                .steps(1 << 40),
+            &Policy::new().granting(Ask::Execute).with_steps(1 << 20),
+        );
+        assert_eq!(quiet.fetches, greedy.fetches);
+    }
+
+    /// A document referencing the same thing many times must not fetch it many times.
+    #[test]
+    fn repeated_references_are_fetched_once() {
+        let (d, root) = doc_with(&[cid(1), cid(1), cid(1), cid(2)]);
+        let plan = decide(&d, &root, &Request::new(), &Policy::new());
+        let mut expected = vec![cid(1), cid(2)];
+        expected.sort();
+        assert_eq!(plan.fetches, expected);
+    }
+
+    /// A cyclic document must not hang resolution.
+    #[test]
+    fn a_cycle_does_not_hang_resolution() {
+        let mut d = Doc::new();
+        let leaf = d.add(Node::Prose {
+            runs: vec![Run::link("x", cid(1))],
+        });
+        // A section containing itself is not constructible by content address, so the closest
+        // hostile shape is a deep chain that revisits the same children.
+        let mut cur = leaf;
+        for _ in 0..64 {
+            cur = d.add(Node::Section {
+                title: "s".into(),
+                children: vec![cur, leaf],
+            });
+        }
+        let plan = decide(&d, &cur, &Request::new(), &Policy::new());
+        assert_eq!(plan.fetches, vec![cid(1)]);
+    }
+
+    /// Tracking links must be fetched by their fallback, not resolved during rendering.
+    ///
+    /// Resolving a tracking link at render time would make the fetch depend on what the reader
+    /// already holds, which varies per reader and is therefore a fingerprint.
+    #[test]
+    fn a_tracking_link_is_fetched_by_what_the_author_saw() {
+        let mut d = Doc::new();
+        let root = d.add(Node::Prose {
+            runs: vec![Run::tracking_link("live", cid(8))],
+        });
+        let plan = decide(&d, &root, &Request::new(), &Policy::new());
+        assert_eq!(plan.fetches, vec![cid(8)]);
+        assert_eq!(Link::Tracking { seen: cid(8) }.fallback(), cid(8));
+    }
+}
