@@ -39,13 +39,51 @@ pub struct Alarm {
     pub p_value: f64,
 }
 
+/// Where the baseline loss rate comes from, which is a security decision and not a detail.
+///
+/// **A measured baseline is attacker-controlled.** An adversary who drops packets steadily
+/// before attacking raises the measured baseline, and then attacks underneath the inflated
+/// figure without ever crossing the threshold. Any detector that learns its own normal from a
+/// channel the adversary sits on has this problem.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Baseline {
+    /// Set out of band, from a source the adversary does not sit on. Not poisonable.
+    Fixed(f64),
+    /// Learned from observation, and permitted to fall but never to rise beyond `ceiling`.
+    ///
+    /// The ratchet is what stops poisoning: an adversary can degrade the channel, and cannot
+    /// convince the detector that degradation is normal. The cost is that genuine long-term
+    /// deterioration produces standing alarms rather than a quietly raised threshold, which is
+    /// the correct direction to fail.
+    Ratcheted { current: f64, ceiling: f64 },
+}
+
+impl Baseline {
+    pub fn rate(&self) -> f64 {
+        match self {
+            Baseline::Fixed(p) => *p,
+            Baseline::Ratcheted { current, .. } => *current,
+        }
+    }
+
+    /// Fold in an observation. Fixed baselines ignore it entirely.
+    pub fn observe(&mut self, observed: f64) {
+        if let Baseline::Ratcheted { current, ceiling } = self {
+            let capped = observed.min(*ceiling);
+            if capped < *current {
+                *current = capped;
+            }
+        }
+    }
+}
+
 /// Tracks outstanding loops and decides when loss stops looking like weather.
 pub struct LoopTracker {
     outstanding: BTreeMap<[u8; 16], LoopToken>,
     returned: usize,
     lost: usize,
-    /// Loss rate this node sees when nothing is attacking it. Measured, not assumed.
-    pub baseline_loss: f64,
+    /// What this node considers normal loss. See [`Baseline`] for why the source matters.
+    pub baseline: Baseline,
     /// Tolerated false alarm probability.
     pub alpha: f64,
 }
@@ -56,7 +94,17 @@ impl LoopTracker {
             outstanding: BTreeMap::new(),
             returned: 0,
             lost: 0,
-            baseline_loss,
+            baseline: Baseline::Fixed(baseline_loss),
+            alpha,
+        }
+    }
+
+    pub fn with_baseline(baseline: Baseline, alpha: f64) -> Self {
+        LoopTracker {
+            outstanding: BTreeMap::new(),
+            returned: 0,
+            lost: 0,
+            baseline,
             alpha,
         }
     }
@@ -127,13 +175,13 @@ impl LoopTracker {
         if n == 0 {
             return None;
         }
-        let p = binomial_tail(self.lost, n, self.baseline_loss);
+        let p = binomial_tail(self.lost, n, self.baseline.rate());
         if p < self.alpha {
             Some(Alarm {
                 observed_losses: self.lost,
                 samples: n,
                 observed_rate: self.loss_rate(),
-                baseline_rate: self.baseline_loss,
+                baseline_rate: self.baseline.rate(),
                 p_value: p,
             })
         } else {
@@ -380,3 +428,114 @@ mod tests {
     }
 }
 
+
+/// Attacks on the detector.
+#[cfg(test)]
+mod adversarial {
+    use super::*;
+
+    fn run_loops(t: &mut LoopTracker, total: u32, lose_every: u32) {
+        for i in 0..total {
+            let mut n = [0u8; 16];
+            n[..4].copy_from_slice(&i.to_le_bytes());
+            t.dispatch(n, 0, 10);
+            if lose_every > 0 && i % lose_every == 0 {
+                continue;
+            }
+            t.observe_return(&n);
+        }
+        t.expire(11);
+    }
+
+    /// **Baseline poisoning.** An adversary who degrades the channel steadily before attacking
+    /// raises a learned baseline, then attacks underneath it. Any detector that learns its
+    /// normal from a channel the adversary sits on has this problem.
+    #[test]
+    fn a_learned_baseline_can_be_poisoned_and_the_ratchet_stops_it() {
+        // Naive: the detector adopts whatever it sees.
+        let mut naive = Baseline::Ratcheted {
+            current: 0.05,
+            ceiling: 1.0,
+        };
+        // An adversary drives observed loss to 40%, hoping the detector accepts it as normal.
+        naive.observe(0.40);
+        assert_eq!(
+            naive.rate(),
+            0.05,
+            "the ratchet must refuse to raise the baseline"
+        );
+
+        // Genuine improvement is still adopted, which is the point of learning at all.
+        naive.observe(0.01);
+        assert_eq!(naive.rate(), 0.01);
+
+        // And having fallen, it will not be talked back up.
+        naive.observe(0.30);
+        assert_eq!(naive.rate(), 0.01);
+    }
+
+    #[test]
+    fn a_fixed_baseline_ignores_observation_entirely() {
+        let mut b = Baseline::Fixed(0.05);
+        b.observe(0.99);
+        b.observe(0.0);
+        assert_eq!(b.rate(), 0.05);
+    }
+
+    /// **The adaptive adversary**, and the permanent limit. Suppressing at or below what the
+    /// network already loses is invisible however long you watch.
+    #[test]
+    fn an_adversary_who_stays_under_the_baseline_is_never_detected() {
+        let mut t = LoopTracker::new(0.10, 0.001);
+        // 10% loss against a 10% baseline, over a large sample.
+        run_loops(&mut t, 2_000, 10);
+        assert!(
+            t.alarm().is_none(),
+            "an at-baseline attacker fired the alarm, which would be a false positive"
+        );
+        assert_eq!(samples_to_detect(0.10, 0.10, 0.001, 100_000), None);
+    }
+
+    /// An adversary who delays rather than drops causes loops to time out and then arrive.
+    /// The tracker counts them lost, which is a false alarm an adversary can induce
+    /// deliberately to make the detector untrustworthy and get it turned off.
+    #[test]
+    fn delayed_loops_are_counted_lost_and_a_late_return_does_not_undo_it() {
+        let mut t = LoopTracker::new(0.01, 0.001);
+        t.dispatch([1u8; 16], 0, 10);
+        t.expire(11);
+        assert_eq!(t.loss_rate(), 1.0);
+
+        // The loop finally arrives. It is no longer outstanding, so it is not credited.
+        assert!(
+            !t.observe_return(&[1u8; 16]),
+            "a late return must not silently reverse a recorded loss"
+        );
+        assert_eq!(t.loss_rate(), 1.0);
+    }
+
+    /// A hostile peer replaying returns cannot inflate the success count.
+    #[test]
+    fn replayed_returns_do_not_manufacture_successes() {
+        let mut t = LoopTracker::new(0.01, 0.001);
+        t.dispatch([1u8; 16], 0, 10);
+        assert!(t.observe_return(&[1u8; 16]));
+        for _ in 0..100 {
+            assert!(!t.observe_return(&[1u8; 16]));
+        }
+        assert_eq!(t.samples(), 1);
+    }
+
+    /// A single unlucky loss must not fire the alarm, or the detector is noise.
+    #[test]
+    fn a_tiny_sample_does_not_fire() {
+        let mut t = LoopTracker::new(0.05, 0.001);
+        t.dispatch([1u8; 16], 0, 10);
+        t.expire(11);
+        assert_eq!(t.loss_rate(), 1.0);
+        assert!(
+            t.alarm().is_none(),
+            "one lost loop out of one is not evidence of anything"
+        );
+    }
+}

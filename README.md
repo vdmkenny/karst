@@ -33,7 +33,7 @@ list of everything the design makes worse.
 > [`docs/05-anonymity.md`](docs/05-anonymity.md).
 
 ```bash
-cargo test          # 222 tests
+cargo test          # 238 tests
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
 cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?
@@ -104,6 +104,9 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
    re-encodes to itself, so exactly one encoding names each value. Parser differentials are how
    signed documents come to mean two things. Enforced by `karst-fuzz`, not by assertion.
 5. **State the costs.** A design that lists only its properties is a manifesto.
+6. **Attack it, do not exercise it.** Tests that confirm a thing works find fewer defects than
+   tests that ask what an adversary with a stated capability does. Four defects in this repo
+   were found the second way and none of them by the first.
 
 ## What this costs
 

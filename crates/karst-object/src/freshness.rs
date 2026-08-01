@@ -53,6 +53,13 @@ pub struct Timestamp {
     pub expires_at: u64,
     /// Monotonic, so an old statement cannot be replayed as a new one.
     pub sequence: u64,
+    /// Digest of the advisory set this statement vouches for.
+    ///
+    /// **Without this, freshness is not enough.** An adversary who forwards genuine timestamps
+    /// while withholding the advisories they refer to leaves a client that believes it is
+    /// current and is missing exactly the update it needs. That is the freeze attack wearing a
+    /// disguise, and expiry alone does not catch it. TUF's snapshot role is this commitment.
+    pub snapshot: crate::Cid,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,6 +73,11 @@ pub enum Staleness {
     Rollback { seen: u64, offered: u64 },
     /// Nothing has ever been heard, which is not the same as being current.
     NeverHeard,
+    /// Statements are arriving and the content they vouch for is not.
+    ///
+    /// An adversary forwarding genuine timestamps while withholding advisories produces this,
+    /// and expiry alone would report `Fresh`.
+    ContentWithheld { expected: crate::Cid },
 }
 
 impl fmt::Display for Staleness {
@@ -79,6 +91,11 @@ impl fmt::Display for Staleness {
                 write!(f, "replay: already saw sequence {seen}, offered {offered}")
             }
             Staleness::NeverHeard => write!(f, "never heard from this publisher"),
+            Staleness::ContentWithheld { expected } => write!(
+                f,
+                "statements are fresh but advisory set {} has not arrived",
+                expected.short()
+            ),
         }
     }
 }
@@ -96,9 +113,13 @@ impl Timestamp {
         issued_at: u64,
         valid_for: u64,
         sequence: u64,
+        snapshot: crate::Cid,
     ) -> Object {
         let mut e = Enc::new();
-        e.u64(issued_at).u64(issued_at + valid_for).u64(sequence);
+        e.u64(issued_at)
+            .u64(issued_at + valid_for)
+            .u64(sequence)
+            .cid(&snapshot);
         Object::create(publisher, TIMESTAMP_KIND, sequence, e.finish(), None)
     }
 
@@ -111,12 +132,14 @@ impl Timestamp {
         let issued_at = d.u64().map_err(|_| ObjectError::CidMismatch)?;
         let expires_at = d.u64().map_err(|_| ObjectError::CidMismatch)?;
         let sequence = d.u64().map_err(|_| ObjectError::CidMismatch)?;
+        let snapshot = d.cid().map_err(|_| ObjectError::CidMismatch)?;
         d.end().map_err(|_| ObjectError::CidMismatch)?;
         Ok(Timestamp {
             publisher,
             issued_at,
             expires_at,
             sequence,
+            snapshot,
         })
     }
 }
@@ -154,13 +177,21 @@ impl FreshnessMonitor {
     }
 
     /// **The freeze check.** Silence is not evidence of being current.
-    pub fn status(&self, now: u64) -> Staleness {
+    ///
+    /// `held` is the digest of the advisory set the client actually has. Passing `None` skips
+    /// the content check, which is only correct for a client that has not yet fetched anything.
+    pub fn status(&self, now: u64, held: Option<crate::Cid>) -> Staleness {
         match self.latest {
             None => Staleness::NeverHeard,
             Some(ts) if now > ts.expires_at => Staleness::Expired {
                 since: ts.expires_at,
             },
-            Some(_) => Staleness::Fresh,
+            Some(ts) => match held {
+                Some(h) if h != ts.snapshot => Staleness::ContentWithheld {
+                    expected: ts.snapshot,
+                },
+                _ => Staleness::Fresh,
+            },
         }
     }
 
@@ -172,55 +203,61 @@ impl FreshnessMonitor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::Cid;
 
-    fn ts(id: &Identity, at: u64, valid: u64, seq: u64) -> Timestamp {
-        Timestamp::from_object(&Timestamp::publish(id, at, valid, seq)).unwrap()
+    fn snap(tag: &[u8]) -> Cid {
+        Cid::of(tag)
+    }
+
+    fn ts(id: &Identity, at: u64, valid: u64, seq: u64, s: Cid) -> Timestamp {
+        Timestamp::from_object(&Timestamp::publish(id, at, valid, seq, s)).unwrap()
     }
 
     #[test]
-    fn a_fresh_statement_is_current() {
+    fn a_fresh_statement_with_matching_content_is_current() {
         let pubr = Identity::generate();
+        let s = snap(b"advisories v1");
         let mut m = FreshnessMonitor::new(pubr.address());
-        m.accept(ts(&pubr, 100, 50, 1)).unwrap();
-        assert_eq!(m.status(120), Staleness::Fresh);
-        assert!(!m.status(120).suspect());
+        m.accept(ts(&pubr, 100, 50, 1, s)).unwrap();
+        assert_eq!(m.status(120, Some(s)), Staleness::Fresh);
+        assert!(!m.status(120, Some(s)).suspect());
     }
 
-    /// **The freeze attack.** An adversary withholding updates leaves a client believing it is
-    /// current, forever, with no error to notice. Expiry is what turns silence into a signal.
+    /// **The freeze attack.** Withholding updates leaves a client believing it is current,
+    /// forever, with no error to notice. Expiry turns silence into a signal.
     #[test]
-    fn withheld_updates_become_visible_rather_than_silent() {
+    fn withheld_statements_become_visible_rather_than_silent() {
         let pubr = Identity::generate();
+        let s = snap(b"v1");
         let mut m = FreshnessMonitor::new(pubr.address());
-        m.accept(ts(&pubr, 100, 50, 1)).unwrap();
+        m.accept(ts(&pubr, 100, 50, 1, s)).unwrap();
 
-        assert_eq!(m.status(150), Staleness::Fresh);
-        assert_eq!(m.status(151), Staleness::Expired { since: 150 });
-        assert!(m.status(151).suspect(), "a starved client must know it is starved");
+        assert_eq!(m.status(150, Some(s)), Staleness::Fresh);
+        assert_eq!(m.status(151, Some(s)), Staleness::Expired { since: 150 });
+        assert!(m.status(151, Some(s)).suspect());
     }
 
     #[test]
     fn never_hearing_is_not_the_same_as_being_current() {
         let pubr = Identity::generate();
         let m = FreshnessMonitor::new(pubr.address());
-        assert_eq!(m.status(0), Staleness::NeverHeard);
-        assert!(m.status(0).suspect());
+        assert_eq!(m.status(0, None), Staleness::NeverHeard);
+        assert!(m.status(0, None).suspect());
     }
 
-    /// A publisher with nothing to say still says so, so an old statement cannot be replayed
-    /// to keep a client quiet.
     #[test]
     fn an_old_statement_cannot_be_replayed() {
         let pubr = Identity::generate();
+        let s = snap(b"v1");
         let mut m = FreshnessMonitor::new(pubr.address());
-        m.accept(ts(&pubr, 100, 50, 5)).unwrap();
+        m.accept(ts(&pubr, 100, 50, 5, s)).unwrap();
 
         assert_eq!(
-            m.accept(ts(&pubr, 90, 50, 3)),
+            m.accept(ts(&pubr, 90, 50, 3, s)),
             Err(Staleness::Rollback { seen: 5, offered: 3 })
         );
         assert_eq!(
-            m.accept(ts(&pubr, 100, 50, 5)),
+            m.accept(ts(&pubr, 100, 50, 5, s)),
             Err(Staleness::Rollback { seen: 5, offered: 5 }),
             "the same sequence again is also a replay"
         );
@@ -231,25 +268,106 @@ mod tests {
         let pubr = Identity::generate();
         let impostor = Identity::generate();
         let mut m = FreshnessMonitor::new(pubr.address());
-        assert!(m.accept(ts(&impostor, 100, 50, 1)).is_err());
-        assert_eq!(m.status(100), Staleness::NeverHeard);
+        assert!(m.accept(ts(&impostor, 100, 50, 1, snap(b"v1"))).is_err());
+        assert_eq!(m.status(100, None), Staleness::NeverHeard);
     }
 
     #[test]
     fn a_tampered_statement_does_not_verify() {
         let pubr = Identity::generate();
-        let obj = Timestamp::publish(&pubr, 100, 50, 1);
-        let evil = obj.tamper(vec![0u8; 24]);
-        assert!(Timestamp::from_object(&evil).is_err());
+        let obj = Timestamp::publish(&pubr, 100, 50, 1, snap(b"v1"));
+        assert!(Timestamp::from_object(&obj.tamper(vec![0u8; 40])).is_err());
     }
 
     #[test]
     fn continuing_to_hear_keeps_a_client_current() {
         let pubr = Identity::generate();
+        let s = snap(b"v1");
         let mut m = FreshnessMonitor::new(pubr.address());
         for i in 1..10u64 {
-            m.accept(ts(&pubr, i * 100, 150, i)).unwrap();
-            assert_eq!(m.status(i * 100 + 10), Staleness::Fresh);
+            m.accept(ts(&pubr, i * 100, 150, i, s)).unwrap();
+            assert_eq!(m.status(i * 100 + 10, Some(s)), Staleness::Fresh);
         }
+    }
+}
+
+/// Attacks on the detector itself.
+#[cfg(test)]
+mod adversarial {
+    use super::*;
+    use crate::Cid;
+
+    fn snap(tag: &[u8]) -> Cid {
+        Cid::of(tag)
+    }
+    fn ts(id: &Identity, at: u64, valid: u64, seq: u64, s: Cid) -> Timestamp {
+        Timestamp::from_object(&Timestamp::publish(id, at, valid, seq, s)).unwrap()
+    }
+
+    /// **The slow drip.** An adversary who forwards genuine, fresh, correctly-sequenced
+    /// timestamps while withholding the advisories they refer to defeats an expiry-only
+    /// detector completely: the client reports current and is missing exactly the update it
+    /// needs. That is the Ricochet failure with extra steps.
+    ///
+    /// The snapshot commitment is what catches it.
+    #[test]
+    fn forwarding_statements_while_withholding_content_is_caught() {
+        let pubr = Identity::generate();
+        let mut m = FreshnessMonitor::new(pubr.address());
+
+        // The publisher has moved on to v2 and says so.
+        m.accept(ts(&pubr, 100, 50, 2, snap(b"advisories v2"))).unwrap();
+
+        // The client still holds v1, because the adversary blocked the fetch.
+        let status = m.status(120, Some(snap(b"advisories v1")));
+        assert_eq!(
+            status,
+            Staleness::ContentWithheld {
+                expected: snap(b"advisories v2")
+            }
+        );
+        assert!(status.suspect(), "a client missing content must know it");
+    }
+
+    /// A client whose clock runs backwards, or is set back by an adversary with local access,
+    /// treats expired statements as fresh. The mechanism cannot fix this and the limit is
+    /// worth stating: **expiry checks are only as good as the clock**.
+    #[test]
+    fn a_backdated_clock_defeats_expiry_and_that_is_a_known_limit() {
+        let pubr = Identity::generate();
+        let s = snap(b"v1");
+        let mut m = FreshnessMonitor::new(pubr.address());
+        m.accept(ts(&pubr, 100, 50, 1, s)).unwrap();
+
+        assert_eq!(m.status(200, Some(s)), Staleness::Expired { since: 150 });
+        // The same monitor, asked about an earlier moment, reports fresh.
+        assert_eq!(m.status(120, Some(s)), Staleness::Fresh);
+    }
+
+    /// A publisher that issues very long validity windows makes freeze detection useless
+    /// without ever being caught lying, so validity is a security parameter rather than a
+    /// convenience.
+    #[test]
+    fn a_long_validity_window_silently_disables_the_detector() {
+        let pubr = Identity::generate();
+        let s = snap(b"v1");
+        let mut m = FreshnessMonitor::new(pubr.address());
+        // Valid for a very long time.
+        m.accept(ts(&pubr, 0, u64::MAX / 2, 1, s)).unwrap();
+
+        // Years later, still nominally fresh, and the client has heard nothing since.
+        assert_eq!(m.status(1_000_000_000, Some(s)), Staleness::Fresh);
+    }
+
+    /// A sequence jump is not by itself evidence of anything, since statements are fetched
+    /// rather than pushed and a client may simply have missed some. Only going backwards is.
+    #[test]
+    fn a_forward_sequence_jump_is_accepted_and_a_backward_one_is_not() {
+        let pubr = Identity::generate();
+        let s = snap(b"v1");
+        let mut m = FreshnessMonitor::new(pubr.address());
+        m.accept(ts(&pubr, 100, 50, 1, s)).unwrap();
+        assert!(m.accept(ts(&pubr, 200, 50, 900, s)).is_ok());
+        assert!(m.accept(ts(&pubr, 300, 50, 899, s)).is_err());
     }
 }
