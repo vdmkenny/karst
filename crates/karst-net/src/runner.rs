@@ -53,10 +53,13 @@ pub const REQUEST_BYTES: usize = 1 + 32 + 4;
 /// The cursor is echoed because a client polling in a loop has several requests in flight, and
 /// a response that did not say which index it answered was counted as progress whichever index
 /// it was. That produced duplicates and silently lost the items in between.
-pub const RESPONSE_BYTES: usize = 1 + 8 + 4 + ENVELOPE_BYTES;
+/// The tag is echoed too, because a client polling several providers for several feeds gets
+/// answers back interleaved on one socket. Without it, a response arriving while a different
+/// provider was being polled had to be discarded, and discarding it lost that item entirely.
+pub const RESPONSE_BYTES: usize = 1 + 8 + 4 + 32 + ENVELOPE_BYTES;
 
 /// Offset of the body within a response.
-const RESP_BODY: usize = 1 + 8 + 4;
+const RESP_BODY: usize = 1 + 8 + 4 + 32;
 
 /// Drain one item from a box, proving the right to do so with the collection key.
 pub const REQ_DRAIN: u8 = 1;
@@ -167,9 +170,10 @@ impl NodeRunner {
             }
             let mut cred = [0u8; 32];
             cred.copy_from_slice(&buf[1..33]);
+            let kind = buf[0];
             let cursor = u32::from_le_bytes([buf[33], buf[34], buf[35], buf[36]]) as usize;
 
-            let (item, refused) = match buf[0] {
+            let (item, refused) = match kind {
                 // Draining needs the preimage of the tag, so a correspondent who knows where
                 // to deposit still cannot delete what is there.
                 REQ_DRAIN => {
@@ -187,6 +191,14 @@ impl NodeRunner {
             let mut resp = vec![0u8; RESPONSE_BYTES];
             resp[1..9].copy_from_slice(&refused.to_le_bytes());
             resp[9..13].copy_from_slice(&(cursor as u32).to_le_bytes());
+            // Echo the box this answers. For a drain the credential is not the tag, so the
+            // tag is derived, and a client matching on it learns nothing it did not supply.
+            let echo = if kind == REQ_DRAIN {
+                crate::client::mailbox_tag(&cred)
+            } else {
+                cred
+            };
+            resp[13..45].copy_from_slice(&echo);
             match item {
                 None => {
                     resp[0] = STATUS_EMPTY;
@@ -280,7 +292,10 @@ pub struct ClientRunner {
     started: Instant,
     cover_toward: u16,
     sentinel: Option<crate::sentinel::Sentinel>,
-    feed_cursor: usize,
+    /// One cursor per (provider, feed). Replicas hold different amounts.
+    feed_cursors: std::collections::BTreeMap<(SocketAddr, Tag), usize>,
+    /// Responses read off the socket and not yet handed to a caller.
+    pending: std::collections::BTreeMap<(SocketAddr, Tag), Vec<Vec<u8>>>,
     refused_seen: u64,
     pub received: Vec<Vec<u8>>,
 }
@@ -306,7 +321,8 @@ impl ClientRunner {
             started: Instant::now(),
             cover_toward,
             sentinel: None,
-            feed_cursor: 0,
+            feed_cursors: std::collections::BTreeMap::new(),
+            pending: std::collections::BTreeMap::new(),
             refused_seen: 0,
             client,
             received: Vec::new(),
@@ -396,11 +412,25 @@ impl ClientRunner {
 
     /// Hand a publication to the link, addressed to a feed rather than to a person.
     pub fn publish(&mut self, feed: Tag, message: &[u8]) -> Result<(), SendError> {
-        let mut rng = rand::thread_rng();
         let toward = self.cover_toward;
+        self.publish_to(feed, toward, message)
+    }
+
+    /// Publish to one named provider.
+    ///
+    /// Replication is the caller's loop rather than something hidden here, because which
+    /// providers hold a feed is derived from `placement` and a runner has no business
+    /// deciding it.
+    pub fn publish_to(
+        &mut self,
+        feed: Tag,
+        provider: u16,
+        message: &[u8],
+    ) -> Result<(), SendError> {
+        let mut rng = rand::thread_rng();
         for d in self
             .client
-            .publish(&self.dir, feed, toward, message, &mut rng)?
+            .publish(&self.dir, feed, provider, message, &mut rng)?
         {
             let _ = self.pacer.offer(d);
         }
@@ -414,32 +444,58 @@ impl ClientRunner {
     /// close, and calling it out here rather than in a comment somewhere else is deliberate:
     /// it is the same gap as #53, reached by a different road.
     pub fn poll_tag(&mut self, tag: Tag) -> Vec<Vec<u8>> {
+        let at = self.provider_collect;
+        self.poll_tag_at(at, tag)
+    }
+
+    /// Read a feed from one named provider, at that provider's own cursor.
+    ///
+    /// Cursors are per provider, because replicas hold different amounts and a shared cursor
+    /// would skip whatever the furthest-ahead replica had already served.
+    pub fn poll_tag_at(&mut self, at: SocketAddr, tag: Tag) -> Vec<Vec<u8>> {
+        let cursor = *self.feed_cursors.entry((at, tag)).or_insert(0);
         let mut req = [0u8; REQUEST_BYTES];
         req[0] = REQ_READ;
         req[1..33].copy_from_slice(&tag);
-        req[33..].copy_from_slice(&(self.feed_cursor as u32).to_le_bytes());
-        let _ = self.collect_sock.send_to(&req, self.provider_collect);
+        req[33..].copy_from_slice(&(cursor as u32).to_le_bytes());
+        let _ = self.collect_sock.send_to(&req, at);
 
-        let mut out = Vec::new();
+        self.pump();
+        self.pending.remove(&(at, tag)).unwrap_or_default()
+    }
+
+    /// Read every response waiting on the socket and file it under the box it answers.
+    ///
+    /// Filing rather than filtering. A client polling several providers has answers arriving
+    /// interleaved, and dropping the ones that did not come from the provider being polled at
+    /// that instant lost them for good: replicas polled round robin systematically discarded
+    /// each other's replies, and every replica but one looked like it was withholding.
+    fn pump(&mut self) {
         let mut buf = [0u8; RESPONSE_BYTES];
         while let Ok((n, from)) = self.collect_sock.recv_from(&mut buf) {
-            // Only the provider this client asked. Discarding the source address let anyone
-            // who could reach the port answer on the provider's behalf.
-            if n != RESPONSE_BYTES || from != self.provider_collect || buf[0] != STATUS_ITEM {
+            if n != RESPONSE_BYTES {
                 continue;
             }
+            let mut tag: Tag = [0u8; 32];
+            tag.copy_from_slice(&buf[13..45]);
             self.refused_seen = u64::from_le_bytes(buf[1..9].try_into().expect("8 bytes"));
+            if buf[0] != STATUS_ITEM {
+                continue;
+            }
             let answered =
                 u32::from_le_bytes(buf[9..13].try_into().expect("4 bytes")) as usize;
             // Only an answer at or beyond the cursor is progress. A late reply to an earlier
             // request would otherwise be counted twice and skip whatever came after it.
-            if answered < self.feed_cursor {
+            let here = self.feed_cursors.entry((from, tag)).or_insert(0);
+            if answered < *here {
                 continue;
             }
-            self.feed_cursor = answered + 1;
-            out.push(buf[RESP_BODY..].to_vec());
+            *here = answered + 1;
+            self.pending
+                .entry((from, tag))
+                .or_default()
+                .push(buf[RESP_BODY..].to_vec());
         }
-        out
     }
 
     /// Deposits the provider refused, as last reported. Non-zero means content was lost.
@@ -455,13 +511,10 @@ impl ClientRunner {
         req[1..33].copy_from_slice(&self.client.collect_key());
         let _ = self.collect_sock.send_to(&req, self.provider_collect);
 
-        let mut buf = [0u8; RESPONSE_BYTES];
-        while let Ok((n, from)) = self.collect_sock.recv_from(&mut buf) {
-            if n != RESPONSE_BYTES || from != self.provider_collect || buf[0] != STATUS_ITEM {
-                continue;
-            }
-            self.refused_seen = u64::from_le_bytes(buf[1..9].try_into().expect("8 bytes"));
-            if let Some(m) = self.client.accept(&buf[RESP_BODY..]) {
+        self.pump();
+        let mine = (self.provider_collect, self.client.mailbox());
+        for env in self.pending.remove(&mine).unwrap_or_default() {
+            if let Some(m) = self.client.accept(&env) {
                 // Loops are absorbed rather than surfaced. An application must never see
                 // them, or the detector becomes visible in the application's behaviour.
                 let is_loop = self.sentinel.as_mut().is_some_and(|s| s.absorb(&m));
