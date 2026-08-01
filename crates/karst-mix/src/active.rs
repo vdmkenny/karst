@@ -25,10 +25,16 @@
 //!
 //! # 2. Loop cover traffic makes suppression loud
 //!
-//! Clients and mixes send packets addressed back to themselves. A suppressed loop is a
-//! loop that never returns, which is evidence. The more packets an attack must suppress,
-//! the more certainly it is detected. This is why the *cost* of the n-1 attack is the
-//! security property, not just its possibility.
+//! Clients and mixes send packets addressed back to themselves. A suppressed loop is a loop
+//! that never returns, which is evidence. The more packets an attack must suppress, the more
+//! certainly it is detected. This is why the *cost* of the n-1 attack is the security
+//! property, not just its possibility.
+//!
+//! The detection probability computed here is a per-packet model. [`crate::loops`] implements
+//! the mechanism and answers the operational question instead: against a 5% ambient loss
+//! baseline at a 0.001 false alarm rate, a 50% suppression is called within **8 completed
+//! loops** and a 30% suppression within 20. An n-1 drain against a Poisson mix costs hundreds
+//! of suppressed packets, so the alarm fires far inside the attack.
 //!
 //! # 3. Batching needs a clock, and continuous time does not
 //!

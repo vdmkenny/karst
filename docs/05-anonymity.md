@@ -72,12 +72,36 @@ observation window, which means a larger anonymity set per packet.
 
 ### 3.3 Loop cover traffic
 
-Nodes send loops: packets addressed back to themselves, routed through the network like
-any other. Mixes do the same.
+Nodes send loops: packets addressed back to themselves, routed through the network like any
+other. Because Sphinx hides the destination and payload from every intermediate hop, a loop is
+indistinguishable from real traffic, so **an adversary cannot suppress traffic without
+suppressing loops**.
 
-Consequence: an adversary who drops or delays traffic to observe the effect (an active
-attack) reveals themselves, because loops that fail to return are evidence. This turns
-the classic n-1 and flooding attacks from cheap and invisible into detectable.
+The easy half is sending them. The hard half is that networks drop packets anyway: a detector
+that alarms on any loss cries wolf every congested evening and gets turned off, and one that
+demands certainty never fires. So detection is a one-sided binomial test against a **measured**
+baseline, with an explicit false alarm rate.
+
+Against a 5% ambient loss baseline at a 0.001 false alarm rate:
+
+| Suppression | Loops to call it |
+|---|---|
+| 80% | 4 |
+| 50% | 8 |
+| 30% | 20 |
+| 15% | 80 |
+| 10% | 250 |
+| 6% | 4,900 |
+| 5% or below | **never** |
+
+An n-1 drain against a Poisson mix costs hundreds of suppressed packets (§9), so the alarm
+fires far inside the attack.
+
+**The limit is the bottom row.** An adversary who suppresses no more than the network already
+loses is invisible to this mechanism, permanently, and a lower ambient loss rate is what buys
+sensitivity: at a 1% baseline a 5% suppression is called within 140 loops rather than never.
+`samples_to_detect` returns nothing rather than a number in that region, so the limit is in the
+API instead of a footnote.
 
 ### 3.4 Path selection without a consensus document
 
