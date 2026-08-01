@@ -1,0 +1,10 @@
+[package]
+name = "karst-witness"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "L8 Witness: countersigning that a publisher only ever moved forward"
+
+[dependencies]
+karst-id.workspace = true
+karst-object.workspace = true
