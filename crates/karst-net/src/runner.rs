@@ -175,6 +175,69 @@ impl NodeRunner {
     }
 }
 
+/// Cover packets, built before they are needed.
+///
+/// The pacer decides *when* to emit without reference to the queue, which is the property that
+/// matters. It is not sufficient on its own. If a real emission is a queue pop and a cover
+/// emission builds a Sphinx packet from scratch, the two cost very different amounts of CPU
+/// and reach the socket at measurably different offsets from the scheduled instant. An
+/// observer with fine timing resolution separates real from cover without breaking anything.
+///
+/// So cover is built ahead of time and emission is a pop either way.
+///
+/// # Refilling is constant work
+///
+/// Refilling only when the pool is low would leak in the same way by a longer route: the pool
+/// drains when cover is emitted, cover is emitted when there is no real traffic, so refill
+/// effort would run *inversely* to how much the client is saying. Every call builds the same
+/// number of packets and discards what will not fit. That is wasteful on purpose.
+pub struct CoverPool {
+    ready: std::collections::VecDeque<Dispatch>,
+    target: usize,
+    per_refill: usize,
+    /// Times the pool was empty when a slot came due and a packet had to be built inline.
+    /// Non-zero means the timing channel above was open for that many emissions.
+    pub lazy: u64,
+}
+
+impl CoverPool {
+    pub fn new(target: usize) -> Self {
+        CoverPool {
+            ready: std::collections::VecDeque::with_capacity(target),
+            target,
+            per_refill: 1,
+            lazy: 0,
+        }
+    }
+
+    pub fn ready(&self) -> usize {
+        self.ready.len()
+    }
+
+    /// Build a fixed number of cover packets, whatever the pool already holds.
+    pub fn refill(
+        &mut self,
+        client: &Client,
+        dir: &Directory,
+        toward: u16,
+        rng: &mut impl rand::Rng,
+    ) {
+        for _ in 0..self.per_refill {
+            let Ok(d) = client.cover(dir, toward, rng) else {
+                return;
+            };
+            if self.ready.len() >= self.target {
+                self.ready.pop_front();
+            }
+            self.ready.push_back(d);
+        }
+    }
+
+    pub fn take(&mut self) -> Option<Dispatch> {
+        self.ready.pop_front()
+    }
+}
+
 /// A client, running.
 pub struct ClientRunner {
     pub client: Client,
@@ -183,9 +246,11 @@ pub struct ClientRunner {
     provider_collect: SocketAddr,
     /// Paces dispatches rather than packets, so a packet and its entry node cannot separate.
     pacer: Pacer<Dispatch>,
+    cover: CoverPool,
     dir: Directory,
     started: Instant,
     cover_toward: u16,
+    sentinel: Option<crate::sentinel::Sentinel>,
     pub received: Vec<Vec<u8>>,
 }
 
@@ -205,12 +270,38 @@ impl ClientRunner {
             collect_sock,
             provider_collect,
             pacer: Pacer::new(lambda_per_sec),
+            cover: CoverPool::new(64),
             dir,
             started: Instant::now(),
             cover_toward,
+            sentinel: None,
             client,
             received: Vec::new(),
         })
+    }
+
+    /// Start sending loops, so that traffic disappearing becomes something noticed.
+    pub fn watching(mut self, sentinel: crate::sentinel::Sentinel) -> Self {
+        self.sentinel = Some(sentinel);
+        self
+    }
+
+    pub fn sentinel(&self) -> Option<&crate::sentinel::Sentinel> {
+        self.sentinel.as_ref()
+    }
+
+    /// Send one loop through the network to a mailbox this client owns.
+    pub fn dispatch_loop(&mut self) {
+        let now = self.now_ms();
+        let Some(s) = self.sentinel.as_mut() else {
+            return;
+        };
+        let mut rng = rand::thread_rng();
+        if let Ok(ds) = s.dispatch(&self.client, &self.dir, now, &mut rng) {
+            for d in ds {
+                let _ = self.pacer.offer(d);
+            }
+        }
     }
 
     fn now_ms(&self) -> u64 {
@@ -234,18 +325,28 @@ impl ClientRunner {
         self.pacer.stats()
     }
 
+    /// How many emissions had to build their cover inline. Should stay zero.
+    pub fn lazy_cover(&self) -> u64 {
+        self.cover.lazy
+    }
+
     /// One pass: emit whatever the schedule calls for.
     pub fn step(&mut self) {
         let now = self.now_ms();
         let dir = &self.dir;
         let client = &self.client;
         let toward = self.cover_toward;
+        let pool = &mut self.cover;
 
-        let emitted = self.pacer.tick(now, || {
-            let mut rng = rand::thread_rng();
-            client
-                .cover(dir, toward, &mut rng)
-                .expect("the directory must always admit a cover route")
+        let emitted = self.pacer.tick(now, || match pool.take() {
+            Some(d) => d,
+            None => {
+                pool.lazy += 1;
+                let mut rng = rand::thread_rng();
+                client
+                    .cover(dir, toward, &mut rng)
+                    .expect("the directory must always admit a cover route")
+            }
         });
 
         for d in emitted {
@@ -253,10 +354,16 @@ impl ClientRunner {
                 let _ = self.transport.send(info.addr, &d.packet);
             }
         }
+
+        // Constant work, after the emission rather than during it.
+        let mut rng = rand::thread_rng();
+        self.cover
+            .refill(&self.client, &self.dir, self.cover_toward, &mut rng);
     }
 
     /// Ask the provider for one item.
     pub fn poll_mail(&mut self) {
+        let now = self.now_ms();
         let _ = self
             .collect_sock
             .send_to(&self.client.mailbox(), self.provider_collect);
@@ -267,8 +374,16 @@ impl ClientRunner {
                 continue;
             }
             if let Some(m) = self.client.accept(&buf[1..]) {
-                self.received.push(m);
+                // Loops are absorbed rather than surfaced. An application must never see
+                // them, or the detector becomes visible in the application's behaviour.
+                let is_loop = self.sentinel.as_mut().is_some_and(|s| s.absorb(&m));
+                if !is_loop {
+                    self.received.push(m);
+                }
             }
+        }
+        if let Some(s) = self.sentinel.as_mut() {
+            s.expire(now);
         }
     }
 }

@@ -203,6 +203,56 @@ stay hidden is which *incoming* packet it was, and that is the delay's job.
 
 ---
 
+## Cover is built before it is needed
+
+The pacer draws its schedule without reference to the queue, and that is not sufficient on its
+own. If a real emission is a queue pop and a cover emission builds a Sphinx packet from
+scratch, the two cost very different amounts of CPU and reach the socket at measurably
+different offsets from the scheduled instant. **An observer with fine timing resolution then
+separates real from cover without breaking anything.**
+
+Cover is therefore built ahead of time into a pool, and emission is a pop either way.
+
+Refilling only when the pool is low would leak the same thing by a longer route: the pool
+drains when cover is emitted, cover is emitted when there is no real traffic, so refill effort
+would run *inversely* to how much the client is saying. Every step builds the same number of
+packets and discards what will not fit. That is wasteful on purpose.
+
+When the pool is empty a packet is still built inline, because a missed emission is a gap and a
+gap is the signal all of this exists to remove. That case is counted rather than hidden, so the
+exposure is measurable.
+
+---
+
+## Loops, and what they can and cannot see
+
+Loopix routes a mix loop back to the mix that sent it, which a strictly layered topology cannot
+express: there is no path from layer *i* forward to layer *i* again. The **client** loop needs
+no such thing. A party addresses a message to a mailbox **it owns**, and collects it like any
+other. It traverses the same layers, sits in the same kind of box, and is indistinguishable
+from real mail to every node it passes and to the provider holding it, because it is real mail.
+
+Nothing can drop a party's traffic without dropping its loops at the same rate, which is
+exactly the quantity being estimated.
+
+Live, in the demo: a healthy network raises no alarm across 29 loops. Stopping one of two
+entry-layer mixes produces 25.6% measured loss against a 5% baseline at p = 4.5e-10.
+
+Three limits, all stated as passing tests rather than papered over:
+
+- **Below the baseline is invisible**, and no amount of sampling changes it. This is a property
+  of the mechanism, not a defect in it, and an operator who does not know it will read silence
+  as safety.
+- **A replayed loop cannot manufacture a healthy reading.** A returning nonce is consumed on
+  first sight, so an adversary who drops traffic cannot replay one survivor to cover it.
+- **A slow loop is not a lost one**, so the timeout is a security parameter: too short and the
+  detector alarms on latency, too long and it is slow to notice.
+
+Detection is not prevention. It converts a silent attack into a loud one, which is the same
+move this design keeps making.
+
+---
+
 ## A claim withdrawn
 
 An earlier version of this work asserted that a continuous mix is immune to the n-1 attack.
@@ -232,8 +282,12 @@ probabilistic one; it does not eliminate it.** The residue is handled by loop co
   wall clock, and the defended clock deliberately does not track wall time. An adversary who
   shifts a mix's clock past the sync tolerance turns the window into a targeted drop primitive.
   No paper appears to write that attack up.
-- **Loop cover in the running node.** `karst-mix::loops` detects dropping and is not wired into
-  `karst-node`, so the n-1 residue above is currently undefended in the running network.
+- **Mix loops.** Clients loop; mixes do not. A mix cannot currently detect that it is being
+  starved or flooded, only a client can detect that its own traffic is vanishing. A mix could
+  act as a client for this purpose, addressing loops to a mailbox it owns, and does not yet.
+- **What to do when the alarm fires.** Loopix compares against a public threshold and changes
+  behaviour. Getting that wrong is its own attack: a mix that stops forwarding on alarm can be
+  silenced by anyone able to drop its loops. The alarm currently reports and nothing acts on it.
 - **Guards.** Selection is uniform within a layer. Whether persistent entry guards are right
   here is open, and guard placement attacks defeat Counter-RAPTOR, DeNASA and LASTor, with
   0.216% of bandwidth reaching 18.22% of guard selections (Hanley, Sun, Wagh, Mittal, PoPETs

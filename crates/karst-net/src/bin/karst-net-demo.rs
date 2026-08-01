@@ -12,7 +12,9 @@ use karst_id::Identity;
 use karst_mix::packet::MixKey;
 use karst_net::client::Client;
 use karst_net::directory::{Directory, NodeInfo};
+use karst_mix::loops::Baseline;
 use karst_net::runner::{ClientRunner, NodeRunner};
+use karst_net::sentinel::Sentinel;
 use karst_node::MixNode;
 
 const LAYERS: u8 = 4;
@@ -84,16 +86,21 @@ fn main() -> std::io::Result<()> {
         LAYERS
     ));
 
-    // Each node runs itself.
+    // Each node runs itself. One stop flag per node, so a node can be taken down alone.
     let stop = Arc::new(AtomicBool::new(false));
+    let mut kill: Vec<Arc<AtomicBool>> = Vec::new();
     let mut threads = Vec::new();
     let counts = Arc::new(std::sync::Mutex::new(Vec::new()));
     for mut r in runners {
         let stop = Arc::clone(&stop);
         let counts = Arc::clone(&counts);
+        let mine = Arc::new(AtomicBool::new(false));
+        kill.push(Arc::clone(&mine));
         threads.push(std::thread::spawn(move || {
             while !stop.load(Ordering::Relaxed) {
-                r.step();
+                if !mine.load(Ordering::Relaxed) {
+                    r.step();
+                }
                 std::thread::sleep(Duration::from_millis(1));
             }
             counts.lock().unwrap().push((r.id, r.stats(), r.holding()));
@@ -112,7 +119,11 @@ fn main() -> std::io::Result<()> {
     println!("  bob    {}", bob_c.address().short());
     note("A contact is a mailbox tag, a sealing key and a provider. No name, no location.");
 
-    let mut alice = ClientRunner::new(alice_c, local(), dir.clone(), collect_at, LAMBDA)?;
+    // Loops are sent to a mailbox the client owns, so their absence is measurable. The
+    // baseline is set here rather than learned, because a baseline learned from a channel the
+    // adversary sits on can be walked upward until nothing looks wrong.
+    let mut alice = ClientRunner::new(alice_c, local(), dir.clone(), collect_at, LAMBDA)?
+        .watching(Sentinel::new(Baseline::Fixed(0.05), 0.001, 4_000));
     let mut bob = ClientRunner::new(bob_c, local(), dir.clone(), collect_at, LAMBDA)?;
 
     rule("Both clients emit at a constant rate before anything is said");
@@ -176,6 +187,61 @@ fn main() -> std::io::Result<()> {
         Some(m) => println!("  \x1b[32m{}\x1b[0m", String::from_utf8_lossy(m)),
         None => println!("  \x1b[31mno reply\x1b[0m"),
     }
+
+    rule("Alice keeps sending loops to herself, and the network is healthy");
+
+    let mut spin = |a: &mut ClientRunner, b: &mut ClientRunner, ms: u64, loops: u64| {
+        let t = Instant::now();
+        let mut sent = 0;
+        while t.elapsed() < Duration::from_millis(ms) {
+            if sent < loops && t.elapsed().as_millis() as u64 > sent * (ms / loops.max(1)) {
+                a.dispatch_loop();
+                sent += 1;
+            }
+            a.step();
+            b.step();
+            a.poll_mail();
+            std::thread::sleep(Duration::from_millis(2));
+        }
+    };
+    spin(&mut alice, &mut bob, 6_000, 30);
+    if let Some(s) = alice.sentinel() {
+        println!(
+            "  {} loops accounted for, loss {:.1}%",
+            s.samples(),
+            s.loss_rate() * 100.0
+        );
+        match s.alarm() {
+            None => println!("  \x1b[32mno alarm\x1b[0m"),
+            Some(a) => println!("  \x1b[31malarm: {:.1}% loss, p={:.2e}\x1b[0m", a.observed_rate * 100.0, a.p_value),
+        }
+    }
+    note("Loops are ordinary mail addressed to a mailbox alice owns. No node can tell one from");
+    note("real traffic, so no node can drop one and not the other.");
+
+    rule("Now a mix stops forwarding");
+
+    kill[0].store(true, Ordering::Relaxed);
+    println!("  node 0 is down. Half of alice's routes enter through it.");
+    spin(&mut alice, &mut bob, 12_000, 60);
+    if let Some(s) = alice.sentinel() {
+        println!(
+            "  {} loops accounted for, loss {:.1}%",
+            s.samples(),
+            s.loss_rate() * 100.0
+        );
+        match s.alarm() {
+            None => println!("  \x1b[33mno alarm yet\x1b[0m"),
+            Some(a) => println!(
+                "  \x1b[31malarm: {:.1}% loss against a {:.0}% baseline, p={:.2e}\x1b[0m",
+                a.observed_rate * 100.0,
+                a.baseline_rate * 100.0,
+                a.p_value
+            ),
+        }
+    }
+    note("An adversary who stays under the baseline is invisible to this, and no amount of");
+    note("sampling changes that. Detection is not prevention.");
 
     rule("What each node saw");
 

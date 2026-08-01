@@ -35,8 +35,8 @@ list of everything the design makes worse.
 > [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 315 tests
-cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets
+cargo test          # 333 tests
+cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
 cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?
