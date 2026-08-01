@@ -370,6 +370,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "karst-member"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "curve25519-dalek",
+ "karst-id",
+ "rand",
+]
+
+[[package]]
 name = "karst-mix"
 version = "0.1.0"
 dependencies = [

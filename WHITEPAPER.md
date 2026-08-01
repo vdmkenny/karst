@@ -415,7 +415,8 @@ avoids. See §6.11.
 
 ### L5 Membership
 
-*Fixes error 03. Status: sketched.*
+*Fixes error 03. Status: **built** (`karst-member`), and claiming much less than the layer was
+originally specified to claim.*
 
 **Lever removed.** The list of everyone reachable, and the national block list built from
 it.
@@ -440,6 +441,53 @@ identifying, mapping directly onto your real social graph, which is worse than a
 guard set if it leaks. See §6.3.
 
 ---
+
+**What the literature refuses to allow.** Membership concealment in the sense of Vasserman,
+Jansen, Tyra, Hopper and Kim (CCS 2009) is achievable and requires a **Membership and Invitation
+Authority**: a trusted central party issuing keys, handling every invitation, and enforcing a
+global degree constraint. This design cannot have one. They also prove the ceiling regardless:
+no overlay permitting peer communication holds exposure below `Theta(L + G)` in the adversary's
+budget, because some node must deliver to each identity the adversary controls or watches.
+**Linear exposure is the floor.**
+
+**The deployed attempt, read honestly.** Tor bridges are this in production. China broke the
+HTTPS distribution channel in September 2009 and the mail one in March 2010, "by just pretending
+to be enough legitimate users from enough different subnets"; by 2011 the pools in distribution
+were 176 bridges and 201 bridges, against a state. Distribution was not even the weak part: Ling,
+Luo, Yu, Yang and Fu (INFOCOM 2012) enumerated 2,369 bridges from **one malicious middle relay
+in fourteen days**, matching a month of enumeration across 500 PlanetLab nodes. Tor's structural
+answer, proposal 188, remains Reserve, shelved in 2020 because the attack was not observed in
+use rather than because it was fixed.
+
+**And social-graph admission is not a mechanism, it is a hope.** The SybilGuard family assumes
+sybils form a tight region behind a sparse cut. Yang and colleagues measured a live network with
+hundreds of thousands of real sybils and found they integrate like ordinary users, with most
+sybil-to-sybil links accidental. Alvisi and colleagues then scored those schemes under the real
+attack shape, where 0.5 is a coin flip: SybilLimit 0.45, SybilGuard 0.44, Gatekeeper 0.49, one
+variant 0.34. **Four of five at or below chance.** Mohaisen, Yun and Kim had already shown the
+mixing-time assumption fails, and that the graphs with real trust semantics are the slow-mixing
+ones. So no admission decision is made here, because there is no admission decision anyone knows
+how to make.
+
+**What is claimed instead.** Two things, both smaller and both true.
+
+*There is no roll.* No registry, no directory, no list anyone holds. Weaker than concealment,
+since an adversary watching enough of the network still learns who is on it at the linear rate
+above. What it removes is the single object whose seizure hands over everyone at once.
+
+*Introduction is a relationship rather than an admission.* Two parties who already share a
+contact discover that fact without either revealing their contacts, using balanced two-party
+private set intersection, which is the one thing in this area that is cheap: tens of kilobytes
+and milliseconds at a thousand contacts a side. Nobody ships it, and the reason is instructive.
+A survey of eleven messengers found five uploading contacts in plaintext, five uploading
+trivially reversible hashes, one using trusted hardware, and none using PSI; Signal evaluated it
+and chose an enclave. But their problem is a phone against a billion-row registry, the
+**unbalanced** case, and two peers comparing address books is not that problem.
+
+**Cost.** An intersection with a set of one is a membership query, and no amount of cryptography
+changes that. Padding hides how many contacts a party holds, not what they asked about. An
+introduction protocol built on PSI is therefore a membership oracle for anyone willing to run it
+repeatedly, and the defences are rate limiting and not running it with strangers.
 
 ### L6 Objects
 

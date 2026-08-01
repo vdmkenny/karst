@@ -35,7 +35,7 @@ list of everything the design makes worse.
 > [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 467 tests
+cargo test          # 478 tests
 cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-index --bin karst-search    # discovery with 200,000 sybils in the room
 cargo run --release -p karst-stack --bin karst-stack-demo  # the whole stack, composed
@@ -48,6 +48,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | Crate | Layer | What it does |
 |---|---|---|
 | [`karst-id`](crates/karst-id) | L2 Identity | Address is the hash of a locally generated key. No registrar, nothing to seize. |
+| [`karst-member`](crates/karst-member) | L5 Membership | No roll to enumerate, and introduction by shared contact via private set intersection. |
 | [`karst-object`](crates/karst-object) | L6 Objects | Canonical encoding, signed immutable objects, offline verification. |
 | [`karst-blob`](crates/karst-blob) | L6/L7 Files | Chunked merkle manifests, automatic dedup, verified seeking, measured swarm delivery. |
 | [`karst-doc`](crates/karst-doc) | L10 Document | A typed content-addressed node graph. Not a markup language. |
