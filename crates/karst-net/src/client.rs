@@ -130,10 +130,11 @@ impl Client {
             // The tag is authenticated but not encrypted, since a provider must read it to
             // file the mail. Binding it means a sealed blob cannot be lifted into another box.
             let sealed = karst_seal::seal(&to.sealing, &to.mailbox, &f.encode());
-            debug_assert_eq!(sealed.len(), frame::SEALED_BYTES);
+            debug_assert_eq!(sealed.len(), frame::BODY_BYTES);
 
             let mut payload = Vec::with_capacity(frame::FRAGMENT_BYTES);
             payload.extend_from_slice(&to.mailbox);
+            payload.push(frame::ENV_SEALED);
             payload.extend_from_slice(&sealed);
 
             let route = dir.route_to(to.provider, rng).map_err(SendError::Route)?;
@@ -166,14 +167,82 @@ impl Client {
         })
     }
 
-    /// Take a sealed blob out of the box. Returns a message when the last fragment lands.
+    /// Publish to a feed, readable by anyone who collects the tag.
+    ///
+    /// Not sealed, because it is not addressed to anyone. Content published for the world is
+    /// content the provider holding it can read, and pretending otherwise by encrypting it to
+    /// a key everyone has would be theatre. What stays hidden is who publishes it, which is
+    /// L4's job, and who reads it, which is not solved.
+    pub fn publish(
+        &self,
+        dir: &Directory,
+        feed: Tag,
+        provider: u16,
+        message: &[u8],
+        rng: &mut impl Rng,
+    ) -> Result<Vec<Dispatch>, SendError> {
+        let mut msg_id = [0u8; 16];
+        rng.fill(&mut msg_id);
+        let frags = frame::split(msg_id, message).map_err(|_| SendError::MessageTooLarge)?;
+
+        let mut out = Vec::with_capacity(frags.len());
+        for f in frags {
+            let inner = f.encode();
+            let mut body = vec![0u8; frame::BODY_BYTES];
+            body[..inner.len()].copy_from_slice(&inner);
+            // The remainder is padding an observer cannot distinguish from sealing overhead,
+            // which is why open and sealed bodies are the same width.
+            rng.fill(&mut body[inner.len()..]);
+
+            let mut payload = Vec::with_capacity(frame::FRAGMENT_BYTES);
+            payload.extend_from_slice(&feed);
+            payload.push(frame::ENV_OPEN);
+            payload.extend_from_slice(&body);
+
+            let route = dir.route_to(provider, rng).map_err(SendError::Route)?;
+            let mut seed = [0u8; 32];
+            rng.fill(&mut seed);
+            out.push(Dispatch {
+                via: route[0].id,
+                packet: Packet::wrap(&route, &payload, seed).map_err(SendError::Mix)?,
+            });
+        }
+        Ok(out)
+    }
+
+    /// Take an envelope out of the box. Returns a message when the last fragment lands.
     ///
     /// Anything that does not open, or does not decode, is discarded silently. A provider can
     /// put arbitrary bytes in a box and must learn nothing from what happens next.
-    pub fn accept(&mut self, sealed: &[u8]) -> Option<Vec<u8>> {
-        let inner = self.sealing.open(&self.mailbox, sealed).ok()?;
-        let f = Fragment::decode(&inner).ok()?;
+    pub fn accept(&mut self, envelope: &[u8]) -> Option<Vec<u8>> {
+        self.accept_into(envelope, None)
+    }
+
+    /// Take an envelope belonging to a feed rather than to this client's mailbox.
+    pub fn accept_open(&mut self, envelope: &[u8]) -> Option<Vec<u8>> {
+        if envelope.len() != frame::ENVELOPE_BYTES || envelope[0] != frame::ENV_OPEN {
+            return None;
+        }
+        let f = Fragment::decode(&envelope[1..1 + frame::INNER_BYTES]).ok()?;
         self.inbox.accept(f).ok().flatten()
+    }
+
+    fn accept_into(&mut self, envelope: &[u8], _hint: Option<()>) -> Option<Vec<u8>> {
+        if envelope.len() != frame::ENVELOPE_BYTES {
+            return None;
+        }
+        match envelope[0] {
+            frame::ENV_SEALED => {
+                let inner = self.sealing.open(&self.mailbox, &envelope[1..]).ok()?;
+                let f = Fragment::decode(&inner).ok()?;
+                self.inbox.accept(f).ok().flatten()
+            }
+            frame::ENV_OPEN => {
+                let f = Fragment::decode(&envelope[1..1 + frame::INNER_BYTES]).ok()?;
+                self.inbox.accept(f).ok().flatten()
+            }
+            _ => None,
+        }
     }
 }
 

@@ -24,11 +24,31 @@ pub const FRAGMENT_BYTES: usize = PAYLOAD_BYTES - 4;
 /// The mailbox a fragment is filed under, in clear, because a provider must read it to file it.
 pub const MAILBOX_BYTES: usize = 32;
 
-/// Space for the sealed blob.
-pub const SEALED_BYTES: usize = FRAGMENT_BYTES - MAILBOX_BYTES;
+/// Space for the envelope.
+pub const ENVELOPE_BYTES: usize = FRAGMENT_BYTES - MAILBOX_BYTES;
+
+/// One byte says whether the body is sealed to a recipient or open to anyone.
+///
+/// A provider learns which of the two it is holding. That is not a leak worth avoiding: feed
+/// tags are derived from a publisher's address and are computable by anyone, so a provider
+/// already knows which of its boxes are public. What it must not learn is the content of the
+/// sealed ones, and it does not.
+pub const ENVELOPE_HEADER: usize = 1;
+
+/// Space for the body, whichever kind it is. Identical either way, so an observer counting
+/// bytes learns nothing that the tag did not already tell them.
+pub const BODY_BYTES: usize = ENVELOPE_BYTES - ENVELOPE_HEADER;
+
+/// Kept for callers that only handle private mail.
+pub const SEALED_BYTES: usize = ENVELOPE_BYTES;
 
 /// Space for the fragment once sealing has taken its overhead.
-pub const INNER_BYTES: usize = SEALED_BYTES - karst_seal::OVERHEAD;
+pub const INNER_BYTES: usize = BODY_BYTES - karst_seal::OVERHEAD;
+
+/// Sealed to one recipient.
+pub const ENV_SEALED: u8 = 1;
+/// Readable by anyone, for content that is published rather than sent.
+pub const ENV_OPEN: u8 = 2;
 
 /// Header inside the sealed blob: message id, index, total, and the used length.
 pub const INNER_HEADER: usize = 16 + 2 + 2 + 2;
@@ -347,4 +367,17 @@ mod tests {
         bytes[20..22].copy_from_slice(&(DATA_BYTES as u16 + 1).to_le_bytes());
         assert_eq!(Fragment::decode(&bytes), Err(FrameError::Malformed));
     }
+    /// Both envelope kinds must occupy exactly the same space.
+    ///
+    /// If open and sealed bodies differed in length, the length would say which, and a
+    /// publisher's private mail would be distinguishable from their public feed on the wire.
+    #[test]
+    fn open_and_sealed_bodies_are_the_same_size() {
+        assert_eq!(ENVELOPE_HEADER + BODY_BYTES, ENVELOPE_BYTES);
+        assert_eq!(MAILBOX_BYTES + ENVELOPE_BYTES, FRAGMENT_BYTES);
+        // A sealed body is the inner fragment plus sealing overhead, and an open body is the
+        // inner fragment plus padding of exactly the same width.
+        assert_eq!(INNER_BYTES + karst_seal::OVERHEAD, BODY_BYTES);
+    }
+
 }

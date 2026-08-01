@@ -35,14 +35,14 @@ use karst_wire::{Pacer, UdpTransport};
 
 use crate::client::{Client, Contact, Dispatch, SendError};
 use crate::directory::Directory;
-use crate::frame::SEALED_BYTES;
+use crate::frame::ENVELOPE_BYTES;
 use crate::provider::{Provider, Tag};
 
 /// A collection request: a bare tag.
 pub const REQUEST_BYTES: usize = 32;
 
 /// A collection response: one status byte and a fixed body, whether or not there was mail.
-pub const RESPONSE_BYTES: usize = 1 + SEALED_BYTES;
+pub const RESPONSE_BYTES: usize = 1 + ENVELOPE_BYTES;
 
 const STATUS_EMPTY: u8 = 0;
 const STATUS_ITEM: u8 = 1;
@@ -359,6 +359,38 @@ impl ClientRunner {
         let mut rng = rand::thread_rng();
         self.cover
             .refill(&self.client, &self.dir, self.cover_toward, &mut rng);
+    }
+
+    /// Hand a publication to the link, addressed to a feed rather than to a person.
+    pub fn publish(&mut self, feed: Tag, message: &[u8]) -> Result<(), SendError> {
+        let mut rng = rand::thread_rng();
+        let toward = self.cover_toward;
+        for d in self
+            .client
+            .publish(&self.dir, feed, toward, message, &mut rng)?
+        {
+            let _ = self.pacer.offer(d);
+        }
+        Ok(())
+    }
+
+    /// Collect raw envelopes from any box, not only this client's own.
+    ///
+    /// A feed tag is derivable from a publisher's address, so asking for one tells the
+    /// provider which publisher this client follows. That is the exposure this design does not
+    /// close, and calling it out here rather than in a comment somewhere else is deliberate:
+    /// it is the same gap as #53, reached by a different road.
+    pub fn poll_tag(&mut self, tag: Tag) -> Vec<Vec<u8>> {
+        let _ = self.collect_sock.send_to(&tag, self.provider_collect);
+        let mut out = Vec::new();
+        let mut buf = [0u8; RESPONSE_BYTES];
+        while let Ok((n, _)) = self.collect_sock.recv_from(&mut buf) {
+            if n != RESPONSE_BYTES || buf[0] != STATUS_ITEM {
+                continue;
+            }
+            out.push(buf[1..].to_vec());
+        }
+        out
     }
 
     /// Ask the provider for one item.

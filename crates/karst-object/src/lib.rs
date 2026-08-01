@@ -399,6 +399,64 @@ impl Object {
         ))
     }
 
+    /// The wire form of an object.
+    ///
+    /// An object that cannot leave the process it was made in is not much of an object. The
+    /// encoding is the same canonical form everything else uses, so it is length-prefixed,
+    /// deterministic, and refuses rather than repairing.
+    ///
+    /// The signature travels with it and is checked on the way in, never inferred from where
+    /// the bytes came from. That is the whole point of L6: **provenance rides with the object
+    /// rather than with the connection**, so an object learned from an adversary is exactly as
+    /// trustworthy as one learned from its author.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut e = Enc::new();
+        e.str("karst.object.wire.v1")
+            .str(&self.kind)
+            .bytes(&self.author_key)
+            .opt_cid(self.supersedes.as_ref())
+            .u64(self.seq)
+            .bytes(&self.payload)
+            .bytes(&self.signature);
+        e.finish()
+    }
+
+    /// Read an object off the wire.
+    ///
+    /// Structural only. It does not verify, because verification is a separate decision a
+    /// caller makes with a key in hand, and folding the two together would make it possible to
+    /// hold an object whose signature nobody ever checked.
+    pub fn decode(bytes: &[u8]) -> Result<Object, ObjectError> {
+        let mut d = Dec::new(bytes);
+        let magic = d.str().map_err(|_| ObjectError::CidMismatch)?;
+        if magic != "karst.object.wire.v1" {
+            return Err(ObjectError::CidMismatch);
+        }
+        let kind = d.str().map_err(|_| ObjectError::CidMismatch)?;
+        let author_key: [u8; 32] = d
+            .bytes()
+            .map_err(|_| ObjectError::CidMismatch)?
+            .try_into()
+            .map_err(|_| ObjectError::CidMismatch)?;
+        let supersedes = d.opt_cid().map_err(|_| ObjectError::CidMismatch)?;
+        let seq = d.u64().map_err(|_| ObjectError::CidMismatch)?;
+        let payload = d.bytes().map_err(|_| ObjectError::CidMismatch)?.to_vec();
+        let signature: [u8; 64] = d
+            .bytes()
+            .map_err(|_| ObjectError::CidMismatch)?
+            .try_into()
+            .map_err(|_| ObjectError::CidMismatch)?;
+        d.end().map_err(|_| ObjectError::CidMismatch)?;
+        Ok(Object {
+            kind,
+            author_key,
+            supersedes,
+            seq,
+            payload,
+            signature,
+        })
+    }
+
     pub fn author(&self) -> Result<Address, ObjectError> {
         Address::from_key_bytes(&self.author_key).map_err(|_| ObjectError::MalformedAuthorKey)
     }
@@ -1085,4 +1143,68 @@ mod tests {
         assert!(v1.verify().is_ok());
         assert_ne!(v1.cid(), v2.cid());
     }
+    /// An object must survive a round trip through bytes, exactly.
+    #[test]
+    fn an_object_round_trips_through_its_wire_form() {
+        let id = Identity::from_seed([4u8; 32]);
+        for (seq, sup) in [(0u64, None), (7, Some(Cid::of(b"prev")))] {
+            let o = Object::create(&id, "doc", seq, vec![9u8; 300], sup);
+            let bytes = o.encode();
+            let back = Object::decode(&bytes).expect("did not decode");
+            assert_eq!(back.cid(), o.cid());
+            assert_eq!(back.verify().unwrap(), id.address());
+            assert_eq!(back.encode(), bytes, "encoding is not canonical");
+        }
+    }
+
+    /// A tampered wire form must fail verification rather than decoding into something else.
+    ///
+    /// Decoding deliberately does not verify, so this asserts the two-step holds: bytes an
+    /// adversary altered still parse, and then fail at the signature, which is where a
+    /// failure is meaningful.
+    #[test]
+    fn tampered_bytes_parse_and_then_fail_verification() {
+        let id = Identity::from_seed([5u8; 32]);
+        let o = Object::create(&id, "doc", 1, b"original".to_vec(), None);
+        let good = o.encode();
+        let mut caught = 0;
+        for i in 0..good.len() {
+            let mut bad = good.clone();
+            bad[i] ^= 0x01;
+            match Object::decode(&bad) {
+                Err(_) => caught += 1,
+                Ok(obj) => {
+                    assert!(
+                        obj.verify().is_err() || obj.cid() != o.cid(),
+                        "byte {i} was altered and the object still verified as the original"
+                    );
+                    caught += 1;
+                }
+            }
+        }
+        assert_eq!(caught, good.len());
+    }
+
+    /// Trailing bytes must be refused rather than ignored.
+    #[test]
+    fn trailing_bytes_are_refused() {
+        let id = Identity::from_seed([6u8; 32]);
+        let mut bytes = Object::create(&id, "doc", 0, b"x".to_vec(), None).encode();
+        bytes.push(0);
+        assert!(Object::decode(&bytes).is_err());
+    }
+
+    /// Truncation at every length must be refused.
+    #[test]
+    fn every_truncation_is_refused() {
+        let id = Identity::from_seed([7u8; 32]);
+        let bytes = Object::create(&id, "doc", 0, b"some payload".to_vec(), None).encode();
+        for n in 0..bytes.len() {
+            assert!(
+                Object::decode(&bytes[..n]).is_err(),
+                "a {n} byte prefix decoded"
+            );
+        }
+    }
+
 }

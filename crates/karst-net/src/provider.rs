@@ -33,7 +33,7 @@
 
 use std::collections::{BTreeMap, VecDeque};
 
-use crate::frame::{MAILBOX_BYTES, SEALED_BYTES};
+use crate::frame::{ENVELOPE_BYTES, MAILBOX_BYTES};
 
 pub type Tag = [u8; MAILBOX_BYTES];
 
@@ -98,7 +98,7 @@ impl Provider {
     ///
     /// The payload is `[tag][sealed]` and the provider reads only the tag.
     pub fn deposit(&mut self, payload: &[u8]) -> Result<(), DepositError> {
-        if payload.len() != MAILBOX_BYTES + SEALED_BYTES {
+        if payload.len() != MAILBOX_BYTES + ENVELOPE_BYTES {
             return Err(DepositError::WrongSize);
         }
         let mut tag: Tag = [0u8; MAILBOX_BYTES];
@@ -152,7 +152,7 @@ mod tests {
 
     fn payload(tag: u8, body: u8) -> Vec<u8> {
         let mut v = vec![tag; MAILBOX_BYTES];
-        v.extend(std::iter::repeat(body).take(SEALED_BYTES));
+        v.extend(std::iter::repeat(body).take(ENVELOPE_BYTES));
         v
     }
 
@@ -240,7 +240,7 @@ mod tests {
     #[test]
     fn wrong_sized_payloads_are_refused() {
         let mut p = Provider::new();
-        for n in [0usize, 31, MAILBOX_BYTES, MAILBOX_BYTES + SEALED_BYTES - 1, 4096] {
+        for n in [0usize, 31, MAILBOX_BYTES, MAILBOX_BYTES + ENVELOPE_BYTES - 1, 4096] {
             assert_eq!(p.deposit(&vec![0u8; n]), Err(DepositError::WrongSize));
         }
         assert_eq!(p.held(), 0);
