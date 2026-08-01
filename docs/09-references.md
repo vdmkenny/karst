@@ -318,3 +318,37 @@ observe the *earning*, which is evidence that the conflict with membership conce
 structural rather than an oversight. TEARS' PriorityPass construction, which lets relays prevent
 double spending locally without leaking information, is directly relevant to the open question
 in #44.
+
+---
+
+## Three decisions
+
+**Chaum, Fiat, Naor.** *Untraceable Electronic Cash.* CRYPTO 1988.
+
+Double spending reveals the spender rather than being prevented, via cut-and-choose over
+identity shares. Needs no online authority and no consensus, which is what made every
+prevention-shaped option expensive. Cited in `20-three-decisions.md` §1 and implemented in
+`karst-value::doublespend`.
+
+**Camenisch, Hohenberger, Lysyanskaya.** *Compact E-Cash.* EUROCRYPT 2005.
+<https://eprint.iacr.org/2005/060>
+
+A wallet of 2^l unlinkably spendable coins at O(l+k) complexity, and crucially
+**exculpability**: a verifier can prove a double spend to a third party rather than assert it.
+That matters more without an authority than with one. Not implemented.
+
+**Samuel, Mathewson, Cappos, Dingledine.** *Survivable Key Compromise in Software Update
+Systems.* CCS 2010. <https://www.freehaven.net/~arma/tuf-ccs2010.pdf>
+
+TUF. Threshold signing, role separation, key rotation, and the timestamp role's defence against
+**freeze attacks**, where an adversary withholds updates and the client believes it is current
+forever. Cited in `20-three-decisions.md` §3 and implemented as `karst-object::freshness`. Two
+of the four authors are Tor, and the freeze attack is the exact failure mode the Ricochet case
+in `18-documented-attacks.md` demonstrates.
+
+**Biryukov, Pustogarov.** *Proof-of-Work as Anonymous Micropayment: Rewarding a Tor Relay.*
+FC 2015. <https://eprint.iacr.org/2014/1011.pdf>
+
+Blind signatures conceal the *client* from the relay. Cited in `20-three-decisions.md` §2 as
+evidence that the reverse direction, concealing the relay from an observer while still paying
+it, remains unachieved.

@@ -442,6 +442,8 @@ impl fmt::Debug for Object {
 }
 
 /// Object kind for the two halves of a key rotation.
+pub mod freshness;
+
 pub const ROTATION_KIND: &str = "karst.rotation.v1";
 
 /// A completed key rotation: the one legitimate cross-key edge in a lineage.

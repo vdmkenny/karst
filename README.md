@@ -33,7 +33,7 @@ list of everything the design makes worse.
 > [`docs/05-anonymity.md`](docs/05-anonymity.md).
 
 ```bash
-cargo test          # 189 tests
+cargo test          # 202 tests
 cargo run -p karst-demo
 cargo run -p karst-mix --bin karst-mixsim      # anonymity vs passive and active adversaries
 cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capture?
@@ -89,6 +89,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`docs/17-paying-concealed-relays.md`](docs/17-paying-concealed-relays.md) | You cannot conceal that a node relays and pay it for relaying. |
 | [`docs/18-documented-attacks.md`](docs/18-documented-attacks.md) | Audited against three deanonymisations that actually happened. Two would work. |
 | [`docs/19-where-the-design-is-wrong.md`](docs/19-where-the-design-is-wrong.md) | Stocktake: what needs a decision, what needs research, what is merely unbuilt. |
+| [`docs/20-three-decisions.md`](docs/20-three-decisions.md) | Three decisions taken, and why all three option lists were incomplete. |
 | [`docs/08-roadmap.md`](docs/08-roadmap.md) | Phases, mapped to milestones. |
 | [`docs/09-references.md`](docs/09-references.md) | Citations, and an explicit list of claims with none. |
 
