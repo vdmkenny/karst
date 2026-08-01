@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 
 use karst_doc::{Doc, Node, Run};
 use karst_id::Identity;
-use karst_index::complete::{Census, CensusMonitor, Completeness};
+use karst_index::complete::{witnessed_digest, Census, CensusMonitor, Completeness};
 use karst_index::{Announcement, Catalogue, Ranker, Trust};
 use karst_mix::packet::MixKey;
 use karst_net::client::Client;
@@ -359,14 +359,19 @@ fn main() -> std::io::Result<()> {
     let chosen: Vec<_> = witnesses.iter().map(|w| w.address()).collect();
     let policy = WitnessPolicy::new(chosen, 2);
 
+    // The checkpoint commits to the census, not merely alongside it. A census has no back
+    // link of its own, so on its own a publisher can keep two census histories on disjoint
+    // sequence numbers and no witness ever sees either. Binding it here is what puts the
+    // completeness claim under the same chain the witnesses enforce.
+    let bound = witnessed_digest(&census_obj, &doc_cid);
     let cp = Checkpoint {
         publisher: alice_id.address(),
         sequence: 1,
-        digest: doc_cid,
+        digest: bound,
         prev: None,
     };
     let signed = cp.publish(&alice_id);
-    let mut cosigned = Cosigned::new(cp);
+    let mut cosigned = Cosigned::new(&signed).expect("alice signed it");
     for w in witnesses.iter_mut() {
         if let Ok(sig) = w.cosign(&signed) {
             cosigned.attach(w.key(), sig);
@@ -378,6 +383,10 @@ fn main() -> std::io::Result<()> {
         policy.chosen.len()
     );
     println!("  {:?}", policy.accept(None, &cosigned));
+    println!(
+        "  the census bob holds is the one witnessed: {}",
+        census.matches_witnessed(&census_obj, &doc_cid, &cosigned.checkpoint.digest)
+    );
 
     // Now alice tries to show a second reader a different history at the same sequence.
     let forked = Checkpoint {
@@ -387,7 +396,7 @@ fn main() -> std::io::Result<()> {
         prev: None,
     };
     let forked_signed = forked.publish(&alice_id);
-    let mut forked_cosigned = Cosigned::new(forked);
+    let mut forked_cosigned = Cosigned::new(&forked_signed).expect("alice signed it");
     let mut refusals = 0;
     for w in witnesses.iter_mut() {
         match w.cosign(&forked_signed) {
