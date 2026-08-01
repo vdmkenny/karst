@@ -38,6 +38,7 @@ pub mod active;
 pub mod exposure;
 pub mod frontier;
 pub mod intersection;
+pub mod loops;
 pub mod packet;
 pub mod retrieval;
 pub mod sim;
