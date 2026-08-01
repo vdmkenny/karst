@@ -642,8 +642,110 @@ mod tests {
         );
     }
 
+    /// Attenuation must narrow against a parent that actually constrains something.
+    ///
+    /// The previous version issued the root with no caveats at all, so any child was trivially
+    /// narrower and the comparison against a parent was never exercised. Breaking `implies` to
+    /// return true unconditionally would have passed it.
     #[test]
-    fn attenuation_narrows_and_still_verifies() {
+    fn attenuation_narrows_against_a_parent_that_constrains() {
+        let (clinic, person, agent, res) = setup();
+        let root = Capability::issue(
+            &clinic,
+            res,
+            person.address(),
+            vec![
+                Caveat::Operation("book".into()),
+                Caveat::MaxAmount(5_000),
+                Caveat::ExpiresAt(1_000),
+                Caveat::MaxUses(10),
+            ],
+        );
+
+        let scoped = root
+            .attenuate(
+                &person,
+                agent.address(),
+                vec![
+                    Caveat::Operation("book".into()),
+                    Caveat::MaxAmount(500),
+                    Caveat::ExpiresAt(100),
+                    Caveat::MaxUses(1),
+                ],
+            )
+            .expect("a strictly tighter child must be accepted");
+
+        let eff = scoped.verify(clinic.address()).unwrap();
+        // The effective set must hold the tighter value of every kind, not the parent's.
+        assert!(eff.contains(&Caveat::MaxAmount(500)), "kept the looser amount");
+        assert!(eff.contains(&Caveat::ExpiresAt(100)), "kept the looser expiry");
+        assert!(eff.contains(&Caveat::MaxUses(1)), "kept the looser use count");
+        assert!(!eff.contains(&Caveat::MaxAmount(5_000)));
+        assert_eq!(scoped.holder(), Some(agent.address()));
+    }
+
+    /// Every caveat kind must be un-widenable, one at a time.
+    ///
+    /// Testing two kinds together cannot distinguish a rule that checks one from a rule that
+    /// checks both, and the previous version never constrained expiry or use count at all.
+    /// Attenuating cannot widen any caveat kind, whatever the caller asks for.
+    ///
+    /// `attenuate` merges rather than refusing, so it returns `Ok` for a caller who asks to
+    /// loosen something and simply keeps the parent's value. The property is therefore not
+    /// "the call fails" but "the result is never more permissive", and asserting the former
+    /// would have been asserting something the API does not do.
+    #[test]
+    fn attenuating_never_widens_any_caveat_kind() {
+        let (clinic, person, agent, res) = setup();
+        let parent = vec![
+            Caveat::Operation("book".into()),
+            Caveat::MaxAmount(5_000),
+            Caveat::ExpiresAt(1_000),
+            Caveat::MaxUses(10),
+        ];
+        let root = Capability::issue(&clinic, res, person.address(), parent.clone());
+
+        let widenings = [
+            Caveat::Operation("cancel".into()),
+            Caveat::MaxAmount(5_001),
+            Caveat::ExpiresAt(1_001),
+            Caveat::MaxUses(11),
+        ];
+        for w in &widenings {
+            let child = root
+                .attenuate(&person, agent.address(), vec![w.clone()])
+                .expect("attenuate merges rather than refusing");
+            let eff = child.verify(clinic.address()).unwrap();
+            assert!(
+                !eff.contains(w),
+                "attenuating with {w:?} widened the capability"
+            );
+            // The parent's own constraint of that kind survives untouched.
+            let kept = parent
+                .iter()
+                .find(|p| std::mem::discriminant(*p) == std::mem::discriminant(w))
+                .unwrap();
+            assert!(eff.contains(kept), "the parent's {kept:?} was lost");
+        }
+
+        // Positive control: a genuine tightening does take effect, so the loop above is not
+        // passing because nothing ever changes.
+        let tighter = root
+            .attenuate(&person, agent.address(), vec![Caveat::MaxAmount(100)])
+            .unwrap();
+        assert!(tighter
+            .verify(clinic.address())
+            .unwrap()
+            .contains(&Caveat::MaxAmount(100)));
+    }
+
+    /// A forged grant that bypasses attenuation must be caught for every caveat kind.
+    ///
+    /// This is the path an adversary actually takes: they hold a key and sign whatever they
+    /// like rather than calling the API. The previous version forged two kinds at once, which
+    /// cannot distinguish a check that catches one from a check that catches both.
+    #[test]
+    fn a_forged_widening_of_any_single_kind_is_refused() {
         let (clinic, person, agent, res) = setup();
         let root = Capability::issue(&clinic, res, person.address(), vec![]);
         let scoped = root
@@ -652,16 +754,62 @@ mod tests {
                 agent.address(),
                 vec![
                     Caveat::Operation("book".into()),
-                    Caveat::MaxAmount(5000),
-                    Caveat::MaxUses(1),
+                    Caveat::MaxAmount(5_000),
+                    Caveat::ExpiresAt(1_000),
+                    Caveat::MaxUses(10),
                 ],
             )
             .unwrap();
+        // The honest chain verifies, so a refusal below is about the forgery.
+        assert!(scoped.verify(clinic.address()).is_ok());
 
-        let eff = scoped.verify(clinic.address()).unwrap();
-        assert!(eff.contains(&Caveat::Operation("book".into())));
-        assert!(eff.contains(&Caveat::MaxAmount(5000)));
-        assert_eq!(scoped.holder(), Some(agent.address()));
+        let accomplice = Identity::generate();
+        let forgeries = [
+            vec![
+                Caveat::Operation("cancel".into()),
+                Caveat::MaxAmount(5_000),
+                Caveat::ExpiresAt(1_000),
+                Caveat::MaxUses(10),
+            ],
+            vec![
+                Caveat::Operation("book".into()),
+                Caveat::MaxAmount(1_000_000),
+                Caveat::ExpiresAt(1_000),
+                Caveat::MaxUses(10),
+            ],
+            vec![
+                Caveat::Operation("book".into()),
+                Caveat::MaxAmount(5_000),
+                Caveat::ExpiresAt(u64::MAX),
+                Caveat::MaxUses(10),
+            ],
+            vec![
+                Caveat::Operation("book".into()),
+                Caveat::MaxAmount(5_000),
+                Caveat::ExpiresAt(1_000),
+                Caveat::MaxUses(u32::MAX),
+            ],
+        ];
+        for (i, caveats) in forgeries.iter().enumerate() {
+            let forged =
+                scoped.forge_widened(&agent, accomplice.address(), caveats.clone());
+            assert_eq!(
+                forged.verify(clinic.address()),
+                Err(CapError::WidenedAuthority),
+                "forged widening of kind {i} was accepted"
+            );
+        }
+
+        // And dropping a constraint entirely is widening, since the constraint disappears.
+        let dropped = scoped.forge_widened(
+            &agent,
+            accomplice.address(),
+            vec![Caveat::Operation("book".into())],
+        );
+        assert_eq!(
+            dropped.verify(clinic.address()),
+            Err(CapError::WidenedAuthority)
+        );
     }
 
     #[test]
