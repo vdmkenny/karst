@@ -46,6 +46,7 @@
 //! it never issued. Coconut gives public verifiability against an issuer public key and
 //! removes that. Noted rather than hidden.
 
+pub mod blind;
 pub mod doublespend;
 pub mod shamir;
 

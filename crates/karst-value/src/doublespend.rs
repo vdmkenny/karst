@@ -133,7 +133,51 @@ impl Challenge {
 #[derive(Clone)]
 pub struct Opening {
     pub challenge: Challenge,
-    halves: Vec<[u8; 32]>,
+    pub(crate) halves: Vec<[u8; 32]>,
+}
+
+/// What two openings of the same credential say about each other.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Consistency {
+    /// Every differing position agrees on one address. A real double spend.
+    Consistent,
+    /// Differing positions disagree, so at least one opening is fabricated. **The credential
+    /// is bad and the spend should be refused**, even though nobody can be named.
+    Inconsistent,
+    /// The challenges did not differ anywhere, so there is nothing to compare.
+    NoOverlap,
+}
+
+/// Classify a pair of openings without producing a proof.
+///
+/// A verifier needs this to tell "somebody double spent and I can name them" from "somebody
+/// handed me a fabricated credential", which are different problems with different responses.
+pub fn consistency(a: &Opening, b: &Opening) -> Consistency {
+    if a.halves.len() != b.halves.len() {
+        return Consistency::Inconsistent;
+    }
+    let mut recovered: Option<[u8; 32]> = None;
+    let mut differing = 0usize;
+    for i in 0..a.halves.len() {
+        if a.challenge.bit(i) == b.challenge.bit(i) {
+            continue;
+        }
+        differing += 1;
+        let mut addr = [0u8; 32];
+        for j in 0..32 {
+            addr[j] = a.halves[i][j] ^ b.halves[i][j];
+        }
+        match recovered {
+            None => recovered = Some(addr),
+            Some(prev) if prev != addr => return Consistency::Inconsistent,
+            Some(_) => {}
+        }
+    }
+    if differing == 0 {
+        Consistency::NoOverlap
+    } else {
+        Consistency::Consistent
+    }
 }
 
 impl Opening {
@@ -278,5 +322,110 @@ mod tests {
             let p = recover_holder(&a, &b, [seed; 32]).unwrap();
             assert_eq!(p.holder, holder.address(), "seed {seed}");
         }
+    }
+}
+
+/// Attacks on the recovery mechanism itself.
+#[cfg(test)]
+mod adversarial {
+    use super::*;
+    use karst_id::Identity;
+
+    /// **A hole, demonstrated rather than described.**
+    ///
+    /// A holder who double spends and simply *lies* in the second opening, sending random
+    /// halves instead of real ones, produces two openings that do not agree on any address.
+    /// `recover_holder` returns `None`, so the double spender escapes identification.
+    ///
+    /// Chaum, Fiat and Naor prevent this with cut-and-choose **at issuance**: the issuer
+    /// requires the holder to open many candidate credentials and checks they are well formed,
+    /// signing only an unopened one. A holder who embeds garbage is caught with probability
+    /// approaching one before the credential exists. That step is not implemented here.
+    ///
+    /// This test passes, which means the weakness is real. It is filed rather than hidden.
+    #[test]
+    fn a_lying_holder_currently_escapes_identification() {
+        let holder = Identity::generate();
+        let s = IdentityShares::split(holder.address(), &[42u8; 32]);
+
+        let honest = s.open(&Challenge::from_seed(b"verifier one"));
+
+        // The second spend sends halves that are not the holder's.
+        let fake = IdentityShares::split(Identity::generate().address(), &[99u8; 32]);
+        let lie = fake.open(&Challenge::from_seed(b"verifier two"));
+
+        assert!(
+            recover_holder(&honest, &lie, [0u8; 32]).is_none(),
+            "if this ever fails, the hole has been closed and this test should become an \
+             assertion that the liar IS identified"
+        );
+    }
+
+    /// The verifier can at least tell that something is wrong, which is the difference between
+    /// an unattributable double spend and an undetectable one.
+    #[test]
+    fn an_inconsistent_pair_is_distinguishable_from_a_matching_challenge() {
+        let holder = Identity::generate();
+        let s = IdentityShares::split(holder.address(), &[42u8; 32]);
+        let c = Challenge::from_seed(b"same");
+
+        // Identical challenges: no differing positions at all, so nothing to compare.
+        assert_eq!(consistency(&s.open(&c), &s.open(&c)), Consistency::NoOverlap);
+
+        // Different challenges on the same credential: fully consistent.
+        let a = s.open(&Challenge::from_seed(b"one"));
+        let b = s.open(&Challenge::from_seed(b"two"));
+        assert_eq!(consistency(&a, &b), Consistency::Consistent);
+
+        // Different challenges, fabricated halves: detectably inconsistent.
+        let fake = IdentityShares::split(Identity::generate().address(), &[99u8; 32]);
+        assert_eq!(
+            consistency(&a, &fake.open(&Challenge::from_seed(b"two"))),
+            Consistency::Inconsistent
+        );
+    }
+
+    /// A verifier that reuses a challenge across every spend it sees defeats the mechanism
+    /// entirely, since two spends at that verifier reveal the same halves twice.
+    #[test]
+    fn a_verifier_that_reuses_its_challenge_learns_nothing() {
+        let holder = Identity::generate();
+        let s = IdentityShares::split(holder.address(), &[1u8; 32]);
+        let fixed = Challenge::from_seed(b"this verifier never varies");
+
+        assert!(recover_holder(&s.open(&fixed), &s.open(&fixed), [0u8; 32]).is_none());
+    }
+
+    /// Two honest holders must never combine into a proof against a third party.
+    #[test]
+    fn openings_from_unrelated_holders_never_frame_a_third() {
+        let victim = Identity::generate();
+        for seed in 0..30u8 {
+            let a = IdentityShares::split(Identity::from_seed([seed; 32]).address(), &[seed; 32]);
+            let b = IdentityShares::split(
+                Identity::from_seed([seed ^ 0xff; 32]).address(),
+                &[seed ^ 0x0f; 32],
+            );
+            let proof = recover_holder(
+                &a.open(&Challenge::from_seed(&[seed, 1])),
+                &b.open(&Challenge::from_seed(&[seed, 2])),
+                [0u8; 32],
+            );
+            if let Some(p) = proof {
+                assert_ne!(p.holder, victim.address(), "framed an uninvolved party");
+            }
+        }
+    }
+
+    /// Openings of different lengths are not comparable and must not be treated as evidence.
+    #[test]
+    fn mismatched_openings_are_refused() {
+        let s = IdentityShares::split(Identity::generate().address(), &[1u8; 32]);
+        let full = s.open(&Challenge::from_seed(b"a"));
+        let truncated = Opening {
+            challenge: Challenge::from_seed(b"b"),
+            halves: Vec::new(),
+        };
+        assert!(recover_holder(&full, &truncated, [0u8; 32]).is_none());
     }
 }

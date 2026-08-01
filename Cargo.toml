@@ -27,6 +27,8 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 blake3 = "1"
 rand = "0.8"
 hex = "0.4"
+rsa = "0.9"
+num-bigint-dig = "0.8"
 
 karst-id = { path = "crates/karst-id" }
 karst-object = { path = "crates/karst-object" }

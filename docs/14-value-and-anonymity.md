@@ -75,18 +75,24 @@ are several credentials. This costs bandwidth and is not negotiable.
 
 ## 5. What is not solved
 
-### Double spending across disconnected verifiers
+### Double spending: not prevented, made self-incriminating
 
-A serial can be caught when spent twice **at one verifier**. Two verifiers that cannot see
-each other will both accept the same credential, and making that impossible requires either a
-shared ledger with its consensus cost or an always-online authority, which is the thing this
-stack exists to remove.
+Decided in `20-three-decisions.md` §1 and implemented in `karst-value::doublespend`. A
+credential carries the holder's identity split into share pairs; one spend opens one half of
+each and discloses nothing; two spends against different verifier challenges reconstruct the
+holder. No online authority, no consensus.
 
-So a credential is worth one unit *per verifier*, not one unit in the universe. The options
-are a shared ledger and its cost, short epochs that bound the damage, or accepting that each
-relay honours a credential once. `karst-value` tests this limit explicitly so it cannot be
-quietly forgotten. It is the same limit `karst-cap::UseLedger` has, for the same reason, and
-in both places the honest move is to state which option was picked.
+**One hole is open and demonstrated by a passing test.** A holder who double spends and simply
+*lies* in the second opening, sending fabricated halves, produces two openings that agree on no
+address, so `recover_holder` returns `None` and the liar escapes identification.
+
+Chaum, Fiat and Naor prevent this with cut-and-choose **at issuance**: the issuer makes the
+holder open many candidate credentials, checks they are well formed, and signs only an unopened
+one, so embedding garbage is caught before the credential exists. That step is not implemented.
+
+Partial mitigation is in place: `consistency` lets a verifier distinguish a real double spend
+from a fabricated credential, so a bad credential can be refused even when nobody can be named.
+That is the difference between an unattributable double spend and an undetectable one.
 
 ### Acquisition timing is still an intersection surface
 
@@ -97,16 +103,31 @@ Mitigations, none complete: acquire well in advance of use, acquire on a schedul
 on demand, and prefer earning by relaying over buying, since a relay's earning pattern is
 driven by other people's traffic rather than its own intentions.
 
-### The proof of concept is not the cryptography
+### The blind signature is implemented; threshold and blindness are not yet composed
 
-`karst-value` implements the protocol shape and real threshold sharing. It does **not**
-implement the blind signature: issuers receive a commitment rather than a serial, and the
-tests verify that the issuance transcript and the spend transcript share no field, but the
-cryptographic binding needs Coconut or RFC 9474.
+`karst-value::blind` implements Chaum's construction, standardised as RFC 9474: the issuer
+signs a value it cannot read, and the unblinded signature verifies against the issuer's
+**public key alone**, so a verifier can check a credential it could not itself have issued.
 
-Verification currently uses the threshold-issued secret, so a verifier could forge a
-credential it never issued. Coconut removes this with public verifiability against an issuer
-verification key. This is a gap in the implementation, not in the design.
+Perfect blinding is demonstrated constructively rather than asserted: because `r ↦ r^e` is a
+bijection modulo `n`, a test reconstructs the same blinded value from an entirely unrelated
+message, showing the issuer's view is consistent with every possible message.
+
+Two defects were found by writing attacks rather than exercises, and both are fixed:
+
+- **A blinding factor of one is no blinding at all**, handing the message straight to the
+  issuer while every later step still works perfectly. Values of 0 and 1 are now rejected,
+  because a weak or failing RNG is exactly how this occurs.
+- **Unblinding returned a malicious issuer's garbage without checking it**, so the holder would
+  discover the problem later, at a verifier, where the failure is unattributable and possibly
+  incriminating. It now verifies before returning.
+
+**What is not composed:** RSA blind signatures give plurality of issuers and public
+verifiability, and lose threshold-within-a-set. That is a smaller loss than it first appeared,
+because the two properties were being conflated: plurality of issuer *sets* is what error 03
+demands, and threshold *within* a set protects one set against a compromised member. Recovering
+both needs Coconut over a pairing curve, or threshold RSA. `shamir` still carries the threshold
+structure separately.
 
 ---
 
