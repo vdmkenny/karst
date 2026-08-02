@@ -327,9 +327,19 @@ some are.
 
 ### L4 Mixing
 
-*Fixes error 02. Status: **built and running** (`karst-mix`, `karst-node`, `karst-net`). Sphinx
-packets, four adversary simulators, a mix node with a defended clock and delay queue, and a
-network on real sockets carrying messages between clients with loop-cover drop detection.*
+*Fixes error 02. Status: **built and running** (`karst-mix`, `karst-node`, `karst-net`,
+`karst-seal`). Sphinx packets, four adversary simulators, a mix node with a defended clock and
+delay queue, and a network on real sockets carrying messages between clients with loop-cover
+drop detection.*
+
+Mixing hides who is talking to whom and hides nothing from the party the packet is delivered to,
+which at this layer is a provider rather than the recipient. Content confidentiality is therefore
+a separate mechanism (`karst-seal`, HPKE base mode per RFC 9180 with DHKEM(X25519) and
+ChaCha20-Poly1305), on its own keys rather than the L2 identity keys, because joint security of a
+signature and an encryption scheme under one key is a property that must be proved rather than
+assumed (Degabriele, Lehmann, Paterson, Smart, Strefler, *On the Joint Security of Encryption and
+Signature Schemes*, CT-RSA 2011) and because welding them together means retiring one forces
+retiring the other.
 
 **Adversary.** B, the global passive adversary. This layer exists to defeat the attack
 onion routing declines to attempt.
@@ -858,7 +868,12 @@ capabilities attenuated from a person (L9). So an object declares its agency cla
 | `Direct` | The signing key composed it. | **No, permanently.** |
 | `Assisted` | A person composed it with a named tool and signs personally. | No, but their key is on it. |
 | `Delegated` | An agent acted under a principal's authority. | **Yes.** The chain must verify to the principal. |
-| `Autonomous` | An agent on its own standing. | **Yes**, as to operator. |
+| `Autonomous` | An agent on its own standing. | **No.** The signer names an operator and nothing checks it. |
+
+`Delegated` is the only row that verifies, and the distinction is the whole point of the table:
+naming a principal proves nothing, presenting a chain that verifies to them proves everything. An
+`Autonomous` object naming a reputable operator is a claim, so a curator admitting `Autonomous`
+posts on the strength of the operator name is admitting an arbitrary string.
 
 You therefore cannot falsely claim to be *authorised by* someone, and you can always falsely
 claim to be a person. What the design buys is threefold. A false claim is signed, permanent
@@ -1405,13 +1420,26 @@ See [`docs/08-roadmap.md`](docs/08-roadmap.md) for phases and open issues.
 | L13.1 Authorship agency | built, tested | `karst-attest` |
 | L13.2 Version lineage | built, tested | `karst-object` |
 | Boards, threads | built, tested | `karst-thread` |
-| L4 Mixing | specified, unbuilt | none |
-| L12 Agency, L15 Discovery | specified, unbuilt | none |
-| L0, L1, L3, L5, L8, L14, L16 | sketched | none |
+| L4 Mixing | built and running | `karst-mix`, `karst-node`, `karst-net`, `karst-seal` |
+| L12 Agency | built, tested | `karst-agency` |
+| L15 Discovery | built, tested | `karst-index` |
+| L1 Path | built, tested | `karst-path` |
+| L3 Wire | built, tested | `karst-wire` |
+| L5 Membership | built, tested | `karst-member` |
+| L8 Witness | built, tested | `karst-witness` |
+| L14 Value | built, tested | `karst-value` |
+| L16 Symmetry | simulated | `karst-symmetry` |
+| L0 Bearer | sketched | none |
 
-**Nothing above L4 is private until L4 exists.** Everything currently built assumes a network that
-does not yet protect who is talking to whom. That is the single most important thing to understand
-about the current state of this repository.
+**L0 Bearer is the one layer with no code, and it is the one holding the rest to today's
+internet.** Every other layer runs, and runs over UDP on somebody else's network. A stack whose
+bearer belongs to an incumbent has not left the incumbent, whatever the sixteen layers above it
+do. That is the single most important thing to understand about the current state of this
+repository.
+
+Two others belong next to it. **The cryptography is unreviewed**, and one break has already been
+found and fixed after shipping (#101). **Nothing here has been deployed**, so every number in this
+paper that is not from cited literature comes from a simulator in this repository.
 
 ---
 
