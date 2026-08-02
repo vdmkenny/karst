@@ -212,6 +212,17 @@ impl Segments {
     /// A sender needs a handful of ways out of any given point; it does not need every offer
     /// in the world, and holding them all is how the search below gets its exponent.
     pub const MAX_PER_POINT: usize = 64;
+    /// Starting points tracked at all.
+    pub const MAX_POINTS: usize = 4096;
+    /// How far ahead an offer may claim to be good for, in milliseconds. One week.
+    ///
+    /// Eviction admits a newcomer only if it outlives what it displaces, which is what stops
+    /// expiring junk from churning live routes out. Without a ceiling on the claim, the same
+    /// rule hands a squatter a permanent hold: fill a point with offers good until the heat
+    /// death and nothing can ever displace them. The layer's own reasoning already demanded
+    /// this bound, one level up: an offer with no expiry is a standing claim nobody can
+    /// withdraw, which is the durability that made stale BGP announcements dangerous.
+    pub const MAX_LIFETIME_MS: u64 = 7 * 24 * 60 * 60 * 1_000;
     /// Paths one composition will return.
     pub const MAX_PATHS: usize = 256;
     /// Search steps one composition will take, whether or not they reach anywhere.
@@ -225,17 +236,129 @@ impl Segments {
     ///
     /// Refusing unverified segments at the door means the store never holds one, so a later
     /// composition cannot accidentally trust something nobody signed.
-    pub fn learn(&mut self, s: Segment) -> Result<(), PathError> {
+    ///
+    /// # Occupancy is contestable, not first-come
+    ///
+    /// The first version of this bound refused everything past `MAX_PER_POINT` and evicted
+    /// nothing, which turned the bound into the weapon it was meant to remove. Sixty-four
+    /// signatures from **one** identity took a point permanently: `Segment` equality covers
+    /// every field including `expires_at`, so the same offer at sixty-four different expiry
+    /// times was sixty-four distinct segments, and no honest operator could ever get in
+    /// again. The same defect broke the honest case with no adversary at all, since a
+    /// refreshed segment differs from the one it refreshes and therefore competed with it
+    /// rather than replacing it. Every point died at its first expiry wave.
+    ///
+    /// Three rules follow, and they are the ones L15 already arrived at for the same reason
+    /// (`docs/23-discovery.md`: a bound applied at one stage and not another is not a bound):
+    ///
+    /// 1. **An offer is keyed `(operator, from, to)`.** A refresh replaces its predecessor.
+    ///    Varying only the expiry no longer buys a slot.
+    /// 2. **Expired segments are dropped on the way in**, so a store sheds what `compose`
+    ///    would skip rather than holding it against the cap forever.
+    /// 3. **A full bucket evicts rather than refuses**, charging the largest occupant and
+    ///    breaking ties by nearest expiry. An incoming segment that expires sooner than
+    ///    everything held is the one case still refused, so junk cannot displace live routes.
+    ///
+    /// # What this does not fix
+    ///
+    /// Identities are free, so an adversary spends 64 of them instead of one and the bucket
+    /// is full of individually valid junk again. Eviction keeps occupancy contestable, so
+    /// honest segments continue to get in, and that is the whole of what this layer can do
+    /// alone: there is **no symmetric sybilproof allocation** (Cheng and Friedman,
+    /// *Sybilproof Reputation Mechanisms*, P2PECON 2005), and the escape is source-anchored
+    /// asymmetry, which needs a wire layer that records who handed a segment over. See #129.
+    pub fn learn(&mut self, s: Segment, now: u64) -> Result<(), PathError> {
         s.verify()?;
+        if !s.valid_at(now) {
+            return Err(PathError::Expired { at: s.expires_at });
+        }
+        if s.expires_at.saturating_sub(now) > Self::MAX_LIFETIME_MS {
+            return Err(PathError::TooLong);
+        }
+
+        if !self.by_from.contains_key(&s.from) && self.by_from.len() >= Self::MAX_POINTS {
+            self.forget_a_point(now);
+        }
         let e = self.by_from.entry(s.from).or_default();
-        if e.contains(&s) {
+
+        // An offer is a standing claim by one operator about one link. A later one replaces
+        // the earlier one; it does not join it.
+        if let Some(held) = e
+            .iter_mut()
+            .find(|h| h.operator == s.operator && h.to == s.to)
+        {
+            if s.expires_at > held.expires_at {
+                *held = s;
+            }
             return Ok(());
         }
+
+        e.retain(|h| h.valid_at(now));
         if e.len() >= Self::MAX_PER_POINT {
-            return Err(PathError::TooMany);
+            let Some(victim) = Self::largest_occupant_victim(e) else {
+                return Err(PathError::TooMany);
+            };
+            if e[victim].expires_at >= s.expires_at {
+                // Nothing held expires sooner than the newcomer, so taking a slot would trade
+                // a longer-lived route for a shorter one. That is a downgrade an adversary
+                // would perform deliberately.
+                return Err(PathError::TooMany);
+            }
+            e.remove(victim);
         }
         e.push(s);
         Ok(())
+    }
+
+    /// The slot a newcomer should take: held by whoever holds the most, expiring soonest.
+    ///
+    /// Charging the largest occupant is what stops one operator monopolising a point. It does
+    /// not stop many operators doing so, because identities are free and no allocation rule
+    /// over free identities can.
+    fn largest_occupant_victim(e: &[Segment]) -> Option<usize> {
+        let mut counts: BTreeMap<Address, usize> = BTreeMap::new();
+        for h in e {
+            *counts.entry(h.operator).or_default() += 1;
+        }
+        let worst = counts.values().copied().max()?;
+        e.iter()
+            .enumerate()
+            .filter(|(_, h)| counts[&h.operator] == worst)
+            .min_by_key(|(i, h)| (h.expires_at, *i))
+            .map(|(i, _)| i)
+    }
+
+    /// Make room for a new point by dropping one that is doing the least.
+    ///
+    /// Live segments first, then soonest to lapse. A point whose segments have all expired is
+    /// carrying nothing, so it goes before one that is.
+    fn forget_a_point(&mut self, now: u64) {
+        let victim = self
+            .by_from
+            .iter()
+            .min_by_key(|(p, v)| {
+                let live = v.iter().filter(|s| s.valid_at(now)).count();
+                let soonest = v.iter().map(|s| s.expires_at).min().unwrap_or(0);
+                (live, soonest, **p)
+            })
+            .map(|(p, _)| *p);
+        if let Some(p) = victim {
+            self.by_from.remove(&p);
+        }
+    }
+
+    /// Drop everything that has lapsed. A store that only sheds on insert keeps the dead
+    /// around at points nobody is offering carriage from any more.
+    pub fn expire(&mut self, now: u64) {
+        self.by_from.retain(|_, v| {
+            v.retain(|s| s.valid_at(now));
+            !v.is_empty()
+        });
+    }
+
+    /// Starting points tracked.
+    pub fn points(&self) -> usize {
+        self.by_from.len()
     }
 
     pub fn len(&self) -> usize {
@@ -351,7 +474,7 @@ mod tests {
                         pt(hop),
                         pt(hop + 1),
                         100,
-                    ))
+                    ), 0)
                     .is_err()
                 {
                     refused += 1;
@@ -374,19 +497,117 @@ mod tests {
         );
     }
 
+    /// One identity must not be able to take a point, and it took a point for 64 signatures.
+    ///
+    /// `Segment` equality covers every field, `expires_at` included, so the same offer at 64
+    /// different expiry times was 64 distinct segments. First-come occupancy with no eviction
+    /// did the rest: the bucket filled, every honest operator got `TooMany` forever, and the
+    /// point became uncomposable-through. It survived the expiry of every segment causing it,
+    /// because expiry was checked at composition and nothing ever swept the store.
+    #[test]
+    fn one_identity_cannot_take_a_point_by_reoffering_at_new_expiries() {
+        let mut segs = Segments::new();
+        let squatter = op(1);
+        for t in 0..200u64 {
+            let _ = segs.learn(Segment::offer(&squatter, pt(0), pt(1), 1_000 + t), 0);
+        }
+        assert_eq!(
+            segs.len(),
+            1,
+            "the same operator's offer for the same link is one offer, not {}",
+            segs.len()
+        );
+
+        // And the honest operators still get in.
+        for k in 0..32u32 {
+            segs.learn(Segment::offer(&op(100 + k), pt(0), pt(k + 2), 1_000), 0)
+                .expect("an honest offer was refused");
+        }
+    }
+
+    /// A refresh replaces the offer it refreshes, so the honest case survives its own expiry.
+    ///
+    /// With no adversary at all: 64 honest operators fill a point, their segments lapse, and
+    /// every refresh used to be refused, because a refreshed segment differs from the one it
+    /// refreshes and therefore competed with it. Every point died at its first expiry wave and
+    /// could never be repaired.
+    #[test]
+    fn an_expiry_wave_does_not_kill_a_point() {
+        let mut segs = Segments::new();
+        for k in 0..Segments::MAX_PER_POINT as u32 {
+            segs.learn(Segment::offer(&op(k), pt(0), pt(k + 1), 100), 0)
+                .expect("initial offer refused");
+        }
+        assert_eq!(segs.len(), Segments::MAX_PER_POINT);
+
+        // Time passes and every one of them lapses. Each operator re-offers.
+        for k in 0..Segments::MAX_PER_POINT as u32 {
+            segs.learn(Segment::offer(&op(k), pt(0), pt(k + 1), 10_000), 200)
+                .expect("a refresh was refused");
+        }
+        assert_eq!(segs.len(), Segments::MAX_PER_POINT);
+        assert_eq!(
+            segs.compose(pt(0), pt(1), 200).len(),
+            1,
+            "the point is dead after its first expiry wave"
+        );
+    }
+
+    /// A store that only sheds on insert keeps the dead at points nobody offers from any more.
+    #[test]
+    fn expired_segments_do_not_occupy_the_store_forever() {
+        let mut segs = Segments::new();
+        for k in 0..20u32 {
+            segs.learn(Segment::offer(&op(k), pt(k), pt(k + 1), 100), 0).unwrap();
+        }
+        assert_eq!(segs.points(), 20);
+        segs.expire(500);
+        assert_eq!(segs.len(), 0);
+        assert_eq!(segs.points(), 0, "empty points were kept");
+    }
+
+    /// An offer cannot claim to be good forever, or eviction becomes a permanent hold.
+    ///
+    /// Admitting a newcomer only when it outlives what it displaces is what stops expiring
+    /// junk churning out live routes. Uncapped, the same rule lets a squatter claim the heat
+    /// death of the universe and hold the slot against everything.
+    #[test]
+    fn an_offer_cannot_claim_an_unbounded_lifetime() {
+        let mut segs = Segments::new();
+        assert_eq!(
+            segs.learn(Segment::offer(&op(1), pt(0), pt(1), u64::MAX), 0),
+            Err(PathError::TooLong)
+        );
+        segs.learn(
+            Segment::offer(&op(1), pt(0), pt(1), Segments::MAX_LIFETIME_MS),
+            0,
+        )
+        .expect("a week is allowed");
+    }
+
+    /// The number of points is bounded too, or the per-point bound bounds nothing.
+    #[test]
+    fn the_number_of_starting_points_is_bounded() {
+        let mut segs = Segments::new();
+        for k in 0..(Segments::MAX_POINTS as u32 + 500) {
+            let _ = segs.learn(Segment::offer(&op(k), pt(k), pt(k + 1), 1_000), 0);
+        }
+        assert!(segs.points() <= Segments::MAX_POINTS, "{} points", segs.points());
+    }
+
     /// A store bounds what it holds, so the search cannot be handed its own input size.
     #[test]
     fn a_store_refuses_more_ways_out_of_a_point_than_it_will_keep() {
         let mut segs = Segments::new();
         let mut accepted = 0;
         for k in 0..(Segments::MAX_PER_POINT as u32 + 500) {
-            if segs.learn(Segment::offer(&op(k), pt(0), pt(k + 1), 100)).is_ok() {
+            if segs.learn(Segment::offer(&op(k), pt(0), pt(k + 1), 100), 0).is_ok() {
                 accepted += 1;
             }
         }
         assert_eq!(accepted, Segments::MAX_PER_POINT);
         assert_eq!(
-            segs.learn(Segment::offer(&op(9999), pt(0), pt(9998), 100)),
+            segs.learn(Segment::offer(&op(9999), pt(0), pt(9998), 100), 0),
             Err(PathError::TooMany)
         );
     }
@@ -400,7 +621,7 @@ mod tests {
         let mut segs = Segments::new();
         for hop in 0..8u32 {
             for k in 0..20u32 {
-                segs.learn(Segment::offer(&op(hop * 100 + k), pt(hop), pt(hop + 1), 100))
+                segs.learn(Segment::offer(&op(hop * 100 + k), pt(hop), pt(hop + 1), 100), 0)
                     .unwrap();
             }
         }
@@ -413,8 +634,8 @@ mod tests {
     #[test]
     fn a_sender_composes_a_path_from_what_it_holds() {
         let mut segs = Segments::new();
-        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 100)).unwrap();
-        segs.learn(Segment::offer(&op(2), pt(1), pt(2), 100)).unwrap();
+        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 100), 0).unwrap();
+        segs.learn(Segment::offer(&op(2), pt(1), pt(2), 100), 0).unwrap();
 
         let paths = segs.compose(pt(0), pt(2), 0);
         assert_eq!(paths.len(), 1);
@@ -506,7 +727,7 @@ mod tests {
 
         // And a store refuses to hold it, so composition never sees it.
         let mut segs = Segments::new();
-        assert_eq!(segs.learn(forged), Err(PathError::Unsigned));
+        assert_eq!(segs.learn(forged, 0), Err(PathError::Unsigned));
         assert!(segs.is_empty());
     }
 
@@ -539,8 +760,8 @@ mod tests {
     #[test]
     fn an_expired_segment_does_not_compose() {
         let mut segs = Segments::new();
-        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 50)).unwrap();
-        segs.learn(Segment::offer(&op(2), pt(1), pt(2), 100)).unwrap();
+        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 50), 0).unwrap();
+        segs.learn(Segment::offer(&op(2), pt(1), pt(2), 100), 0).unwrap();
 
         assert_eq!(segs.compose(pt(0), pt(2), 10).len(), 1);
         assert!(
@@ -564,9 +785,9 @@ mod tests {
 
         // And composition does not produce one even when the segments allow it.
         let mut segs = Segments::new();
-        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 100)).unwrap();
-        segs.learn(Segment::offer(&op(2), pt(1), pt(0), 100)).unwrap();
-        segs.learn(Segment::offer(&op(3), pt(1), pt(2), 100)).unwrap();
+        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 100), 0).unwrap();
+        segs.learn(Segment::offer(&op(2), pt(1), pt(0), 100), 0).unwrap();
+        segs.learn(Segment::offer(&op(3), pt(1), pt(2), 100), 0).unwrap();
         for p in segs.compose(pt(0), pt(2), 0) {
             let mut seen = vec![p.source()];
             for s in p.segments() {
@@ -582,7 +803,7 @@ mod tests {
         let mut segs = Segments::new();
         // A long chain, longer than a sender will carry.
         for i in 0..40u32 {
-            segs.learn(Segment::offer(&op(i + 1), pt(i), pt(i + 1), 1_000))
+            segs.learn(Segment::offer(&op(i + 1), pt(i), pt(i + 1), 1_000), 0)
                 .unwrap();
         }
         assert!(
@@ -608,7 +829,7 @@ mod tests {
         let mut segs = Segments::new();
         let mut forged = Segment::offer(&op(1), pt(0), pt(1), 100);
         forged.to = pt(9);
-        assert_eq!(segs.learn(forged), Err(PathError::Unsigned));
+        assert_eq!(segs.learn(forged, 0), Err(PathError::Unsigned));
         assert!(segs.is_empty());
     }
 
@@ -624,10 +845,10 @@ mod tests {
         let long_b = Segment::offer(&op(3), pt(1), pt(3), 100);
 
         let mut alice = Segments::new();
-        alice.learn(direct.clone()).unwrap();
+        alice.learn(direct.clone(), 0).unwrap();
         let mut bob = Segments::new();
-        bob.learn(long_a).unwrap();
-        bob.learn(long_b).unwrap();
+        bob.learn(long_a, 0).unwrap();
+        bob.learn(long_b, 0).unwrap();
 
         let a_paths = alice.compose(pt(0), pt(3), 0);
         let b_paths = bob.compose(pt(0), pt(3), 0);
@@ -647,9 +868,9 @@ mod tests {
     #[test]
     fn composition_is_deterministic_and_expresses_no_preference() {
         let mut segs = Segments::new();
-        segs.learn(Segment::offer(&op(1), pt(0), pt(3), 100)).unwrap();
-        segs.learn(Segment::offer(&op(2), pt(0), pt(1), 100)).unwrap();
-        segs.learn(Segment::offer(&op(3), pt(1), pt(3), 100)).unwrap();
+        segs.learn(Segment::offer(&op(1), pt(0), pt(3), 100), 0).unwrap();
+        segs.learn(Segment::offer(&op(2), pt(0), pt(1), 100), 0).unwrap();
+        segs.learn(Segment::offer(&op(3), pt(1), pt(3), 100), 0).unwrap();
 
         let first = segs.compose(pt(0), pt(3), 0);
         let second = segs.compose(pt(0), pt(3), 0);
@@ -660,9 +881,9 @@ mod tests {
 
         // Learning the same segments in a different order changes nothing.
         let mut other = Segments::new();
-        other.learn(Segment::offer(&op(3), pt(1), pt(3), 100)).unwrap();
-        other.learn(Segment::offer(&op(2), pt(0), pt(1), 100)).unwrap();
-        other.learn(Segment::offer(&op(1), pt(0), pt(3), 100)).unwrap();
+        other.learn(Segment::offer(&op(3), pt(1), pt(3), 100), 0).unwrap();
+        other.learn(Segment::offer(&op(2), pt(0), pt(1), 100), 0).unwrap();
+        other.learn(Segment::offer(&op(1), pt(0), pt(3), 100), 0).unwrap();
         assert_eq!(other.compose(pt(0), pt(3), 0), first);
     }
 
@@ -675,7 +896,7 @@ mod tests {
     fn a_path_names_everyone_who_could_break_it() {
         let mut segs = Segments::new();
         for i in 0..4u32 {
-            segs.learn(Segment::offer(&op(i + 1), pt(i), pt(i + 1), 100))
+            segs.learn(Segment::offer(&op(i + 1), pt(i), pt(i + 1), 100), 0)
                 .unwrap();
         }
         let p = &segs.compose(pt(0), pt(4), 0)[0];
