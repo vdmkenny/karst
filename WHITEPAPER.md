@@ -463,8 +463,14 @@ avoids. See §6.11.
 
 ### L5 Membership
 
-*Fixes error 03. Status: **built** (`karst-member`), and claiming much less than the layer was
-originally specified to claim.*
+*Fixes error 03. Status: **built, and one property short of sound** (`karst-member`), and
+claiming much less than the layer was originally specified to claim. The private set
+intersection is Meadows 1986, which specifies **one-sided** output: only the initiator learns the
+intersection, and it computes its comparison set locally and never sends it. This crate gives
+both sides output in one exchange, which requires transmitting that comparison set to the party
+it is meant to constrain, so a responder with no shared contact can make the initiator believe
+every contact is shared. The introduction credential is forgeable from nothing. Issue #140, and
+the fix is per-element proof of discrete-log equality rather than a patch.*
 
 **Lever removed.** The list of everyone reachable, and the national block list built from
 it.
@@ -939,8 +945,16 @@ Full treatment in [`docs/10-versioning-and-permanence.md`](docs/10-versioning-an
 
 ### L14 Value
 
-*Fixes errors 02 and 03. Status: **built** (`karst-value`); threshold issuance, the earn/spend
-loop and RSA blind signatures implemented.*
+*Fixes errors 02 and 03. Status: **modelled, not implemented** (`karst-value`). The earn/spend
+separation, the ledgers and the double-spend attribution run and are the part worth having. The
+cryptography underneath them is a placeholder and **provides no unforgeability**: a credential's
+"signature" is a 61-bit symmetric tag any verifier can forge and anyone can brute-force from one
+spent credential, threshold issuance returns each issuer's key share rather than a partial
+signature over it, so one honest issuance hands the requester the master secret, and every key
+and blinding factor in the crate derives from a 64-bit seed. Issues #133, #134, #136. **Do not
+read the numbers in this section as claims about a working credential system.** What is
+established is the *shape* of the answer, below; what is not established is that this code
+implements it.*
 
 **Lever removed.** Payment processors, and the de-banking that runs through them.
 
@@ -1449,9 +1463,9 @@ See [`docs/08-roadmap.md`](docs/08-roadmap.md) for phases and open issues.
 | L15 Discovery | built, tested | `karst-index` |
 | L1 Path | built, tested | `karst-path` |
 | L3 Wire | built, tested | `karst-wire` |
-| L5 Membership | built, tested | `karst-member` |
+| L5 Membership | built; PSI unsound for mutual output (#140) | `karst-member` |
 | L8 Witness | built, tested | `karst-witness` |
-| L14 Value | built, tested | `karst-value` |
+| L14 Value | modelled; cryptography is a placeholder (#133, #134, #136) | `karst-value` |
 | L16 Symmetry | simulated | `karst-symmetry` |
 | L0 Bearer | sketched | none |
 

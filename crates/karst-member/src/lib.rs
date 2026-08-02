@@ -1,5 +1,19 @@
 //! L5 Membership.
 //!
+//! # The mutual-output variant here is unsound
+//!
+//! The protocol is Meadows (IEEE S&P 1986), which specifies **one-sided** output: only the
+//! initiator learns the intersection, and it computes its comparison set locally and never
+//! transmits it. That secrecy is the load-bearing assumption behind the security argument
+//! below.
+//!
+//! This crate collapses two instances into one exchange so both parties get output, and doing
+//! that requires sending the comparison set to the party it is meant to constrain. A responder
+//! holding no shared contact at all can therefore make the initiator believe every contact is
+//! shared, which forges the introduction credential from nothing. (#140)
+//!
+//! The fix is per-element proof of discrete-log equality, not a patch to the composition.
+//!
 //! # What this does not do, first, because the literature is unambiguous
 //!
 //! It does **not** provide membership concealment in the sense Vasserman, Jansen, Tyra, Hopper

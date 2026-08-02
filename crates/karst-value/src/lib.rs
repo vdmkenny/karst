@@ -1,5 +1,26 @@
 //! KARST L14: capacity credentials that are earned and spent without linking the two.
 //!
+//! # This crate does not provide unforgeability. Do not deploy it.
+//!
+//! The earn/spend separation below is the contribution and it holds. The cryptography under it
+//! is a placeholder standing in for schemes that were never implemented, and an audit found
+//! three independent total breaks:
+//!
+//! - **Threshold issuance returns each issuer's key share**, not a partial signature over the
+//!   request. Any party that completes one honest issuance reconstructs the master secret and
+//!   mints unlimited credentials offline, forever. The threshold does not degrade gracefully;
+//!   it is defeated by one legitimate use. (#133)
+//! - **The credential "signature" is a 61-bit symmetric tag.** Verification needs the signing
+//!   key, so every verifier can forge, and ~2^61 offline hashes recover the issuing key from a
+//!   single observed credential. (#134)
+//! - **Every key and every blinding factor derives from a 64-bit seed**, including in
+//!   `blind.rs`, which turns that module's information-theoretic unlinkability into a 2^64
+//!   offline search available to exactly the party blinding defends against. (#136)
+//!
+//! What is worth reading here is the *structure*: which acts are separated, what each ledger
+//! observes, and why double-spend attribution can be made to work without identifying honest
+//! spenders. Read the numbers as a model of that structure, not as a security claim.
+//!
 //! Issue #15. The whitepaper names this the most serious unresolved problem in the stack:
 //! L14 needs settlement observable enough to be trusted, L4 needs it unlinkable, and a
 //! payment system inside an anonymity network is a notorious correlation surface. If who
