@@ -266,7 +266,7 @@ impl Segments {
     /// honest segments continue to get in, and that is the whole of what this layer can do
     /// alone: there is **no symmetric sybilproof allocation** (Cheng and Friedman,
     /// *Sybilproof Reputation Mechanisms*, P2PECON 2005), and the escape is source-anchored
-    /// asymmetry, which needs a wire layer that records who handed a segment over. See #129.
+    /// asymmetry, which needs a wire layer that records who handed a segment over. See #130.
     pub fn learn(&mut self, s: Segment, now: u64) -> Result<(), PathError> {
         s.verify()?;
         if !s.valid_at(now) {
