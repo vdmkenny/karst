@@ -39,17 +39,40 @@ pub enum SendError {
     MessageTooLarge,
 }
 
-/// A mailbox tag is the hash of the key that drains it.
+/// A mailbox tag is the hash of the **public** half of the key that drains it.
 ///
-/// Deposit needs the tag; collection needs the preimage. That is the whole separation, and it
-/// costs one hash. A provider checks it by hashing what it was given.
-pub fn mailbox_tag(collect_key: &[u8; 32]) -> Tag {
+/// Deposit needs the tag; draining needs a signature under the corresponding secret. The
+/// earlier arrangement made the tag the hash of a symmetric secret and sent that secret in the
+/// clear on every poll, as its own proof, over an unencrypted UDP link the design already
+/// documents as non-anonymous. One captured datagram, from the provider's host or any element
+/// on the path, took the mailbox permanently: the attacker replays `REQ_DRAIN` from any
+/// address and the provider pops the victim's mail and hands it over, deleting it from the box
+/// the recipient will poll. There was no rotation path either, since the tag is the identity
+/// every correspondent holds.
+///
+/// A secret that must be shown to be used is not a credential, it is a bearer token in transit.
+/// The drain key now proves possession without disclosure, which is what the separation was
+/// always supposed to mean.
+///
+/// The drain key is its own key rather than the L2 identity, so a mailbox is not linked to the
+/// identity that owns it.
+pub fn mailbox_tag(drain_public: &[u8; 32]) -> Tag {
     let mut h = blake3::Hasher::new();
-    h.update(b"karst.net.v1.mailbox");
-    h.update(collect_key);
+    h.update(b"karst.net.v2.mailbox");
+    h.update(drain_public);
     let mut t = [0u8; MAILBOX_BYTES];
     t.copy_from_slice(h.finalize().as_bytes());
     t
+}
+
+/// What a client signs to drain its own box.
+///
+/// The counter is what stops a captured request being replayed: a provider refuses a counter
+/// it has already seen for that tag.
+pub fn drain_challenge(counter: u64) -> Vec<u8> {
+    let mut v = b"karst.net.v2.drain".to_vec();
+    v.extend_from_slice(&counter.to_le_bytes());
+    v
 }
 
 /// A packet and the node to hand it to.
@@ -81,7 +104,9 @@ pub struct Client {
     /// The tag is its hash, so a correspondent holding the tag may deposit and cannot collect.
     /// When the two were the same value, every correspondent could permanently delete the
     /// mail they had sent, and anyone who learned a tag could delete everything in it.
-    collect_key: [u8; 32],
+    drain: Identity,
+    /// Strictly increasing, so a captured drain request cannot be replayed.
+    drain_counter: u64,
     mailbox: Tag,
     provider: u16,
     /// Reassembly for **sealed mail only**.
@@ -95,37 +120,54 @@ pub struct Client {
 
 impl Client {
     pub fn new(identity: Identity, provider: u16) -> Self {
-        let mut collect_key = [0u8; 32];
-        rand::thread_rng().fill(&mut collect_key);
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill(&mut seed);
+        let drain = Identity::from_seed(seed);
         Client {
             identity,
             sealing: SealingKey::generate(),
-            mailbox: mailbox_tag(&collect_key),
-            collect_key,
+            mailbox: mailbox_tag(&drain.key_bytes()),
+            drain,
+            drain_counter: 0,
             provider,
             inbox: Reassembler::new(),
         }
     }
 
     pub fn from_seed(seed: [u8; 32], provider: u16) -> Self {
-        let mut collect_key = [0u8; 32];
+        let mut ds = [0u8; 32];
         let mut h = blake3::Hasher::new();
-        h.update(b"karst.net.v1.collect");
+        h.update(b"karst.net.v2.drain-key");
         h.update(&seed);
-        collect_key.copy_from_slice(h.finalize().as_bytes());
+        ds.copy_from_slice(h.finalize().as_bytes());
+        let drain = Identity::from_seed(ds);
         Client {
             identity: Identity::from_seed(seed),
             sealing: SealingKey::from_seed(seed),
-            mailbox: mailbox_tag(&collect_key),
-            collect_key,
+            mailbox: mailbox_tag(&drain.key_bytes()),
+            drain,
+            drain_counter: 0,
             provider,
             inbox: Reassembler::new(),
         }
     }
 
-    /// The secret that entitles this client to drain its own box. Never in a `Contact`.
-    pub fn collect_key(&self) -> [u8; 32] {
-        self.collect_key
+    /// The public half of the drain key. Safe to show; the tag is its hash.
+    ///
+    /// The verifying key rather than its address, because the provider must check a signature
+    /// with it and cannot do that from a hash.
+    pub fn drain_public(&self) -> [u8; 32] {
+        self.drain.key_bytes()
+    }
+
+    /// Sign the right to empty this client's own box, once.
+    ///
+    /// Nothing secret goes on the wire. The counter rises on every call, so a captured
+    /// request is refused when replayed.
+    pub fn drain_proof(&mut self) -> (u64, [u8; 64]) {
+        self.drain_counter += 1;
+        let c = self.drain_counter;
+        (c, self.drain.sign(&drain_challenge(c)).to_bytes())
     }
 
     pub fn address(&self) -> karst_id::Address {
@@ -614,14 +656,39 @@ mod tests {
         let contact = bob.contact();
         assert_eq!(contact.mailbox, bob.mailbox());
         assert_ne!(
-            contact.mailbox, bob.collect_key(),
-            "the tag is the collection key, so anyone who can send can also drain"
+            contact.mailbox,
+            bob.drain_public(),
+            "the tag is the drain key, so anyone who can send can also drain"
         );
         assert_eq!(
-            crate::client::mailbox_tag(&bob.collect_key()),
+            crate::client::mailbox_tag(&bob.drain_public()),
             bob.mailbox(),
             "the tag must be the hash of the key that drains it"
         );
+    }
+
+    /// Nothing secret goes on the wire, so capturing a poll buys nothing durable.
+    ///
+    /// The credential used to be the drain secret itself, sent in the clear on every poll as
+    /// its own proof. One captured datagram took the mailbox permanently, and there was no
+    /// rotation path because the tag is the identity every correspondent holds.
+    #[test]
+    fn a_drain_proof_reveals_no_secret_and_does_not_replay() {
+        let mut bob = Client::from_seed([2u8; 32], 0);
+        let (c1, s1) = bob.drain_proof();
+        let (c2, _) = bob.drain_proof();
+        assert!(c2 > c1, "the counter must rise, or a capture replays");
+
+        // What an eavesdropper sees is the public key and a signature over a counter.
+        let peer = karst_id::Peer::from_key_bytes(&bob.drain_public()).unwrap();
+        assert!(peer
+            .verify(&drain_challenge(c1), &karst_id::Signature::from_bytes(&s1))
+            .is_ok());
+
+        // And it does not verify for any other counter, so it authorises one drain.
+        assert!(peer
+            .verify(&drain_challenge(c1 + 1), &karst_id::Signature::from_bytes(&s1))
+            .is_err());
     }
 
 }

@@ -50,6 +50,16 @@ use crate::frame::{ENVELOPE_BYTES, MAILBOX_BYTES};
 
 pub type Tag = [u8; MAILBOX_BYTES];
 
+/// Why a drain was refused. Never sent on the wire: a provider that answered would say
+/// whether the tag exists.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DrainError {
+    /// The tag is not the hash of the key presented, or the signature does not verify.
+    NotYours,
+    /// That counter has already been used for this box.
+    Replayed,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DepositError {
     /// Not the size everything on this network is.
@@ -74,6 +84,8 @@ struct Box_ {
     refused: u64,
     /// Creation order, for age-ordered eviction. Never the tag, which the adversary picks.
     seq: u64,
+    /// Highest drain counter accepted for this box, so a captured request cannot be replayed.
+    drained_to: u64,
 }
 
 #[derive(Debug)]
@@ -134,7 +146,10 @@ impl Provider {
 
     /// Drop what carries no information, then bound what does.
     fn prune(&mut self) {
-        self.boxes.retain(|_, b| !b.items.is_empty() || b.refused > 0);
+        // A box that remembers a drain counter is kept even when empty: forgetting it would
+        // make an already-used request work again.
+        self.boxes
+            .retain(|_, b| !b.items.is_empty() || b.refused > 0 || b.drained_to > 0);
 
         let empties = self.boxes.values().filter(|b| b.items.is_empty()).count();
         if empties <= Self::MAX_REFUSAL_MEMORY {
@@ -205,6 +220,64 @@ impl Provider {
                 }
             }
         }
+    }
+
+    /// Take one item on proof that the asker holds the drain key.
+    ///
+    /// The credential is the drain key's **public** half; the proof is a signature over a
+    /// counter. Nothing secret crosses the wire, which is the difference from the earlier
+    /// arrangement: that one sent the drain secret itself on every poll, as its own proof, so
+    /// a single captured datagram took the mailbox for good.
+    ///
+    /// The counter must exceed every counter already accepted for this tag, which is what
+    /// makes a captured request useless when replayed.
+    ///
+    /// A box is kept while it remembers a counter even when it holds nothing, because
+    /// forgetting the counter would let an old request work again. That state is bounded like
+    /// everything else here, so a tag evicted under pressure does become replayable; the cap
+    /// is high and the alternative is unbounded memory.
+    pub fn drain_once(
+        &mut self,
+        tag: &Tag,
+        drain_public: &[u8; 32],
+        counter: u64,
+        signature: &[u8; 64],
+    ) -> Result<(Option<Vec<u8>>, u64), DrainError> {
+        // The tag must be the hash of the key presented, or anyone could drain any box by
+        // presenting a key of their own.
+        if *tag != crate::client::mailbox_tag(drain_public) {
+            return Err(DrainError::NotYours);
+        }
+        let peer =
+            karst_id::Peer::from_key_bytes(drain_public).map_err(|_| DrainError::NotYours)?;
+        let sig = karst_id::Signature::from_bytes(signature);
+        if peer
+            .verify(&crate::client::drain_challenge(counter), &sig)
+            .is_err()
+        {
+            return Err(DrainError::NotYours);
+        }
+
+        let seq = self.next_seq;
+        let b = self.boxes.entry(*tag).or_insert_with(|| Box_ {
+            seq,
+            ..Box_::default()
+        });
+        if b.seq == seq {
+            self.next_seq += 1;
+        }
+        if counter <= b.drained_to {
+            return Err(DrainError::Replayed);
+        }
+        b.drained_to = counter;
+
+        let item = b.items.pop_front();
+        if item.is_some() {
+            self.held -= 1;
+        }
+        let refused = b.refused;
+        self.prune();
+        Ok((item, refused))
     }
 
     /// Take one item, leaving the box and its refusal count intact.
@@ -307,6 +380,69 @@ mod tests {
         }
         assert!(p.boxes() <= Provider::MAX_REFUSAL_MEMORY + 1);
         assert!(p.forgotten() > 0, "eviction must be countable, not silent");
+    }
+
+    /// A captured drain request must not work twice, and must not work for anyone else.
+    ///
+    /// The credential used to be the drain secret, sent in the clear on every poll over an
+    /// unencrypted UDP link the design already documents as non-anonymous. One passive capture
+    /// yielded the credential permanently: replay `REQ_DRAIN` from any address and the provider
+    /// pops the victim's mail and hands it over, deleting it from the box the recipient polls.
+    #[test]
+    fn a_drain_request_authorises_exactly_one_drain() {
+        let owner = karst_id::Identity::from_seed([3u8; 32]);
+        let pk = owner.key_bytes();
+        let tag = crate::client::mailbox_tag(&pk);
+
+        let mut p = Provider::new();
+        p.deposit(&tagged(&tag, 1)).unwrap();
+        p.deposit(&tagged(&tag, 2)).unwrap();
+
+        let sign = |c: u64| owner.sign(&crate::client::drain_challenge(c)).to_bytes();
+
+        // The honest drain works.
+        let s1 = sign(1);
+        assert_eq!(p.drain_once(&tag, &pk, 1, &s1).unwrap().0, Some(vec![1u8; ENVELOPE_BYTES]));
+
+        // The identical request, captured off the wire and replayed, does not.
+        assert_eq!(p.drain_once(&tag, &pk, 1, &s1), Err(DrainError::Replayed));
+        assert_eq!(p.held(), 1, "a replay took a second item");
+
+        // A stranger presenting their own key cannot drain this box, because the tag is the
+        // hash of the owner's key and will not match theirs.
+        let thief = karst_id::Identity::from_seed([4u8; 32]);
+        let ts = thief.sign(&crate::client::drain_challenge(9)).to_bytes();
+        assert_eq!(
+            p.drain_once(&tag, &thief.key_bytes(), 9, &ts),
+            Err(DrainError::NotYours)
+        );
+
+        // Nor by claiming the owner's key without the signature to match.
+        assert_eq!(p.drain_once(&tag, &pk, 2, &ts), Err(DrainError::NotYours));
+        assert_eq!(p.held(), 1);
+
+        // The owner's next counter still works.
+        assert!(p.drain_once(&tag, &pk, 2, &sign(2)).unwrap().0.is_some());
+    }
+
+    /// Forgetting a counter would make an old request work again, so an emptied box that
+    /// remembers one is kept.
+    #[test]
+    fn an_emptied_box_remembers_what_has_already_been_spent() {
+        let owner = karst_id::Identity::from_seed([5u8; 32]);
+        let pk = owner.key_bytes();
+        let tag = crate::client::mailbox_tag(&pk);
+        let sign = |c: u64| owner.sign(&crate::client::drain_challenge(c)).to_bytes();
+
+        let mut p = Provider::new();
+        p.deposit(&tagged(&tag, 1)).unwrap();
+        assert!(p.drain_once(&tag, &pk, 7, &sign(7)).unwrap().0.is_some());
+        assert_eq!(p.held(), 0);
+
+        // New mail arrives at the same tag. The old request must still be dead.
+        p.deposit(&tagged(&tag, 2)).unwrap();
+        assert_eq!(p.drain_once(&tag, &pk, 7, &sign(7)), Err(DrainError::Replayed));
+        assert_eq!(p.held(), 1, "a replayed request stole newly arrived mail");
     }
 
     #[test]
