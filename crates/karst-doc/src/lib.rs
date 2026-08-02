@@ -87,7 +87,12 @@ impl Value {
             Value::Int(v) => v.to_string(),
             Value::Bool(v) => (if *v { "yes" } else { "no" }).to_string(),
             Value::Money { minor, currency } => {
-                format!("{}.{:02} {}", minor / 100, (minor % 100).abs(), currency)
+                // Formatting from the signed value loses the sign entirely between -100 and
+                // 0: the division truncates to zero and `.abs()` strips the remainder, so
+                // minus fifty cents printed as a credit of fifty.
+                let m = minor.unsigned_abs();
+                let sign = if *minor < 0 { "-" } else { "" };
+                format!("{sign}{}.{:02} {}", m / 100, m % 100, currency)
             }
             Value::Instant(v) => format!("t{v}"),
             Value::Ref(c) => c.short(),
@@ -521,6 +526,14 @@ pub struct Doc {
 struct Budget {
     visits: usize,
     depth: usize,
+    /// Bytes committed to the caller's output.
+    ///
+    /// The visit cap alone bounds how many nodes are entered and says nothing about how much
+    /// each one appends. A doubling chain re-renders the same node up to `MAX_VISITS` times,
+    /// so a document of a hundred kilobytes with a fat leaf produced a multi-gigabyte string
+    /// while staying inside every other bound. What an adversary is buying is the reader's
+    /// memory, so that is what has to be metered.
+    bytes: usize,
     exhausted: bool,
 }
 
@@ -530,18 +543,35 @@ impl Budget {
     /// Deeper than this is a chain, not a structure. Also keeps the recursion off the stack
     /// limit: the walk is depth-first and native frames are not free.
     const MAX_DEPTH: usize = 64;
+    /// Output one walk may produce. Larger than any document a person reads, far smaller
+    /// than what a doubling chain will ask for.
+    const MAX_BYTES: usize = 4 << 20;
 
     fn new() -> Self {
         Budget {
             visits: 0,
             depth: 0,
+            bytes: 0,
             exhausted: false,
         }
     }
 
+    /// Charge output. Returns false once the walk has produced all it is going to.
+    fn spend(&mut self, n: usize) -> bool {
+        if self.bytes.saturating_add(n) > Self::MAX_BYTES {
+            self.exhausted = true;
+            return false;
+        }
+        self.bytes += n;
+        true
+    }
+
     /// Enter one node. The caller must [`Budget::leave`] on every path out.
     fn enter(&mut self) -> bool {
-        if self.depth >= Self::MAX_DEPTH || self.visits >= Self::MAX_VISITS {
+        if self.depth >= Self::MAX_DEPTH
+            || self.visits >= Self::MAX_VISITS
+            || self.bytes >= Self::MAX_BYTES
+        {
             self.exhausted = true;
             return false;
         }
@@ -552,6 +582,66 @@ impl Budget {
 
     fn leave(&mut self) {
         self.depth -= 1;
+    }
+}
+
+/// What a machine reader gets, and whether it got all of it.
+///
+/// `records()` used to return a bare vector. A document nested past `MAX_DEPTH` returned an
+/// empty one, byte-identical to the answer for a document that genuinely holds no records, so
+/// an agent could not tell "nothing here" from "I stopped looking". An agent acting on a
+/// silently truncated record set is the failure this type exists to prevent.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Records {
+    pub items: Vec<(String, BTreeMap<String, Value>)>,
+    /// The walk hit a bound. What is here is a prefix, not the whole.
+    pub truncated: bool,
+}
+
+impl Records {
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+
+    /// The records, on the caller's explicit acknowledgement that a prefix will do.
+    pub fn partial(self) -> Vec<(String, BTreeMap<String, Value>)> {
+        self.items
+    }
+
+    /// The records only if they are all of them.
+    pub fn complete(self) -> Option<Vec<(String, BTreeMap<String, Value>)>> {
+        (!self.truncated).then_some(self.items)
+    }
+}
+
+/// Records reached by following links, and whether all of them were reached.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LinkedRecords {
+    pub items: Vec<(Cid, String, BTreeMap<String, Value>)>,
+    pub truncated: bool,
+}
+
+impl LinkedRecords {
+    pub fn len(&self) -> usize {
+        self.items.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.items.is_empty()
+    }
+}
+
+/// Append to the output, charging the budget.
+///
+/// Every write to a caller's buffer goes through here. A walk that appends anywhere else is
+/// a walk an adversary can size, which is the whole defect this exists to close.
+fn emit(out: &mut String, budget: &mut Budget, text: &str) {
+    if budget.spend(text.len()) {
+        out.push_str(text);
     }
 }
 
@@ -613,12 +703,12 @@ impl Doc {
     fn render_node(&self, cid: &Cid, depth: usize, out: &mut String, budget: &mut Budget) {
         let pad = "  ".repeat(depth);
         let Some(node) = self.nodes.get(cid) else {
-            out.push_str(&format!("{pad}[missing {}]\n", cid.short()));
+            emit(out, budget, &format!("{pad}[missing {}]\n", cid.short()));
             return;
         };
         match node {
             Node::Heading { rank, text } => {
-                out.push_str(&format!("{pad}{} {}\n", "#".repeat(*rank as usize), text));
+                emit(out, budget, &format!("{pad}{} {}\n", "#".repeat(*rank as usize), text));
             }
             Node::Prose { runs } => {
                 let line: String = runs
@@ -642,7 +732,7 @@ impl Doc {
                         }
                     })
                     .collect();
-                out.push_str(&format!("{pad}{line}\n"));
+                emit(out, budget, &format!("{pad}{line}\n"));
             }
             Node::List { ordered, items } => {
                 for (i, item) in items.iter().enumerate() {
@@ -651,16 +741,16 @@ impl Doc {
                     } else {
                         "-".to_string()
                     };
-                    out.push_str(&format!("{pad}{bullet} "));
+                    emit(out, budget, &format!("{pad}{bullet} "));
                     let mut sub = String::new();
-                    self.render_into(item, 0, &mut sub, budget);
-                    out.push_str(sub.trim_start());
+                    self.render_into(item, depth + 1, &mut sub, budget);
+                    emit(out, budget, sub.trim_start());
                 }
             }
             Node::Record { schema, fields } => {
-                out.push_str(&format!("{pad}[{schema}]\n"));
+                emit(out, budget, &format!("{pad}[{schema}]\n"));
                 for (k, v) in fields {
-                    out.push_str(&format!("{pad}  {k}: {}\n", v.render()));
+                    emit(out, budget, &format!("{pad}  {k}: {}\n", v.render()));
                 }
             }
             Node::Media {
@@ -672,20 +762,20 @@ impl Doc {
                 let dur = duration_ms
                     .map(|d| format!(", {}s", d / 1000))
                     .unwrap_or_default();
-                out.push_str(&format!("{pad}[{mime}{dur}] {description}\n"));
+                emit(out, budget, &format!("{pad}[{mime}{dur}] {description}\n"));
             }
             Node::Quote { source, comment } => {
-                out.push_str(&format!("{pad}> quoting {}\n", source.short()));
+                emit(out, budget, &format!("{pad}> quoting {}\n", source.short()));
                 if !comment.is_empty() {
-                    out.push_str(&format!("{pad}> {comment}\n"));
+                    emit(out, budget, &format!("{pad}> {comment}\n"));
                 }
             }
             Node::Section { title, children } => {
                 if !title.is_empty() {
-                    out.push_str(&format!("{pad}{title}\n"));
+                    emit(out, budget, &format!("{pad}{title}\n"));
                 }
                 for c in children {
-                    self.render_into(c, depth, out, budget);
+                    self.render_into(c, depth + 1, out, budget);
                 }
             }
         }
@@ -698,11 +788,14 @@ impl Doc {
     /// view and the human view describe the same document. A quoted or linked third-party
     /// node cannot inject records here: following a link is a separate and deliberate act.
     /// See [`Doc::linked_records`].
-    pub fn records(&self, root: &Cid) -> Vec<(String, BTreeMap<String, Value>)> {
-        let mut out = Vec::new();
+    pub fn records(&self, root: &Cid) -> Records {
+        let mut items = Vec::new();
         let mut budget = Budget::new();
-        self.collect_records(root, &mut out, &mut budget);
-        out
+        self.collect_records(root, &mut items, &mut budget);
+        Records {
+            items,
+            truncated: budget.exhausted,
+        }
     }
 
     fn collect_records(
@@ -716,12 +809,21 @@ impl Doc {
         }
         if let Some(node) = self.nodes.get(cid) {
             if let Node::Record { schema, fields } = node {
-                out.push((schema.clone(), fields.clone()));
-            }
-            for r in node.contained() {
-                if self.nodes.contains_key(&r) {
-                    self.collect_records(&r, out, budget);
+                let size = schema.len()
+                    + fields
+                        .iter()
+                        .map(|(k, v)| k.len() + v.render().len())
+                        .sum::<usize>();
+                if budget.spend(size) {
+                    out.push((schema.clone(), fields.clone()));
                 }
+            }
+            // No `contains_key` guard. The human walk spends a visit on an unresolvable
+            // child and prints `[missing]`; if this one skipped those, the two walks would
+            // exhaust at different points on the same document and an agent would see
+            // records the reader never sees.
+            for r in node.contained() {
+                self.collect_records(&r, out, budget);
             }
         }
         budget.leave();
@@ -733,11 +835,15 @@ impl Doc {
     /// Separate from [`Doc::records`] on purpose. An agent that wants to act on quoted or
     /// linked material has to ask for it explicitly and knows it is looking at somebody
     /// else's content, rather than receiving it silently mixed in with the document's own.
-    pub fn linked_records(
-        &self,
-        root: &Cid,
-    ) -> Vec<(Cid, String, BTreeMap<String, Value>)> {
-        let mut out = Vec::new();
+    /// One budget for the whole call, not one per edge.
+    ///
+    /// This used to call `records()` per link target, and each of those built a fresh budget.
+    /// The `seen` set bounds distinct nodes and not link edges, so a single `Prose` node
+    /// carrying `MAX_ELEMENTS` runs bought that many full allowances: the ceiling was
+    /// edges times `MAX_VISITS`, which is not a ceiling. A bound that resets is not a bound.
+    pub fn linked_records(&self, root: &Cid) -> LinkedRecords {
+        let mut items = Vec::new();
+        let mut budget = Budget::new();
         // Walk this document's containment, and at each node take one step outward.
         let mut frontier = vec![*root];
         let mut seen = std::collections::BTreeSet::new();
@@ -745,17 +851,25 @@ impl Doc {
             if !seen.insert(cid) {
                 continue;
             }
+            if budget.exhausted {
+                break;
+            }
             let Some(node) = self.nodes.get(&cid) else {
                 continue;
             };
             for target in node.links() {
-                for (schema, fields) in self.records(&target) {
-                    out.push((target, schema, fields));
+                let mut found = Vec::new();
+                self.collect_records(&target, &mut found, &mut budget);
+                for (schema, fields) in found {
+                    items.push((target, schema, fields));
                 }
             }
             frontier.extend(node.contained());
         }
-        out
+        LinkedRecords {
+            items,
+            truncated: budget.exhausted,
+        }
     }
 
     /// Backlinks: given the nodes we hold, who points at `target`. This is the feature
@@ -808,8 +922,186 @@ mod tests {
             text.contains("[truncated"),
             "a truncated render must say so rather than look complete"
         );
-        assert!(text.len() < 4 << 20, "render produced {} bytes", text.len());
-        assert!(doc.records(&root).len() <= 1 << 16);
+        assert!(
+            text.len() <= Budget::MAX_BYTES + 128,
+            "render produced {} bytes against a {} byte budget",
+            text.len(),
+            Budget::MAX_BYTES
+        );
+        let recs = doc.records(&root);
+        assert!(recs.truncated, "a truncated record set must say so");
+    }
+
+    /// A visit cap does not bound output, and output is what the reader pays in.
+    ///
+    /// The doubling chain re-renders the same leaf up to `MAX_VISITS` times. With a fat leaf
+    /// that is a multi-gigabyte string from a document of a hundred kilobytes, every other
+    /// bound satisfied. What an adversary buys is the reader's memory, so memory is metered.
+    #[test]
+    fn a_fat_leaf_in_a_doubling_chain_does_not_buy_gigabytes() {
+        let mut doc = Doc::new();
+        let fat = doc.add(Node::Prose {
+            runs: vec![Run::plain(&"x".repeat(60_000))],
+        });
+        let mut cur = fat;
+        for i in 0..40 {
+            cur = doc.add(Node::Section {
+                title: format!("{i}"),
+                children: vec![cur, cur],
+            });
+        }
+        let text = doc.render_text(&cur);
+        assert!(
+            text.len() <= Budget::MAX_BYTES + 128,
+            "{} bytes from a document whose only text is 60 kB",
+            text.len()
+        );
+        assert!(text.contains("[truncated"));
+    }
+
+    /// Both walks must stop on the same document, or an agent acts on what nobody can read.
+    ///
+    /// The human walk spends a visit on an unresolvable child and prints `[missing]`; the
+    /// machine walk used to skip those without charge. The two then exhausted at different
+    /// points on the same document, contradicting the promise that `records` descends
+    /// containment exactly as `render_text` does.
+    ///
+    /// The document is built so that **the only thing that can exhaust either walk is the
+    /// charge for an unresolvable child**: no records, so nothing spends record bytes, and
+    /// the rendered text stays well inside the byte budget, so visits are what bind. An
+    /// earlier version of this test nested the missing children under a doubling chain, and
+    /// passed with the defect restored because both walks stopped for unrelated reasons.
+    #[test]
+    fn the_machine_view_and_the_human_view_stop_together() {
+        let mut doc = Doc::new();
+        let mut sections = Vec::new();
+        for s in 0..20u32 {
+            let absent: Vec<Cid> = (0..4096u32)
+                .map(|i| Cid::of(&(s * 10_000 + i).to_le_bytes()))
+                .collect();
+            sections.push(doc.add(Node::Section {
+                title: String::new(),
+                children: absent,
+            }));
+        }
+        let root = doc.add(Node::Section {
+            title: String::new(),
+            children: sections,
+        });
+
+        let text = doc.render_text(&root);
+        assert!(
+            text.len() < Budget::MAX_BYTES,
+            "the byte budget bound first, so this tests the wrong thing"
+        );
+        assert!(
+            text.contains("[truncated"),
+            "the human walk should have run out of visits"
+        );
+        assert!(
+            doc.records(&root).truncated,
+            "the human walk stopped and the machine walk kept going on the same document"
+        );
+    }
+
+    /// A bound that resets per edge is not a bound.
+    ///
+    /// `linked_records` built a fresh budget for every link target, and one `Prose` node may
+    /// carry thousands of runs each with its own link, so the real ceiling was edges times
+    /// `MAX_VISITS`.
+    #[test]
+    fn following_links_shares_one_budget_across_every_edge() {
+        let mut doc = Doc::new();
+        let rec = doc.add(Node::Record {
+            schema: "payment".into(),
+            fields: [("amount".to_string(), money(100))].into_iter().collect(),
+        });
+        let mut deep = rec;
+        for i in 0..30 {
+            deep = doc.add(Node::Section {
+                title: format!("{i}"),
+                children: vec![deep, deep],
+            });
+        }
+        let runs: Vec<Run> = (0..512).map(|_| Run::tracking_link("see", deep)).collect();
+        let root = doc.add(Node::Prose { runs });
+
+        let start = std::time::Instant::now();
+        let linked = doc.linked_records(&root);
+        assert!(
+            start.elapsed().as_secs() < 10,
+            "took {:?}",
+            start.elapsed()
+        );
+        assert!(linked.truncated, "the walk stopped and did not say so");
+    }
+
+    /// An agent must be able to tell "nothing here" from "I stopped looking".
+    #[test]
+    fn a_truncated_record_set_is_distinguishable_from_an_empty_one() {
+        let mut doc = Doc::new();
+        let empty = doc.add(Node::Prose {
+            runs: vec![Run::plain("no records here")],
+        });
+        let honest = doc.records(&empty);
+        assert!(honest.is_empty() && !honest.truncated);
+        assert!(honest.clone().complete().is_some());
+
+        // The same empty answer, for the opposite reason.
+        let mut cur = doc.add(Node::Record {
+            schema: "buried".into(),
+            fields: BTreeMap::new(),
+        });
+        for i in 0..(Budget::MAX_DEPTH + 8) {
+            cur = doc.add(Node::Section {
+                title: format!("{i}"),
+                children: vec![cur],
+            });
+        }
+        let cut = doc.records(&cur);
+        assert!(cut.is_empty(), "the record should be out of reach");
+        assert!(cut.truncated, "and the caller must be told why");
+        assert!(cut.complete().is_none());
+    }
+
+    /// Minus fifty cents is not a credit of fifty cents.
+    #[test]
+    fn a_small_negative_amount_keeps_its_sign() {
+        assert_eq!(money(-50).render(), "-0.50 EUR");
+        assert_eq!(money(-5).render(), "-0.05 EUR");
+        assert_eq!(money(-99).render(), "-0.99 EUR");
+        assert_eq!(money(-4500).render(), "-45.00 EUR");
+        assert_eq!(money(0).render(), "0.00 EUR");
+        assert_eq!(money(50).render(), "0.50 EUR");
+        // The one value whose magnitude does not fit back into i64.
+        assert!(money(i64::MIN).render().starts_with('-'));
+    }
+
+    /// Nesting must be visible, or the rendered structure is not the document's structure.
+    #[test]
+    fn a_nested_paragraph_renders_further_right_than_its_parent() {
+        let mut doc = Doc::new();
+        let p = doc.add(Node::Prose {
+            runs: vec![Run::plain("innermost")],
+        });
+        let mut cur = p;
+        for i in 0..3 {
+            cur = doc.add(Node::Section {
+                title: format!("level {i}"),
+                children: vec![cur],
+            });
+        }
+        let text = doc.render_text(&cur);
+        let indent = |needle: &str| {
+            text.lines()
+                .find(|l| l.trim() == needle)
+                .map(|l| l.len() - l.trim_start().len())
+                .unwrap_or_else(|| panic!("{needle} not rendered"))
+        };
+        assert!(
+            indent("innermost") > indent("level 2"),
+            "nesting rendered flat:\n{text}"
+        );
     }
 
     /// A chain long enough to overflow the stack is refused rather than survived by luck.
@@ -937,9 +1229,9 @@ mod tests {
 
         // Machine path, over the identical bytes, with no parsing
         let records = doc.records(&root);
-        assert_eq!(records.len(), 1);
-        assert_eq!(records[0].0, "consultation");
-        assert_eq!(records[0].1["price"], money(4500));
+        assert_eq!(records.items.len(), 1);
+        assert_eq!(records.items[0].0, "consultation");
+        assert_eq!(records.items[0].1["price"], money(4500));
     }
 
     #[test]
@@ -1003,9 +1295,9 @@ mod tests {
 
         // Following the link is available, explicit, and attributed to its source.
         let linked = doc.linked_records(&ours);
-        assert_eq!(linked.len(), 1);
-        assert_eq!(linked[0].0, hostile_root);
-        assert_eq!(linked[0].1, "payment");
+        assert_eq!(linked.items.len(), 1);
+        assert_eq!(linked.items[0].0, hostile_root);
+        assert_eq!(linked.items[0].1, "payment");
     }
 
     #[test]

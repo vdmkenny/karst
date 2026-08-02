@@ -93,10 +93,14 @@ fn main() {
         println!("    {line}");
     }
     println!("  as an agent sees it (typed, no parsing, no scraping):");
-    for (schema, f) in doc.records(&root) {
-        for (k, v) in &f {
+    let seen = doc.records(&root);
+    for (schema, f) in &seen.items {
+        for (k, v) in f {
             println!("    {schema}.{k} = {:?}", v);
         }
+    }
+    if seen.truncated {
+        println!("    (truncated: this document exceeds the reading budget)");
     }
     note("Identical bytes. There is no markup, no second API, and nothing to scrape.");
     println!("  every node is independently quotable:");
