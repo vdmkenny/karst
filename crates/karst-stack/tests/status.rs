@@ -36,15 +36,40 @@ fn every_crate_the_paper_names_exists_and_every_crate_is_named() {
         .map(|t| t.split("::").next().unwrap().trim_end_matches('/').to_string())
         .collect();
 
-    let on_disk: BTreeSet<String> = std::fs::read_dir(root().join("crates"))
+    let mut on_disk: BTreeSet<String> = std::fs::read_dir(root().join("crates"))
         .expect("crates/")
         .filter_map(|e| e.ok())
         .filter(|e| e.path().join("Cargo.toml").exists())
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
 
+    // Binaries are nameable too. `karst-net-demo` is a target inside `karst-net`, and the
+    // paper referring to it by the name you type is right rather than wrong.
+    let mut runnable: BTreeSet<String> = BTreeSet::new();
+    for c in &on_disk {
+        let manifest = std::fs::read_to_string(root().join("crates").join(c).join("Cargo.toml"))
+            .unwrap_or_default();
+        for line in manifest.lines() {
+            if let Some(n) = line.strip_prefix("name = \"") {
+                runnable.insert(n.trim_end_matches('"').to_string());
+            }
+        }
+        let bins = root().join("crates").join(c).join("src/bin");
+        if let Ok(entries) = std::fs::read_dir(&bins) {
+            for e in entries.filter_map(|e| e.ok()) {
+                if let Some(stem) = e.path().file_stem() {
+                    runnable.insert(stem.to_string_lossy().to_string());
+                }
+            }
+        }
+    }
+    on_disk.extend(runnable.iter().cloned());
+
     for c in &named {
-        assert!(on_disk.contains(c), "the paper names {c}, which does not exist");
+        assert!(
+            on_disk.contains(c),
+            "the paper names {c}, which is neither a crate nor a binary"
+        );
     }
 
     // Harnesses and demos are tooling, not layers, so the paper owes them nothing.
@@ -52,7 +77,15 @@ fn every_crate_the_paper_names_exists_and_every_crate_is_named() {
         .iter()
         .map(|s| s.to_string())
         .collect();
-    for c in on_disk.difference(&tooling) {
+    // Every crate must be named. Binaries are allowed to go unmentioned; they are how you
+    // run the thing, not part of what it is.
+    let crates_only: BTreeSet<String> = std::fs::read_dir(root().join("crates"))
+        .expect("crates/")
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().join("Cargo.toml").exists())
+        .map(|e| e.file_name().to_string_lossy().to_string())
+        .collect();
+    for c in crates_only.difference(&tooling) {
         assert!(named.contains(c), "{c} exists and the paper does not mention it");
     }
 }
@@ -110,5 +143,72 @@ fn the_agency_table_agrees_with_karst_attest() {
              Delegated alone",
             cols[3]
         );
+    }
+}
+
+/// The build-order table in §8.1 must match the crate manifests.
+///
+/// It exists so an implementer can derive what to build first, which makes it exactly the kind
+/// of hand-maintained summary that goes stale silently. §8 already did that once (#102).
+#[test]
+fn the_dependency_table_matches_the_manifests() {
+    let text = whitepaper();
+    let at = text
+        .find("| Layer | Crate | Depends on | Provides upward |")
+        .expect("the 8.1 dependency table");
+    let table = &text[at..at + text[at..].find("\n\n").unwrap_or(0)];
+
+    // Layer label -> the crates that layer names.
+    let mut crates_of: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    let mut rows: Vec<(String, Vec<String>, Vec<String>)> = Vec::new();
+
+    for line in table.lines().filter(|l| l.starts_with("| L")) {
+        let cols: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cols.len() < 5 {
+            continue;
+        }
+        let layer = cols[1].split_whitespace().next().unwrap_or("").to_string();
+        let crates: Vec<String> = cols[2]
+            .split('`')
+            .filter(|t| t.starts_with("karst-"))
+            .map(str::to_string)
+            .collect();
+        let deps: Vec<String> = cols[3]
+            .split(&[',', ' '][..])
+            .filter(|t| t.starts_with('L'))
+            .map(str::to_string)
+            .collect();
+        crates_of.insert(layer.clone(), crates.clone());
+        rows.push((layer, crates, deps));
+    }
+    assert!(rows.len() > 10, "parsed only {} rows", rows.len());
+
+    for (layer, crates, deps) in &rows {
+        // Everything the declared dependency layers make available, plus this layer's own.
+        let mut allowed: BTreeSet<String> = crates.iter().cloned().collect();
+        for d in deps {
+            for c in crates_of.get(d).into_iter().flatten() {
+                allowed.insert(c.clone());
+            }
+        }
+        for c in crates {
+            let manifest =
+                std::fs::read_to_string(root().join("crates").join(c).join("Cargo.toml"))
+                    .unwrap_or_else(|_| panic!("{layer} names {c}, which has no manifest"));
+            for line in manifest.lines() {
+                let Some(dep) = line.split(['.', ' ', '=']).next() else {
+                    continue;
+                };
+                if !dep.starts_with("karst-") || dep == c {
+                    continue;
+                }
+                assert!(
+                    allowed.contains(dep),
+                    "{layer} ({c}) depends on {dep}, which none of its declared \
+                     dependency layers {deps:?} provide"
+                );
+            }
+        }
     }
 }

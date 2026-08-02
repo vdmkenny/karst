@@ -1467,6 +1467,62 @@ paper that is not from cited literature comes from a simulator in this repositor
 
 ---
 
+### 8.1 What the numbering is, and what to build in what order
+
+**The layer numbers are a conceptual ordering, not a build order, and reading them as one will
+mislead an implementer.** They say what a layer is *about*: the lower the number, the closer to
+moving bytes, the higher the number, the closer to what a person or an agent is doing. They do
+not say what compiles first.
+
+The build order is a different graph, and it is short:
+
+```
+  karst-id  (L2 Identity)         no dependencies
+      |
+  karst-object  (L6 Objects)      needs only L2
+      |
+  everything else
+```
+
+Two layers are foundational rather than sequential. **L2 Identity** supplies the keys and
+addresses every other layer names things with; **L6 Objects** supplies content addressing,
+canonical encoding, and the signed-object envelope every other layer puts its structures in. Nine
+of the remaining layers depend on L6 directly, including four numbered below it. That is not an
+accident to be corrected by renumbering: an addressing and encoding facility is used by
+everything, in the same way that neither TCP nor HTTP is meaningfully "above" the notion of a
+byte string.
+
+The rest of the dependency graph, from the crate manifests rather than from intent:
+
+| Layer | Crate | Depends on | Provides upward |
+|---|---|---|---|
+| L2 Identity | `karst-id` | nothing | keys, addresses, signatures, rotation |
+| L6 Objects | `karst-object`, `karst-blob` | L2 | content addressing, canonical encoding, signed objects, manifests |
+| L1 Path | `karst-path` | L2, L6 | operator-signed segments, sender-composed paths |
+| L3 Wire | `karst-wire` | L4 | pacing, no stable handshake or length distribution |
+| L4 Mixing | `karst-mix`, `karst-node`, `karst-net`, `karst-seal` | L2, L6, L3 | Sphinx packets, mix nodes, providers, sealed payloads |
+| L5 Membership | `karst-member` | L2 | private set intersection, introduction |
+| L8 Witness | `karst-witness` | L2, L6 | checkpoints, cosigning, equivocation evidence |
+| L9 Authority | `karst-cap` | L2, L6 | attenuable capabilities, offline verification |
+| L10 Document | `karst-doc` | L2, L6 | nodes, containment, links, records |
+| L11 Affordance | `karst-afford` | L2, L6, L9, L10 | typed operations on objects, invocation |
+| L12 Agency | `karst-agency` | L6, L10 | what an agent may fetch, declared closure |
+| L13 Provenance | `karst-doc`, `karst-object`, `karst-attest` | L2, L6, L9 | lineage, backlinks, authorship agency |
+| L14 Value | `karst-value` | L2, L6 | capacity credentials, earn and spend separated |
+| L15 Discovery | `karst-index` | L2, L6 | catalogues, ranking, completeness, census |
+| L16 Symmetry | `karst-symmetry` | nothing | standing, contention, flat returns |
+| L0 Bearer | none | nothing | **not built**; see §3.1 |
+
+`karst-thread` (boards and threads) and `karst-stack` (the composed demonstration) sit above all
+of it and are applications rather than layers.
+
+**A minimum useful deployment** is L2, L6, L3, L4 and a provider: that is two clients exchanging
+a message nobody can attribute, which is what `karst-net-demo` runs. Everything above L4 is
+usable without a network and is not private without one, which is why the two halves were built
+in that order.
+
+---
+
 ## 9. Deployment
 
 **Devices first**, not because it is exciting: it is seven layers, fits a microcontroller, has no
