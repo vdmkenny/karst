@@ -238,7 +238,27 @@ check meant to stop it.
 **Two senders holding different segments are both correct**, and neither advertises anything
 onward. That is the absence of convergence rather than a weaker form of it.
 
-This is SCION's design. It is not a thought experiment and it carries production traffic.
+This is SCION's design rather than a new one, and the honest summary is narrower than "it
+works". SCION has carried commercial traffic since 2017, and after nine years its
+specifications remain Internet-Drafts on the Independent Submission stream carrying the
+boilerplate that the work "is not endorsed by the IETF and has no formal standing in the IETF
+standards process". Its own authors published a break of its data plane: standard SCION's
+hop-field authorisation permits token reuse, so a forged token sends arbitrarily many packets,
+which is what EPIC (Legner, Klenze, Wyss, Sprenger, Perrig, USENIX Security 2020) exists to fix
+with per-packet MACs.
+
+**Why the alternative is not better.** BGP's deployed defence is RPKI route origin validation,
+and its record is worth reading before concluding that a global routing consensus can be
+secured incrementally. Coverage looks reasonable and enforcement does not: about two thirds of
+prefixes carry a ROA, while measurement puts fully protected networks at 12.3%, and 68.5% of
+networks that tools classify as protected are **not enforcing anything** and merely inherit
+filtering from a transit provider. Disabling validation at thirteen tier-1 networks restores
+reachability for RPKI-invalid routes across 23.8% of the internet, which is a centralisation
+result rather than a resilience one. RPKI also fails open by design, so an adversary who stalls
+a publication point disables validation for everything depending on it (*Stalloris*, USENIX
+Security 2022). And BGPsec, the path-validating successor, has essentially no deployment, with
+a peer-reviewed result showing partial deployment can introduce **new** vulnerabilities
+(Lychev, Goldberg, Schapira, SIGCOMM 2013).
 
 **Interaction with L4.** Path selection also determines anonymity, and **selection is uniform
 over admitted relays**. A structural preference that relay operators can read is a placement
