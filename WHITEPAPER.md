@@ -138,7 +138,7 @@ made them less safe.
               L11  Affordance    typed machine operations inside the object
               L10  Document      typed node graph, no markup
 
-  TRUST       L9   Authority     capabilities, attenuable and revocable
+  TRUST       L9   Authority     capabilities, attenuable, expiring, not revocable
               L8   Witness       plural transparency logs, no root store
 
   CARRIAGE    L7   Streams       append-only media, swarm delivery
@@ -1228,7 +1228,7 @@ drowns, and boards will recentralise around good curators, which is §6.6 arrivi
 
 ## 6. What it costs
 
-A design that lists only its properties is a manifesto. These are the eleven things genuinely worse
+A design that lists only its properties is a manifesto. These are the things genuinely worse
 under this architecture. None has a clever fix hiding behind it.
 
 **6.1 Nothing can ever be taken down. Not one thing.** Content addressing plus universal re-serving
@@ -1357,6 +1357,30 @@ anonymity at scale removes it when few people are using it. See
 pull against each other, and the four published anonymous incentive schemes for Tor all observe
 the earning side. KARST narrows the leak to `t` issuers rather than a network observer; it does
 not remove it.
+
+**6.15 Authority cannot be revoked.** A capability verifies offline against the object it names,
+with no directory and no callback. A verifier that never calls anyone cannot learn that a
+capability was withdrawn, so a delegation stands until it expires or runs out of uses. An agent
+whose key is compromised keeps its authority until then, and the resource cannot be reissued under
+a new name to escape, because it is content-addressed and a new name breaks every other
+capability, link and quote pointing at it. **Offline verification and revocation are the same
+tradeoff seen from two sides**, and this design took offline. An API key can be revoked; this
+cannot. `docs/29-capability-costs.md`.
+
+**6.16 Losing your key destroys your identity, permanently.** An address is the hash of a locally
+generated key, and the only migration path needs the old private key to sign its own succession.
+That bidirectionality is what stops a compromised old key or an opportunistic new one from moving
+an identity alone, and it means a key that is gone cannot authorise anything, including a
+successor. There is no registrar to petition, by design.
+
+Gone with the key: every L16 standing, every capability naming that address, every L5
+introduction, every undelivered blinded drop, and the ability to ever publish a successor to your
+own documents, so every `Tracking` link to your work freezes at the last version forever. The web
+offers account recovery. This offers nothing, and it offers nothing for the same reason it has no
+registrar: **a recovery path is an authority that can take an identity from you**, which is error
+01 wearing a helpful face. No mitigation is claimed because none is built.
+
+---
 
 ### Unsolved
 
