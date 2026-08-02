@@ -16,7 +16,6 @@
 //! to the fragment size. A sender wanting that concealed pads to a fixed fragment count, and
 //! that is a choice at a higher layer because only the sender knows what it is worth.
 
-use karst_mix::packet::PAYLOAD_BYTES;
 
 /// Bytes usable in a delivered payload, once Sphinx has taken its length prefix.
 pub const FRAGMENT_BYTES: usize = karst_mix::packet::MAX_MESSAGE_BYTES;

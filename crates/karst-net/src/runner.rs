@@ -42,7 +42,13 @@ use crate::provider::{Provider, Tag};
 ///
 /// Fixed width, because a request whose length varied with what it asked for would tell an
 /// observer which kind it was.
-pub const REQUEST_BYTES: usize = 1 + 32 + 4;
+pub const REQUEST_BYTES: usize = 1 + 32 + 8 + 64;
+
+/// Where the counter sits in a request.
+const REQ_COUNTER: usize = 33;
+/// Where the drain signature sits. Zero-filled for a read, so both requests are one size and
+/// an observer cannot tell a mailbox drain from a feed read by length.
+const REQ_SIG: usize = 41;
 
 /// A collection response: status, the refusal count, the cursor it answers, and a fixed body.
 ///
@@ -171,14 +177,23 @@ impl NodeRunner {
             let mut cred = [0u8; 32];
             cred.copy_from_slice(&buf[1..33]);
             let kind = buf[0];
-            let cursor = u32::from_le_bytes([buf[33], buf[34], buf[35], buf[36]]) as usize;
+            let counter = u64::from_le_bytes(buf[REQ_COUNTER..REQ_COUNTER + 8].try_into().unwrap());
+            let cursor = counter as usize;
 
             let (item, refused) = match kind {
-                // Draining needs the preimage of the tag, so a correspondent who knows where
-                // to deposit still cannot delete what is there.
+                // Draining is destructive, so it needs proof that the asker holds the drain
+                // key. The proof is a signature over a counter, not the key itself: a
+                // credential that has to be shown to be used is a bearer token in transit,
+                // and this link is neither encrypted nor trusted.
                 REQ_DRAIN => {
+                    let mut sig = [0u8; 64];
+                    sig.copy_from_slice(&buf[REQ_SIG..REQ_SIG + 64]);
                     let tag = crate::client::mailbox_tag(&cred);
-                    store.take_one(&tag)
+                    match store.drain_once(&tag, &cred, counter, &sig) {
+                        Ok(got) => got,
+                        // Silent. A refusal that answered would say whether the tag exists.
+                        Err(_) => (None, 0),
+                    }
                 }
                 // Reading a feed needs nothing, because a feed tag is public. It also takes
                 // nothing away, or any stranger could delete a publisher one packet at a time.
@@ -484,7 +499,8 @@ impl ClientRunner {
         let mut req = [0u8; REQUEST_BYTES];
         req[0] = REQ_READ;
         req[1..33].copy_from_slice(&tag);
-        req[33..].copy_from_slice(&cursor.to_le_bytes());
+        req[REQ_COUNTER..REQ_COUNTER + 8].copy_from_slice(&(cursor as u64).to_le_bytes());
+        // Signature bytes stay zero. A read needs no proof and must not be shorter for it.
         let _ = self.collect_sock.send_to(&req, at);
         self.record(at, tag, |o| o.read_cursor = Some(cursor));
 
@@ -585,7 +601,10 @@ impl ClientRunner {
         let now = self.now_ms();
         let mut req = [0u8; REQUEST_BYTES];
         req[0] = REQ_DRAIN;
-        req[1..33].copy_from_slice(&self.client.collect_key());
+        let (counter, sig) = self.client.drain_proof();
+        req[1..33].copy_from_slice(&self.client.drain_public());
+        req[REQ_COUNTER..REQ_COUNTER + 8].copy_from_slice(&counter.to_le_bytes());
+        req[REQ_SIG..REQ_SIG + 64].copy_from_slice(&sig);
         let _ = self.collect_sock.send_to(&req, self.provider_collect);
         self.record(self.provider_collect, self.client.mailbox(), |o| {
             o.drains += 1
@@ -772,7 +791,10 @@ mod tests {
         // The honest answer to the question actually asked still lands.
         r.runner.poll_tag(tag);
         let req = r.last_request();
-        assert_eq!(u32::from_le_bytes(req[33..].try_into().unwrap()), 0);
+        assert_eq!(
+            u64::from_le_bytes(req[REQ_COUNTER..REQ_COUNTER + 8].try_into().unwrap()),
+            0
+        );
         r.respond(&r.provider, at, tag, 0, 9);
         assert_eq!(r.collected(tag).len(), 1);
     }

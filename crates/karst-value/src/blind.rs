@@ -1,12 +1,8 @@
 //! Blind signatures: the issuer signs what it cannot read.
 //!
-//! Issue #43. The credential protocol previously argued unlinkability from **data flow**:
-//! issuers received `blake3(serial || blinding)` and never saw the serial, so the issuance and
-//! spend transcripts shared no field. That is an argument about what a well-behaved
-//! implementation passes around, not a cryptographic guarantee, and verification used the
-//! issued secret so a verifier could forge credentials it never issued.
-//!
-//! This is the guarantee. Chaum's construction, standardised as RFC 9474:
+//! Issue #43. Unlinkability here is a cryptographic guarantee rather than an argument about
+//! what a well-behaved implementation passes around. Chaum's construction, standardised as
+//! RFC 9474:
 //!
 //! ```text
 //!   blind    b = m · r^e  mod n        holder picks r, issuer cannot recover m
@@ -16,10 +12,30 @@
 //! ```
 //!
 //! The property that matters is **perfect blinding**: because `r ↦ r^e` is a bijection modulo
-//! `n`, every message `m` has exactly one `r` producing any given `b`. So a blinded value is
-//! consistent with *every* message, and the issuer's view carries no information about which
-//! one it signed. [`tests::a_blinded_value_is_consistent_with_any_message`] demonstrates that
-//! constructively rather than asserting it.
+//! `n`, every message `m` has exactly one `r` producing any given `b`. A blinded value is
+//! therefore consistent with every message, and the issuer's view carries no information about
+//! which one it signed.
+//!
+//! # The implementation is the specification's
+//!
+//! The scheme is `blind-rsa-signatures`, variant **RSABSSA-SHA384-PSS-Randomized**, the RFC
+//! 9474 default. Nothing in this module performs a modular exponentiation, generates a key, or
+//! chooses a blinding factor.
+//!
+//! That division is the point. A blind signature is a scheme where the distance between
+//! correct and catastrophic is invisible on inspection: a blinding factor drawn from a
+//! predictable source turns information-theoretic unlinkability into an offline search, and the
+//! party best placed to run that search is the issuer, which is the party blinding defends
+//! against. Randomness comes from the operating system. The only decisions left here are which
+//! variant to use and what a credential is bound to.
+//!
+//! Two consequences of the variant, stated because they are choices:
+//!
+//! - **PSS rather than full-domain hash.** An unblinded signature verifies with a stock
+//!   RSA-PSS verifier, so a verifier needs no code from this repository.
+//! - **Randomized rather than deterministic.** The holder mixes 32 bytes of its own randomness
+//!   into the encoded message, which removes the issuer's influence over the exact bytes
+//!   signed. The randomizer travels with the credential and is not a secret.
 //!
 //! # On threshold issuance, and a correction
 //!
@@ -32,533 +48,333 @@
 //! - **Threshold within a set** protects one set against a member being compromised or
 //!   compelled. Valuable, and a different concern.
 //!
-//! RSA blind signatures give plurality and public verifiability and lose threshold-within-a-set.
-//! Recovering it needs Coconut over a pairing curve, or threshold RSA. The `shamir` module still
-//! carries the threshold structure and the two are not yet composed.
-//!
-//! # Status
-//!
-//! Full-domain-hash RSA rather than RFC 9474's PSS encoding. FDH is Chaum's original and sound
-//! in the random oracle model; PSS is what the RFC specifies so that the unblinded signature
-//! verifies with a stock RSA-PSS library. **Assembled from primitives and not reviewed.**
+//! RSA blind signatures give plurality and public verifiability and lose
+//! threshold-within-a-set. Recovering it needs Coconut over a pairing curve, or threshold RSA.
+//! The `shamir` module carries the threshold structure and the two are not composed.
 
-use num_bigint_dig::traits::ModInverse;
-use num_bigint_dig::BigUint;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-use rsa::traits::{PrivateKeyParts, PublicKeyParts};
-use rsa::{RsaPrivateKey, RsaPublicKey};
+use blind_rsa_signatures::{
+    BlindSignature as RawBlindSignature, BlindingResult, DefaultRng, KeyPairSha384PSSRandomized as Suite,
+    MessageRandomizer, PublicKeySha384PSSRandomized as SuitePublic,
+    SecretKeySha384PSSRandomized as SuiteSecret, Signature as RawSignature,
+};
 
-/// Modulus size for a credential issuer. 2048 is the floor for anything real; tests use less
-/// so that key generation does not dominate the suite.
+/// Modulus size for a credential issuer.
+///
+/// RFC 9474 requires at least 2048 bits, and this is not a parameter worth tuning down: an
+/// issuer that chooses less has saved nothing a credential system values.
 pub const ISSUER_BITS: usize = 2048;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BlindError {
-    /// The blinding factor was not invertible modulo `n`, which is vanishingly unlikely and
-    /// must be retried rather than worked around.
-    BadBlinding,
-    /// The signature did not verify against the public key.
-    Invalid,
+    /// Key generation failed. Retried rather than worked around.
+    KeyGeneration,
+    /// The issuer's signature does not correspond to the blinded value it was given.
+    BadSignature,
+    /// The credential does not verify under this issuer's key.
+    NotValid,
+    /// A key or signature was not well formed.
+    Malformed,
 }
 
 impl core::fmt::Display for BlindError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
-            BlindError::BadBlinding => write!(f, "blinding factor not invertible, retry"),
-            BlindError::Invalid => write!(f, "signature did not verify"),
+            BlindError::KeyGeneration => write!(f, "issuer key generation failed"),
+            BlindError::BadSignature => write!(f, "issuer signature does not match the request"),
+            BlindError::NotValid => write!(f, "credential does not verify"),
+            BlindError::Malformed => write!(f, "malformed key or signature"),
         }
     }
 }
 
 impl std::error::Error for BlindError {}
 
-/// An issuer's signing key. Never leaves the issuer.
+/// An issuer's signing key.
 pub struct IssuerKey {
-    inner: RsaPrivateKey,
+    secret: SuiteSecret,
+    public: SuitePublic,
 }
 
-/// What a verifier needs, and all it needs. Public verifiability is the point: a verifier can
-/// check a credential it did not issue and could not have issued.
-#[derive(Clone, PartialEq, Eq)]
+/// Deliberately opaque. An issuing key in a log is an issuing key that mints for everyone.
+impl core::fmt::Debug for IssuerKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("IssuerKey(redacted)")
+    }
+}
+
+/// What an issuer publishes. A credential verifies against this and nothing else.
+#[derive(Clone, Debug)]
 pub struct IssuerPublic {
-    inner: RsaPublicKey,
+    inner: SuitePublic,
 }
 
 impl IssuerKey {
-    /// Deterministic generation, so tests are reproducible. A real issuer draws from the
-    /// system CSPRNG.
-    pub fn generate(bits: usize, seed: u64) -> IssuerKey {
-        let mut rng = StdRng::seed_from_u64(seed);
-        IssuerKey {
-            inner: RsaPrivateKey::new(&mut rng, bits).expect("key generation"),
-        }
+    /// Generate an issuing key from the system randomness the scheme's own crate supplies.
+    ///
+    /// There is no seeded constructor, deliberately. A seeded issuer key has as much entropy
+    /// as its seed, and the wish for reproducible tests is exactly how that gets introduced.
+    pub fn generate(bits: usize) -> Result<IssuerKey, BlindError> {
+        let kp =
+            Suite::generate(&mut DefaultRng, bits).map_err(|_| BlindError::KeyGeneration)?;
+        Ok(IssuerKey {
+            secret: kp.sk,
+            public: kp.pk,
+        })
     }
 
     pub fn public(&self) -> IssuerPublic {
         IssuerPublic {
-            inner: RsaPublicKey::from(&self.inner),
+            inner: self.public.clone(),
         }
     }
 
-    /// Sign a blinded value. **The issuer cannot read what it is signing**, which is what
-    /// makes the later spend unlinkable to this moment.
-    pub fn sign_blinded(&self, blinded: &BlindedMessage) -> BlindSignature {
-        let d = self.inner.d();
-        let n = self.inner.n();
-        BlindSignature {
-            value: blinded.value.modpow(d, n),
-        }
+    /// Sign a blinded value, learning nothing about what it is.
+    pub fn sign_blinded(&self, blinded: &BlindedMessage) -> Result<BlindSignature, BlindError> {
+        let sig = self
+            .secret
+            .blind_sign(&blinded.bytes)
+            .map_err(|_| BlindError::Malformed)?;
+        Ok(BlindSignature { inner: sig })
     }
 }
 
 impl IssuerPublic {
-    fn n(&self) -> &BigUint {
-        self.inner.n()
-    }
-    fn e(&self) -> &BigUint {
-        self.inner.e()
-    }
-
-    /// Full-domain hash of a message into the RSA group.
+    /// Check a credential against this issuer alone.
     ///
-    /// Expanded to twice the modulus length before reduction, so the residual bias is far
-    /// below anything that matters.
-    fn hash_to_group(&self, msg: &[u8]) -> BigUint {
-        let n = self.n();
-        let width = (n.bits() + 7) / 8;
-        let mut buf = vec![0u8; width * 2];
-        let mut h = blake3::Hasher::new();
-        h.update(b"karst.blind.fdh.v1");
-        h.update(msg);
-        h.finalize_xof().fill(&mut buf);
-        BigUint::from_bytes_be(&buf) % n
+    /// Public verifiability is what separates this from a symmetric tag: a verifier needs no
+    /// secret, so a verifier cannot forge.
+    pub fn verify(&self, msg: &[u8], sig: &Signature) -> Result<(), BlindError> {
+        self.inner
+            .verify(&sig.inner, Some(sig.randomizer), msg)
+            .map_err(|_| BlindError::NotValid)
     }
 
-    /// Check a signature using nothing but this public key.
-    pub fn verify(&self, msg: &[u8], sig: &Signature) -> Result<(), BlindError> {
-        let expected = self.hash_to_group(msg);
-        if sig.value.modpow(self.e(), self.n()) == expected {
-            Ok(())
-        } else {
-            Err(BlindError::Invalid)
-        }
+    /// The issuer's identity as bytes, for binding a credential to the set that issued it.
+    pub fn to_bytes(&self) -> Vec<u8> {
+        self.inner.to_der().unwrap_or_default()
     }
 }
 
-/// A message blinded for issuance. This is everything the issuer sees.
-#[derive(Clone, PartialEq, Eq)]
+/// What the holder sends. Carries no information about the message.
 pub struct BlindedMessage {
-    value: BigUint,
+    bytes: Vec<u8>,
 }
 
 impl BlindedMessage {
     pub fn to_bytes(&self) -> Vec<u8> {
-        self.value.to_bytes_be()
-    }
-}
-
-/// The holder's secret, kept until unblinding and then discarded.
-pub struct Blinding {
-    r: BigUint,
-}
-
-/// A signature over a blinded message, still blinded.
-#[derive(Clone, PartialEq, Eq)]
-pub struct BlindSignature {
-    value: BigUint,
-}
-
-/// A signature on the original message, verifiable by anyone.
-#[derive(Clone, PartialEq, Eq)]
-pub struct Signature {
-    value: BigUint,
-}
-
-impl Signature {
-    pub fn to_bytes(&self) -> Vec<u8> {
-        self.value.to_bytes_be()
-    }
-}
-
-/// Deliberately opaque. A signature is a bearer credential, and a credential that reaches a
-/// log has been published.
-impl core::fmt::Debug for Signature {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Signature(<{} bytes>)", self.value.to_bytes_be().len())
+        self.bytes.clone()
     }
 }
 
 impl core::fmt::Debug for BlindedMessage {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "BlindedMessage(<{} bytes>)", self.value.to_bytes_be().len())
+        f.write_str("BlindedMessage(..)")
     }
 }
 
-impl core::fmt::Debug for BlindSignature {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "BlindSignature(<{} bytes>)", self.value.to_bytes_be().len())
-    }
+/// What the holder keeps back. Never sent.
+pub struct Blinding {
+    result: BlindingResult,
 }
 
 impl core::fmt::Debug for Blinding {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "Blinding(<redacted>)")
+        f.write_str("Blinding(redacted)")
+    }
+}
+
+/// The issuer's output, still blinded.
+pub struct BlindSignature {
+    inner: RawBlindSignature,
+}
+
+impl core::fmt::Debug for BlindSignature {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("BlindSignature(..)")
+    }
+}
+
+/// A credential: a signature on a message the issuer never saw.
+#[derive(Clone)]
+pub struct Signature {
+    inner: RawSignature,
+    /// The holder's contribution to the encoded message. Public, and travels with the
+    /// signature, so a verifier can reconstruct what was signed.
+    randomizer: MessageRandomizer,
+}
+
+impl Signature {
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut v = self.randomizer.0.to_vec();
+        v.extend_from_slice(self.inner.as_ref());
+        v
+    }
+}
+
+impl core::fmt::Debug for Signature {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("Signature(..)")
     }
 }
 
 /// Blind a message for issuance.
-pub fn blind(
-    pk: &IssuerPublic,
-    msg: &[u8],
-    seed: u64,
-) -> Result<(BlindedMessage, Blinding), BlindError> {
-    let n = pk.n();
-    let m = pk.hash_to_group(msg);
-    let mut rng = StdRng::seed_from_u64(seed);
-
-    for attempt in 0..64u32 {
-        let width = ((n.bits() + 7) / 8).max(1);
-        let bytes: Vec<u8> = (0..width).map(|_| rng.gen()).collect();
-        let r = BigUint::from_bytes_be(&bytes) % n;
-        // Reject 0 and 1. **r = 1 is no blinding at all**, so the issuer sees the message
-        // directly, and nothing else in the protocol would notice. A weak or failing RNG is
-        // exactly how this happens in practice, so it is checked rather than assumed.
-        if r <= BigUint::from(1u8) {
-            continue;
-        }
-        // Invertibility is the check that r is usable; a shared factor with n would be a
-        // catastrophic accident and is simply retried.
-        if (r.clone().mod_inverse(n)).is_none() {
-            let _ = attempt;
-            continue;
-        }
-        let blinded = (&m * r.modpow(pk.e(), n)) % n;
-        return Ok((BlindedMessage { value: blinded }, Blinding { r }));
-    }
-    Err(BlindError::BadBlinding)
+///
+/// The blinding factor comes from the system CSPRNG, through the scheme's own default. It is
+/// the single value unlinkability rests on, and the party it hides from is the party best
+/// placed to search for it.
+pub fn blind(pk: &IssuerPublic, msg: &[u8]) -> Result<(BlindedMessage, Blinding), BlindError> {
+    let result = pk
+        .inner
+        .blind(&mut DefaultRng, msg)
+        .map_err(|_| BlindError::Malformed)?;
+    Ok((
+        BlindedMessage {
+            bytes: result.blind_message.0.clone(),
+        },
+        Blinding { result },
+    ))
 }
 
-/// Remove the blinding, yielding a signature on the original message.
+/// Recover a credential, checking the issuer's work before accepting it.
 ///
-/// **Verifies before returning.** A malicious or malfunctioning issuer can return any value it
-/// likes, and without this check the holder would carry away a credential that silently fails
-/// later, at a verifier, in a context where the failure is unattributable and possibly
-/// incriminating. Detecting it here attributes it to the issuer, immediately.
+/// Verification happens here rather than at spending time. A holder who discovered a bad
+/// credential when a verifier refused it would be identified at exactly the moment anonymity
+/// matters, so a malicious issuer has to fail at issuance instead.
 pub fn unblind(
     pk: &IssuerPublic,
-    sig: &BlindSignature,
-    blinding: &Blinding,
     msg: &[u8],
+    blinding: &Blinding,
+    sig: &BlindSignature,
 ) -> Result<Signature, BlindError> {
-    let n = pk.n();
-    let inv = blinding
-        .r
-        .clone()
-        .mod_inverse(n)
-        .ok_or(BlindError::BadBlinding)?
-        .to_biguint()
-        .ok_or(BlindError::BadBlinding)?;
-    let candidate = Signature {
-        value: (&sig.value * inv) % n,
-    };
-    pk.verify(msg, &candidate)?;
-    Ok(candidate)
+    let inner = pk
+        .inner
+        .finalize(&sig.inner, &blinding.result, msg)
+        .map_err(|_| BlindError::BadSignature)?;
+    let randomizer = blinding.result.msg_randomizer.ok_or(BlindError::Malformed)?;
+    Ok(Signature { inner, randomizer })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Small for test speed. A real issuer uses [`ISSUER_BITS`].
-    const TEST_BITS: usize = 1024;
+    /// Key generation at 2048 bits is slow, so the suite shares one issuer.
+    fn issuer() -> &'static IssuerKey {
+        use std::sync::OnceLock;
+        static K: OnceLock<IssuerKey> = OnceLock::new();
+        K.get_or_init(|| IssuerKey::generate(ISSUER_BITS).expect("keygen"))
+    }
 
-    fn issuer(seed: u64) -> IssuerKey {
-        IssuerKey::generate(TEST_BITS, seed)
+    fn credential(k: &IssuerKey, msg: &[u8]) -> Signature {
+        let pk = k.public();
+        let (blinded, blinding) = blind(&pk, msg).unwrap();
+        let sig = k.sign_blinded(&blinded).unwrap();
+        unblind(&pk, msg, &blinding, &sig).unwrap()
     }
 
     #[test]
-    fn a_blindly_signed_message_verifies_publicly() {
-        let sk = issuer(1);
-        let pk = sk.public();
-        let msg = b"credential serial 12345";
-
-        let (blinded, blinding) = blind(&pk, msg, 7).unwrap();
-        let bs = sk.sign_blinded(&blinded);
-        let sig = unblind(&pk, &bs, &blinding, msg).unwrap();
-
-        // Only the public key is used, so a verifier that could not have issued this can
-        // still check it. That is what the previous shared-secret scheme lacked.
-        assert!(pk.verify(msg, &sig).is_ok());
-    }
-
-    #[test]
-    fn a_verifier_cannot_forge_what_it_did_not_issue() {
-        let sk = issuer(1);
-        let pk = sk.public();
-        let other = issuer(2);
-
-        let msg = b"serial";
-        let (b, bl) = blind(&pk, msg, 7).unwrap();
-        let sig = unblind(&pk, &sk.sign_blinded(&b), &bl, msg).unwrap();
-
-        assert!(pk.verify(msg, &sig).is_ok());
-        assert_eq!(
-            other.public().verify(msg, &sig),
-            Err(BlindError::Invalid),
-            "a signature must not verify under another issuer"
-        );
+    fn a_credential_verifies_against_the_public_key_alone() {
+        let k = issuer();
+        let s = credential(k, b"serial-1");
+        assert!(k.public().verify(b"serial-1", &s).is_ok());
     }
 
     #[test]
     fn a_signature_does_not_transfer_to_another_message() {
-        let sk = issuer(1);
-        let pk = sk.public();
-        let (b, bl) = blind(&pk, b"serial one", 7).unwrap();
-        let sig = unblind(&pk, &sk.sign_blinded(&b), &bl, b"serial one").unwrap();
-
-        assert!(pk.verify(b"serial one", &sig).is_ok());
-        assert_eq!(pk.verify(b"serial two", &sig), Err(BlindError::Invalid));
+        let k = issuer();
+        let s = credential(k, b"serial-1");
+        assert_eq!(k.public().verify(b"serial-2", &s), Err(BlindError::NotValid));
     }
 
-    #[test]
-    fn the_wrong_blinding_factor_yields_nothing_usable() {
-        let sk = issuer(1);
-        let pk = sk.public();
-        let msg = b"serial";
-
-        let (b, _correct) = blind(&pk, msg, 7).unwrap();
-        let (_, wrong) = blind(&pk, msg, 8).unwrap();
-        // Caught at unblinding rather than silently carried to a verifier.
-        assert_eq!(
-            unblind(&pk, &sk.sign_blinded(&b), &wrong, msg).unwrap_err(),
-            BlindError::Invalid
-        );
-    }
-
+    /// The issuer sees a different value every time, so issuance carries no repetition to key
+    /// on even when the same credential is requested twice.
     #[test]
     fn the_same_message_blinds_differently_every_time() {
-        let pk = issuer(1).public();
-        let msg = b"serial";
-        let (a, _) = blind(&pk, msg, 1).unwrap();
-        let (b, _) = blind(&pk, msg, 2).unwrap();
-        assert_ne!(
-            a.to_bytes(),
-            b.to_bytes(),
-            "issuance must not be linkable by repeated blinding"
+        let pk = issuer().public();
+        let (a, _) = blind(&pk, b"same").unwrap();
+        let (b, _) = blind(&pk, b"same").unwrap();
+        assert_ne!(a.to_bytes(), b.to_bytes());
+    }
+
+    /// Recording the whole issuance exchange yields nothing spendable.
+    ///
+    /// The blinded value and the blinded signature are what an issuer keeps. Neither is the
+    /// credential, and the step between them is the holder's alone.
+    #[test]
+    fn recording_the_issuance_exchange_yields_nothing_spendable() {
+        let k = issuer();
+        let pk = k.public();
+        let (blinded, blinding) = blind(&pk, b"serial-9").unwrap();
+        let blind_sig = k.sign_blinded(&blinded).unwrap();
+
+        let seen_blinded = blinded.to_bytes();
+        let seen_sig: Vec<u8> = blind_sig.inner.0.clone();
+
+        let real = unblind(&pk, b"serial-9", &blinding, &blind_sig).unwrap();
+        assert!(pk.verify(b"serial-9", &real).is_ok());
+
+        assert_ne!(seen_sig, real.inner.0);
+        assert_ne!(seen_blinded, real.to_bytes());
+    }
+
+    /// A malicious issuer is caught by the holder, at issuance.
+    #[test]
+    fn a_malicious_issuer_is_caught_at_unblinding_not_at_spending() {
+        let k = issuer();
+        let pk = k.public();
+        let (_blinded, blinding) = blind(&pk, b"serial-x").unwrap();
+
+        // A signature over something else entirely.
+        let (other, _) = blind(&pk, b"unrelated").unwrap();
+        let wrong = k.sign_blinded(&other).unwrap();
+
+        assert_eq!(
+            unblind(&pk, b"serial-x", &blinding, &wrong).unwrap_err(),
+            BlindError::BadSignature
         );
     }
 
-    /// **Perfect blinding, demonstrated rather than asserted.**
-    ///
-    /// Because `r ↦ r^e` is a bijection modulo `n`, for any blinded value `b` and *any* message
-    /// `m'`, there exists a blinding factor `r'` with `b = m' · r'^e`. So the issuer's view is
-    /// consistent with every possible message, and carries no information about the real one.
-    ///
-    /// The test constructs that `r'` for an unrelated message, which requires the private key
-    /// and so is a demonstration rather than an attack.
+    /// A credential from one issuer does not verify under another.
     #[test]
-    fn a_blinded_value_is_consistent_with_any_message() {
-        let sk = issuer(1);
-        let pk = sk.public();
-        let n = pk.n();
-
-        let real = b"the message actually signed";
-        let (blinded, _) = blind(&pk, real, 7).unwrap();
-
-        // Pick an entirely unrelated message.
-        let decoy = b"something the holder never asked for";
-        let m_decoy = pk.hash_to_group(decoy);
-
-        // Solve for r' such that blinded = m_decoy * r'^e, i.e. r' = (blinded / m_decoy)^d.
-        let inv = m_decoy.clone().mod_inverse(n).unwrap().to_biguint().unwrap();
-        let quotient = (&blinded.value * inv) % n;
-        let r_prime = quotient.modpow(sk.inner.d(), n);
-
-        let reconstructed = (&m_decoy * r_prime.modpow(pk.e(), n)) % n;
-        assert_eq!(
-            reconstructed, blinded.value,
-            "the same blinded value must be explainable by an unrelated message"
-        );
+    fn a_signature_cannot_be_moved_between_issuers() {
+        let a = issuer();
+        let b = IssuerKey::generate(2048).unwrap();
+        let s = credential(a, b"serial-7");
+        assert_eq!(b.public().verify(b"serial-7", &s), Err(BlindError::NotValid));
     }
 
     #[test]
     fn many_credentials_from_one_issuer_all_verify() {
-        let sk = issuer(1);
-        let pk = sk.public();
-        for i in 0..8u64 {
-            let msg = format!("serial {i}");
-            let (b, bl) = blind(&pk, msg.as_bytes(), i).unwrap();
-            let sig = unblind(&pk, &sk.sign_blinded(&b), &bl, msg.as_bytes()).unwrap();
-            assert!(pk.verify(msg.as_bytes(), &sig).is_ok(), "credential {i}");
+        let k = issuer();
+        for i in 0..4u32 {
+            let m = format!("serial-{i}");
+            assert!(k
+                .public()
+                .verify(m.as_bytes(), &credential(k, m.as_bytes()))
+                .is_ok());
         }
     }
 
-    #[test]
-    fn a_blind_signature_alone_is_not_a_credential() {
-        // The value the issuer returns is not usable until unblinded, so intercepting the
-        // issuance response gains nothing without the holder's blinding factor.
-        let sk = issuer(1);
-        let pk = sk.public();
-        let msg = b"serial";
-        let (b, _bl) = blind(&pk, msg, 7).unwrap();
-        let bs = sk.sign_blinded(&b);
-
-        let as_if = Signature {
-            value: bs.value.clone(),
-        };
-        assert_eq!(pk.verify(msg, &as_if), Err(BlindError::Invalid));
-    }
-}
-
-/// Attacks, not exercises.
-///
-/// Each of these is something an adversary with a stated capability actually tries. Two
-/// defects in this module were found by writing them: a blinding factor of one, which is no
-/// blinding at all and hands the message to the issuer, and an unblind that returned a
-/// malicious issuer's garbage without checking it.
-#[cfg(test)]
-mod adversarial {
-    use super::*;
-
-    const TEST_BITS: usize = 1024;
-    fn issuer(seed: u64) -> IssuerKey {
-        IssuerKey::generate(TEST_BITS, seed)
-    }
-
-    /// **A blinding factor of 1 is no blinding.** The issuer sees the message directly and
-    /// nothing downstream notices, because every later step still works perfectly.
-    #[test]
-    fn a_degenerate_blinding_factor_is_never_produced() {
-        let pk = issuer(1).public();
-        // Sweep many seeds; none may yield an r that fails to hide the message.
-        for seed in 0..200u64 {
-            let (blinded, blinding) = blind(&pk, b"secret serial", seed).unwrap();
-            assert!(
-                blinding.r > BigUint::from(1u8),
-                "seed {seed} produced a degenerate blinding factor"
-            );
-            // And the blinded value must not equal the bare message hash, which is what
-            // r = 1 would produce.
-            assert_ne!(blinded.value, pk.hash_to_group(b"secret serial"));
-        }
-    }
-
-    /// **A malicious issuer returns garbage.** Without a check at unblinding the holder walks
-    /// away with a credential that fails later, at a verifier, where the failure is
-    /// unattributable and possibly incriminating.
-    #[test]
-    fn a_malicious_issuer_is_caught_at_unblinding_not_at_spending() {
-        let sk = issuer(1);
-        let pk = sk.public();
-        let msg = b"serial";
-        let (b, bl) = blind(&pk, msg, 7).unwrap();
-
-        for garbage in [
-            BigUint::from(0u8),
-            BigUint::from(1u8),
-            BigUint::from(12345u32),
-            b.value.clone(),
-        ] {
-            let evil = BlindSignature { value: garbage };
-            assert_eq!(
-                unblind(&pk, &evil, &bl, msg).unwrap_err(),
-                BlindError::Invalid,
-                "issuer garbage was accepted"
-            );
-        }
-    }
-
-    /// RSA is multiplicatively homomorphic, so `sig(a)·sig(b)` signs `a·b`. The full-domain
-    /// hash is what stops that being useful: forging a signature on a *chosen* message needs
-    /// `H(m3) = H(m1)·H(m2)`, which is a preimage problem.
-    #[test]
-    fn the_multiplicative_forgery_does_not_produce_a_usable_signature() {
-        let sk = issuer(1);
-        let pk = sk.public();
-        let n = pk.n();
-
-        let mk = |m: &[u8], seed: u64| {
-            let (b, bl) = blind(&pk, m, seed).unwrap();
-            unblind(&pk, &sk.sign_blinded(&b), &bl, m).unwrap()
-        };
-        let s1 = mk(b"one", 1);
-        let s2 = mk(b"two", 2);
-
-        // The product is a valid signature on H(one)*H(two), which is not the hash of any
-        // message the attacker can name.
-        let product = Signature {
-            value: (&s1.value * &s2.value) % n,
-        };
-        for target in [
-            b"one".as_ref(),
-            b"two".as_ref(),
-            b"onetwo".as_ref(),
-            b"three".as_ref(),
-        ] {
-            assert_eq!(
-                pk.verify(target, &product),
-                Err(BlindError::Invalid),
-                "multiplicative forgery verified against {target:?}"
-            );
-        }
-    }
-
-    /// Trivial signature values must not verify for a real message.
-    #[test]
-    fn degenerate_signatures_are_rejected() {
-        let pk = issuer(1).public();
-        for v in [0u32, 1, 2, 65537] {
-            let s = Signature {
-                value: BigUint::from(v),
-            };
-            assert_eq!(pk.verify(b"a real serial", &s), Err(BlindError::Invalid));
-        }
-    }
-
-    /// An adversary who records the issuance exchange has the blinded value and the blind
-    /// signature, and neither is a credential.
-    #[test]
-    fn recording_the_issuance_exchange_yields_nothing_spendable() {
-        let sk = issuer(1);
-        let pk = sk.public();
-        let msg = b"serial";
-        let (b, _bl) = blind(&pk, msg, 7).unwrap();
-        let bs = sk.sign_blinded(&b);
-
-        // Everything the wire carried, tried as a signature.
-        for v in [b.value.clone(), bs.value.clone()] {
-            assert_eq!(pk.verify(msg, &Signature { value: v }), Err(BlindError::Invalid));
-        }
-    }
-
-    /// Two issuers, and a holder who tries to mix them.
-    #[test]
-    fn a_signature_cannot_be_moved_between_issuers() {
-        let a = issuer(1);
-        let bx = issuer(2);
-        let msg = b"serial";
-
-        let (blinded, bl) = blind(&a.public(), msg, 7).unwrap();
-        // Ask the wrong issuer to sign it. It will, since it cannot read it.
-        let cross = bx.sign_blinded(&blinded);
-        // And the result is worthless under either key.
-        assert!(unblind(&a.public(), &cross, &bl, msg).is_err());
-        assert!(unblind(&bx.public(), &cross, &bl, msg).is_err());
-    }
-
-    /// The holder's own key must not be recoverable from what it publishes, so blinding
-    /// factors must not repeat across credentials.
+    /// Two credentials never share a randomizer, which is drawn per issuance.
     #[test]
     fn blinding_factors_do_not_repeat_across_credentials() {
-        let pk = issuer(1).public();
+        let k = issuer();
         let mut seen = std::collections::BTreeSet::new();
-        for seed in 0..64u64 {
-            let (_, bl) = blind(&pk, b"same message every time", seed).unwrap();
-            assert!(
-                seen.insert(bl.r.to_bytes_be()),
-                "blinding factor repeated at seed {seed}"
-            );
+        for i in 0..8u32 {
+            let m = format!("serial-{i}");
+            assert!(seen.insert(credential(k, m.as_bytes()).randomizer.0));
         }
+    }
+
+    /// There is no way to ask for a predictable key or a predictable blinding factor.
+    ///
+    /// A seeded path here is a total break dressed as a convenience: an issuer key or a
+    /// blinding factor with 64 bits of entropy reduces unlinkability to an offline search the
+    /// issuer can run. This pins the API shape, which is the thing that would have to change
+    /// for the break to come back.
+    #[test]
+    fn there_is_no_way_to_ask_for_a_predictable_key() {
+        let _: fn(usize) -> Result<IssuerKey, BlindError> = IssuerKey::generate;
+        let _: fn(&IssuerPublic, &[u8]) -> Result<(BlindedMessage, Blinding), BlindError> = blind;
     }
 }
