@@ -280,6 +280,22 @@ impl CoverPool {
 }
 
 /// A client, running.
+/// A request this client sent and is still waiting on.
+///
+/// The runner used to accept any correctly sized datagram and file it under the address and
+/// tag the datagram itself carried, which made a client's bookkeeping writable by anyone who
+/// could send it a packet. Requests are recorded on the way out and matched on the way back.
+#[derive(Debug, Clone, Copy)]
+struct Outstanding {
+    /// Destructive reads outstanding. Counted rather than flagged, because a drain that is
+    /// answered and then discarded is mail the provider has already deleted.
+    drains: u32,
+    /// The cursor of the most recent non-destructive read, if any.
+    read_cursor: Option<u32>,
+    /// Send order, for age-ordered eviction. Never the tag, which an adversary picks.
+    seq: u64,
+}
+
 pub struct ClientRunner {
     pub client: Client,
     transport: UdpTransport,
@@ -294,13 +310,22 @@ pub struct ClientRunner {
     sentinel: Option<crate::sentinel::Sentinel>,
     /// One cursor per (provider, feed). Replicas hold different amounts.
     feed_cursors: std::collections::BTreeMap<(SocketAddr, Tag), usize>,
+    /// Requests sent and not yet answered. Nothing else is accepted off the socket.
+    outstanding: std::collections::BTreeMap<(SocketAddr, Tag), Outstanding>,
     /// Responses read off the socket and not yet handed to a caller.
     pending: std::collections::BTreeMap<(SocketAddr, Tag), Vec<Vec<u8>>>,
+    next_request: u64,
     refused_seen: u64,
     pub received: Vec<Vec<u8>>,
 }
 
 impl ClientRunner {
+    /// Requests remembered while waiting for an answer.
+    ///
+    /// A provider that stops answering must not cost this client memory without limit, and a
+    /// client polling a handful of replicas is nowhere near this.
+    pub const MAX_OUTSTANDING: usize = 4096;
+
     pub fn new(
         client: Client,
         bind: SocketAddr,
@@ -322,7 +347,9 @@ impl ClientRunner {
             cover_toward,
             sentinel: None,
             feed_cursors: std::collections::BTreeMap::new(),
+            outstanding: std::collections::BTreeMap::new(),
             pending: std::collections::BTreeMap::new(),
+            next_request: 0,
             refused_seen: 0,
             client,
             received: Vec::new(),
@@ -453,15 +480,47 @@ impl ClientRunner {
     /// Cursors are per provider, because replicas hold different amounts and a shared cursor
     /// would skip whatever the furthest-ahead replica had already served.
     pub fn poll_tag_at(&mut self, at: SocketAddr, tag: Tag) -> Vec<Vec<u8>> {
-        let cursor = *self.feed_cursors.entry((at, tag)).or_insert(0);
+        let cursor = *self.feed_cursors.entry((at, tag)).or_insert(0) as u32;
         let mut req = [0u8; REQUEST_BYTES];
         req[0] = REQ_READ;
         req[1..33].copy_from_slice(&tag);
-        req[33..].copy_from_slice(&(cursor as u32).to_le_bytes());
+        req[33..].copy_from_slice(&cursor.to_le_bytes());
         let _ = self.collect_sock.send_to(&req, at);
+        self.record(at, tag, |o| o.read_cursor = Some(cursor));
 
         self.pump();
         self.pending.remove(&(at, tag)).unwrap_or_default()
+    }
+
+    /// Note a request on the way out, so its answer can be recognised on the way in.
+    fn record(&mut self, at: SocketAddr, tag: Tag, f: impl FnOnce(&mut Outstanding)) {
+        let seq = self.next_request;
+        self.next_request += 1;
+        let o = self
+            .outstanding
+            .entry((at, tag))
+            .or_insert(Outstanding {
+                drains: 0,
+                read_cursor: None,
+                seq,
+            });
+        o.seq = seq;
+        f(o);
+        // A request that is never answered would otherwise be remembered forever. Oldest
+        // first, by send order: an unanswered request is one a provider chose not to answer,
+        // and the choice of which to forget should not follow from that.
+        while self.outstanding.len() > Self::MAX_OUTSTANDING {
+            let Some(oldest) = self
+                .outstanding
+                .iter()
+                .min_by_key(|(_, o)| o.seq)
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            self.outstanding.remove(&oldest);
+            self.pending.remove(&oldest);
+        }
     }
 
     /// Read every response waiting on the socket and file it under the box it answers.
@@ -478,19 +537,37 @@ impl ClientRunner {
             }
             let mut tag: Tag = [0u8; 32];
             tag.copy_from_slice(&buf[13..45]);
+
+            // Nothing is filed that this client did not ask for. The address and the tag both
+            // come off the wire, so without this an unsolicited datagram writes an entry into
+            // the client's own bookkeeping under a key of the sender's choosing.
+            let Some(o) = self.outstanding.get_mut(&(from, tag)) else {
+                continue;
+            };
+            let answered = u32::from_le_bytes(buf[9..13].try_into().expect("4 bytes"));
+
+            if o.drains > 0 {
+                // A drain is destructive and has no cursor. The provider has already removed
+                // the item, so discarding this response is losing the mail, not deferring it.
+                o.drains -= 1;
+            } else if o.read_cursor == Some(answered) {
+                o.read_cursor = None;
+                let here = self.feed_cursors.entry((from, tag)).or_insert(0);
+                *here = answered as usize + 1;
+            } else {
+                // A cursor other than the one asked for is an answer to a question this
+                // client did not put. Accepting it moved the cursor to wherever the datagram
+                // said, and a single spoofed u32::MAX made the feed unreadable for good.
+                continue;
+            }
+            if o.drains == 0 && o.read_cursor.is_none() {
+                self.outstanding.remove(&(from, tag));
+            }
+
             self.refused_seen = u64::from_le_bytes(buf[1..9].try_into().expect("8 bytes"));
             if buf[0] != STATUS_ITEM {
                 continue;
             }
-            let answered =
-                u32::from_le_bytes(buf[9..13].try_into().expect("4 bytes")) as usize;
-            // Only an answer at or beyond the cursor is progress. A late reply to an earlier
-            // request would otherwise be counted twice and skip whatever came after it.
-            let here = self.feed_cursors.entry((from, tag)).or_insert(0);
-            if answered < *here {
-                continue;
-            }
-            *here = answered + 1;
             self.pending
                 .entry((from, tag))
                 .or_default()
@@ -510,6 +587,9 @@ impl ClientRunner {
         req[0] = REQ_DRAIN;
         req[1..33].copy_from_slice(&self.client.collect_key());
         let _ = self.collect_sock.send_to(&req, self.provider_collect);
+        self.record(self.provider_collect, self.client.mailbox(), |o| {
+            o.drains += 1
+        });
 
         self.pump();
         let mine = (self.provider_collect, self.client.mailbox());
@@ -526,5 +606,186 @@ impl ClientRunner {
         if let Some(s) = self.sentinel.as_mut() {
             s.expire(now);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::client::Client;
+    use crate::directory::NodeInfo;
+    use karst_mix::packet::MixKey;
+
+    /// A runner and a socket standing in for its provider.
+    ///
+    /// Real sockets, because the defects here are in what the runner accepts off a socket and
+    /// a mock of the provider would be a mock of the thing under test.
+    struct Rig {
+        runner: ClientRunner,
+        provider: UdpSocket,
+        provider_at: SocketAddr,
+    }
+
+    fn rig() -> Rig {
+        let mut dir = Directory::new(15.0);
+        let key = MixKey::from_seed([1u8; 32]);
+        dir.add(NodeInfo {
+            id: 0,
+            addr: "127.0.0.1:1".parse().unwrap(),
+            mix_public: key.public(),
+            layer: 0,
+        });
+        let provider = UdpSocket::bind("127.0.0.1:0").expect("provider socket");
+        provider.set_nonblocking(true).unwrap();
+        let provider_at = provider.local_addr().unwrap();
+        let runner = ClientRunner::new(
+            Client::from_seed([7u8; 32], 0),
+            "127.0.0.1:0".parse().unwrap(),
+            dir,
+            provider_at,
+            10.0,
+        )
+        .expect("runner");
+        Rig {
+            runner,
+            provider,
+            provider_at,
+        }
+    }
+
+    impl Rig {
+        fn client_at(&self) -> SocketAddr {
+            self.runner.collect_sock.local_addr().unwrap()
+        }
+
+        /// A response as the provider builds one.
+        fn respond(&self, from: &UdpSocket, to: SocketAddr, tag: Tag, cursor: u32, body: u8) {
+            let mut resp = vec![0u8; RESPONSE_BYTES];
+            resp[0] = STATUS_ITEM;
+            resp[9..13].copy_from_slice(&cursor.to_le_bytes());
+            resp[13..45].copy_from_slice(&tag);
+            resp[RESP_BODY..].fill(body);
+            from.send_to(&resp, to).expect("send");
+        }
+
+        /// Read the request the runner just sent, so the reply can echo it.
+        ///
+        /// Loopback is fast and not instantaneous, and the socket is non-blocking because the
+        /// runner's is.
+        fn last_request(&self) -> [u8; REQUEST_BYTES] {
+            let mut buf = [0u8; REQUEST_BYTES];
+            for _ in 0..1000 {
+                match self.provider.recv_from(&mut buf) {
+                    Ok((n, _)) => {
+                        assert_eq!(n, REQUEST_BYTES);
+                        return buf;
+                    }
+                    Err(_) => std::thread::sleep(std::time::Duration::from_millis(1)),
+                }
+            }
+            panic!("the runner sent no request");
+        }
+
+        /// Pump until the response lands, and return what was filed for this box.
+        fn collected(&mut self, tag: Tag) -> Vec<Vec<u8>> {
+            let key = (self.provider_at, tag);
+            for _ in 0..1000 {
+                self.runner.pump();
+                if let Some(v) = self.runner.pending.remove(&key) {
+                    return v;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            Vec::new()
+        }
+    }
+
+    /// Every drained item must reach the client, not just the first.
+    ///
+    /// A drain is destructive: the provider has already popped the item when it answers. The
+    /// runner filed drain responses through the feed cursor map, whose progress rule discards
+    /// anything below the stored value, and a drain always echoes cursor 0. So the first drain
+    /// set the entry to 1 and every later one was thrown away *after* the provider had deleted
+    /// it. Any message longer than one fragment could never be received.
+    #[test]
+    fn a_second_drain_is_not_discarded_as_stale() {
+        let mut r = rig();
+        let tag = r.runner.client.mailbox();
+        let at = r.client_at();
+
+        for round in 0..4u8 {
+            r.runner.poll_mail();
+            let req = r.last_request();
+            assert_eq!(req[0], REQ_DRAIN);
+            r.respond(&r.provider, at, tag, 0, round);
+
+            let got = r.collected(tag);
+            assert_eq!(got.len(), 1, "round {round}: the drained item was discarded");
+            assert_eq!(got[0][0], round);
+        }
+    }
+
+    /// A datagram nobody asked for is not filed.
+    ///
+    /// Both the source address and the tag come off the wire, so accepting unsolicited
+    /// responses let anyone who could reach the client write entries into its own bookkeeping
+    /// under keys of their choosing, roughly a kilobyte at a time and never released.
+    #[test]
+    fn an_unsolicited_response_is_dropped() {
+        let mut r = rig();
+        let attacker = UdpSocket::bind("127.0.0.1:0").unwrap();
+        let at = r.client_at();
+
+        for i in 0..500u32 {
+            let mut tag = [0u8; 32];
+            tag[..4].copy_from_slice(&i.to_le_bytes());
+            r.respond(&attacker, at, tag, 0, 1);
+        }
+        r.runner.pump();
+
+        assert!(r.runner.pending.is_empty(), "filed a response nobody asked for");
+        assert!(r.runner.feed_cursors.is_empty(), "a stranger moved a cursor");
+    }
+
+    /// A forged cursor cannot put a feed permanently out of reach.
+    ///
+    /// One datagram carrying `answered = u32::MAX` used to set the stored cursor to 2^32. The
+    /// next request truncates the cursor back into a u32, the provider answers index 0, and
+    /// the response is discarded as stale. That feed is unreadable from that provider for the
+    /// life of the process, from a single spoofed packet.
+    #[test]
+    fn a_forged_cursor_does_not_poison_a_feed() {
+        let mut r = rig();
+        let tag = [3u8; 32];
+        let at = r.client_at();
+
+        r.runner.poll_tag(tag);
+        let _ = r.last_request();
+        r.respond(&r.provider, at, tag, u32::MAX, 9);
+        for _ in 0..50 {
+            r.runner.pump();
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+        assert_eq!(r.runner.feed_cursors.get(&(r.provider_at, tag)), Some(&0));
+        assert!(r.runner.pending.is_empty(), "a forged cursor was answered");
+
+        // The honest answer to the question actually asked still lands.
+        r.runner.poll_tag(tag);
+        let req = r.last_request();
+        assert_eq!(u32::from_le_bytes(req[33..].try_into().unwrap()), 0);
+        r.respond(&r.provider, at, tag, 0, 9);
+        assert_eq!(r.collected(tag).len(), 1);
+    }
+
+    /// A provider that never answers costs a bounded amount of memory.
+    #[test]
+    fn unanswered_requests_do_not_accumulate_without_limit() {
+        let mut r = rig();
+        for i in 0..(ClientRunner::MAX_OUTSTANDING as u32 + 500) {
+            let mut tag = [0u8; 32];
+            tag[..4].copy_from_slice(&i.to_le_bytes());
+            r.runner.poll_tag(tag);
+        }
+        assert!(r.runner.outstanding.len() <= ClientRunner::MAX_OUTSTANDING);
     }
 }
