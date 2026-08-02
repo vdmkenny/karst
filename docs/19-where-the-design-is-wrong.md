@@ -96,9 +96,15 @@ Implemented. Per-hop header MAC verified before processing, wide-block payload c
 length headers with proper filler, replay tags. The tagging attack class the 2014 CMU/CERT
 campaign exploited is closed.
 
-Two deviations remain documented rather than hidden: the group element is re-derived rather than
-blinded, since X25519 clamping does not compose as the proof assumes, and the primitives are
-BLAKE3-based. It is not a reviewed implementation.
+The group element is blinded per the paper, `α_{i+1} = b_i·α_i` over Ristretto. It was
+re-derived from the shared secret until #101, on the reasoning that X25519 clamping does not
+compose as the proof assumes. That reasoning was sound and the conclusion drawn from it was not:
+re-derivation hands each hop the private scalar behind the next element, so one relay unrolls the
+entire route and reads the payload. The right response to a group that does not compose is a group
+that does. See docs/28-blinding.md.
+
+One deviation remains documented rather than hidden: the primitives are BLAKE3-based. It is not a
+reviewed implementation.
 
 ### 4.2 Migration groundwork (#41)
 

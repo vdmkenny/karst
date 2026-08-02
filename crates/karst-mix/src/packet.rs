@@ -38,20 +38,18 @@
 //!
 //! # What this is not
 //!
-//! Two deviations from the paper, both deliberate and both stated rather than buried:
+//! One deviation from the paper, deliberate and stated rather than buried:
 //!
-//! 1. **The group element is re-derived rather than blinded.** Sphinx computes
-//!    `α_{i+1} = α_i^{b_i}` in a prime-order group. X25519 clamps scalars, so composing
-//!    blindings that way does not behave as the proof assumes. Here each hop derives a fresh
-//!    element from the shared secret instead, which preserves per-hop unlinkability and is
-//!    not the construction the security proof covers.
-//! 2. **Primitives are BLAKE3-based** rather than the paper's. The MAC is a keyed BLAKE3, the
+//! 1. **Primitives are BLAKE3-based** rather than the paper's. The MAC is a keyed BLAKE3, the
 //!    stream is its XOF, and the wide-block cipher is a four-round unbalanced Feistel in the
 //!    LIONESS shape rather than LIONESS itself.
 //!
 //! This is not a reviewed implementation and should not be deployed as one.
 
-use x25519_dalek::{PublicKey, StaticSecret};
+use curve25519_dalek::constants::RISTRETTO_BASEPOINT_TABLE;
+use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+use curve25519_dalek::scalar::Scalar;
+use curve25519_dalek::traits::Identity;
 
 /// Every packet in the network is this size. No exceptions, because a length distribution is
 /// a fingerprint.
@@ -101,6 +99,40 @@ fn subkey(shared: &[u8; 32], label: &str) -> [u8; 32] {
     h.update(label.as_bytes());
     h.update(shared);
     *h.finalize().as_bytes()
+}
+
+/// Hash to a scalar, uniformly.
+///
+/// Reducing a 32-byte hash mod the group order is biased; 64 bytes reduced mod order is not,
+/// by the standard wide-reduction argument. The bias is small but it is free to remove.
+fn scalar(label: &str, parts: &[&[u8]]) -> Scalar {
+    let mut h = blake3::Hasher::new();
+    h.update(b"karst.sphinx.v1.scalar");
+    h.update(label.as_bytes());
+    for p in parts {
+        h.update(p);
+    }
+    let mut wide = [0u8; 64];
+    h.finalize_xof().fill(&mut wide);
+    Scalar::from_bytes_mod_order_wide(&wide)
+}
+
+/// The shared secret is the hash of the group element, never the element itself.
+fn shared_from(point: &RistrettoPoint) -> [u8; 32] {
+    let mut h = blake3::Hasher::new();
+    h.update(b"karst.sphinx.v1.shared");
+    h.update(point.compress().as_bytes());
+    *h.finalize().as_bytes()
+}
+
+/// The blinding factor for the next hop, per Sphinx.
+///
+/// It is a function of what this hop legitimately holds, so the hop can compute the next
+/// element. It is *not* a function that yields the next element's discrete logarithm, which
+/// is the whole point: the hop multiplies a point it cannot open by a scalar it knows, and
+/// the result stays closed to it.
+fn blinding(alpha: &[u8; ALPHA_BYTES], shared: &[u8; 32]) -> Scalar {
+    scalar("blind", &[alpha, shared])
 }
 
 /// Keyed MAC over the header. This is the tagging defence: a hop that cannot reproduce it
@@ -242,18 +274,57 @@ impl core::fmt::Display for MixError {
 
 impl std::error::Error for MixError {}
 
+/// A node's mixing key, as it appears on the wire and in a directory.
+///
+/// Ristretto rather than X25519 because the packet construction needs scalar multiplication
+/// to compose: `b·(a·G)` must equal `(ab)·G`. X25519 clamps every scalar, so it does not,
+/// which is why the blinding this design depends on cannot be built on it. Ristretto is a
+/// prime-order group, so there is no cofactor and no small-subgroup element to check for.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub struct MixPublic(CompressedRistretto);
+
+impl MixPublic {
+    pub fn to_bytes(&self) -> [u8; 32] {
+        self.0.to_bytes()
+    }
+
+    /// Reject anything that is not a valid group element, and reject the identity.
+    ///
+    /// An identity key makes every sender's shared secret with this node the same known
+    /// constant, so it is not a key at all.
+    pub fn from_bytes(b: [u8; 32]) -> Option<MixPublic> {
+        let c = CompressedRistretto(b);
+        let p = c.decompress()?;
+        if p == RistrettoPoint::identity() {
+            return None;
+        }
+        Some(MixPublic(c))
+    }
+
+    fn point(&self) -> Option<RistrettoPoint> {
+        self.0.decompress()
+    }
+}
+
+/// Redacted: a mixing key names a node, and node identity in a route is what a log leaks.
+impl core::fmt::Debug for MixPublic {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("MixPublic(..)")
+    }
+}
+
 pub struct MixKey {
-    secret: StaticSecret,
-    public: PublicKey,
+    secret: Scalar,
+    public: MixPublic,
 }
 
 impl MixKey {
     pub fn from_seed(seed: [u8; 32]) -> Self {
-        let secret = StaticSecret::from(seed);
-        let public = PublicKey::from(&secret);
+        let secret = scalar("node", &[&seed]);
+        let public = MixPublic((&secret * RISTRETTO_BASEPOINT_TABLE).compress());
         MixKey { secret, public }
     }
-    pub fn public(&self) -> PublicKey {
+    pub fn public(&self) -> MixPublic {
         self.public
     }
 }
@@ -261,7 +332,7 @@ impl MixKey {
 #[derive(Clone, Copy)]
 pub struct Hop {
     pub id: u16,
-    pub public: PublicKey,
+    pub public: MixPublic,
     pub delay_ms: u32,
 }
 
@@ -383,29 +454,45 @@ fn routing_block(flag: u8, next: u16, delay_ms: u32) -> [u8; ROUTING_BYTES] {
 }
 
 impl Packet {
-    /// Derive the per-hop shared secrets the sender needs, and the element each hop sees.
-    /// Derive the per-hop shared secrets and the ephemeral public keys that accompany them.
+    /// Derive the per-hop shared secrets and the element each hop sees.
     ///
-    /// The seed is hashed rather than used as a scalar directly. X25519 clamps a scalar by
-    /// clearing its low three bits and forcing bit 254, so eight distinct seeds map to one
-    /// key. A caller deriving seeds from a counter would then emit byte-identical packets,
-    /// which every node on the route drops as replays, losing the message with no error at
-    /// send time. Hashing makes the seed space genuinely 2^256 as its type implies.
-    fn derive_path(route: &[Hop], seed: [u8; 32]) -> (Vec<[u8; 32]>, Vec<[u8; 32]>) {
-        let mut eph = StaticSecret::from(subkey(&seed, "eph"));
-        let mut alpha = PublicKey::from(&eph).to_bytes();
+    /// This is Sphinx's blinding chain. The sender holds one secret scalar `x`; the element
+    /// hop `i` receives is `α_i = x·b_0···b_{i-1}·G`, and the shared secret is
+    /// `H(x·b_0···b_{i-1}·P_i)`, which the hop reaches from the other side as
+    /// `H(y_i·α_i)`.
+    ///
+    /// **The blinding factor is what keeps a route private from the route.** Hop `i` can
+    /// compute `b_i` and therefore `α_{i+1} = b_i·α_i`, because it must, to forward. What it
+    /// cannot do is compute `x·b_0···b_i`, since it never held `x`. So it cannot compute the
+    /// next hop's shared secret `H(x·b_0···b_i·P_{i+1})` without `y_{i+1}`, and the route
+    /// beyond its own successor stays closed to it.
+    ///
+    /// Deriving the next scalar from the shared secret instead would hand every hop the
+    /// private scalar behind the next element, and one relay would unroll the whole route
+    /// and read the payload. See `a_hop_cannot_derive_the_next_hops_shared_secret`.
+    ///
+    /// The seed is hashed into a scalar rather than used as one. A caller deriving seeds
+    /// from a counter must not produce related keys, and `Scalar::from_bytes_mod_order_wide`
+    /// over a 64-byte hash makes the seed space genuinely 2^256 as its type implies.
+    fn derive_path(route: &[Hop], seed: [u8; 32]) -> Result<(Vec<[u8; 32]>, Vec<[u8; 32]>), MixError> {
+        let mut x = scalar("eph", &[&seed]);
+        let mut alpha_point = &x * RISTRETTO_BASEPOINT_TABLE;
         let mut secrets = Vec::with_capacity(route.len());
         let mut alphas = Vec::with_capacity(route.len());
 
         for hop in route {
-            let shared = eph.diffie_hellman(&hop.public).to_bytes();
+            let p = hop.public.point().ok_or(MixError::BadRoute)?;
+            let alpha = alpha_point.compress().to_bytes();
+            let shared = shared_from(&(x * p));
+
+            let b = blinding(&alpha, &shared);
+            x *= b;
+            alpha_point *= b;
+
             alphas.push(alpha);
             secrets.push(shared);
-
-            eph = StaticSecret::from(subkey(&shared, "next"));
-            alpha = PublicKey::from(&eph).to_bytes();
         }
-        (secrets, alphas)
+        Ok((secrets, alphas))
     }
 
     /// The filler that keeps β at constant length while hiding path length and position.
@@ -453,7 +540,7 @@ impl Packet {
             return Err(MixError::PayloadTooLarge);
         }
 
-        let (secrets, alphas) = Self::derive_path(route, seed);
+        let (secrets, alphas) = Self::derive_path(route, seed)?;
 
         // Payload: length prefix, message, deterministic padding. Encrypted from the inside
         // out so each hop peels exactly one layer.
@@ -509,10 +596,13 @@ impl Packet {
     /// dropped, which is what stops a tagging attack: a modified header never reaches a
     /// confederate downstream to be recognised.
     pub fn peel(mut self, key: &MixKey, seen: &mut SeenTags) -> Result<Peeled, MixError> {
-        let shared = key
-            .secret
-            .diffie_hellman(&PublicKey::from(self.alpha))
-            .to_bytes();
+        let alpha_point = CompressedRistretto(self.alpha)
+            .decompress()
+            .ok_or(MixError::Malformed)?;
+        if alpha_point == RistrettoPoint::identity() {
+            return Err(MixError::Malformed);
+        }
+        let shared = shared_from(&(key.secret * alpha_point));
 
         // 1. Integrity, first.
         let expected = mac(&subkey(&shared, "mu"), &self.beta);
@@ -561,7 +651,8 @@ impl Packet {
                     next,
                     delay_ms,
                     packet: Packet {
-                        alpha: PublicKey::from(&StaticSecret::from(subkey(&shared, "next")))
+                        alpha: (blinding(&self.alpha, &shared) * alpha_point)
+                            .compress()
                             .to_bytes(),
                         gamma: next_gamma,
                         beta: next_beta,
@@ -647,6 +738,112 @@ mod tests {
                 delay_ms: 10 * (i as u32 + 1),
             })
             .collect()
+    }
+
+    /// Everything a forwarding hop holds after peeling, and nothing else.
+    ///
+    /// This is the adversary in `a_hop_cannot_derive_the_next_hops_shared_secret`: an
+    /// operator who runs one relay on the route and reads the public directory. It is the
+    /// weakest adversary worth naming, and it is the one a mix network must survive, because
+    /// a client's first hop already knows the client's address.
+    struct HopView {
+        alpha: [u8; ALPHA_BYTES],
+        shared: [u8; 32],
+        forwarded: Packet,
+    }
+
+    fn hop_view(ks: &[MixKey], p: Packet) -> HopView {
+        let alpha = p.alpha;
+        let mut seen = SeenTags::new();
+        let alpha_point = CompressedRistretto(alpha).decompress().unwrap();
+        let shared = shared_from(&(ks[0].secret * alpha_point));
+        match p.peel(&ks[0], &mut seen).unwrap() {
+            Peeled::Forward { packet, .. } => HopView {
+                alpha,
+                shared,
+                forwarded: packet,
+            },
+            _ => panic!("expected a forward"),
+        }
+    }
+
+    /// The property the whole layer rests on: a relay on the route cannot open the rest of it.
+    ///
+    /// Hop 0 holds `shared_0` and sees the element it is about to forward. If the scalar
+    /// behind that element were derivable from hop 0's own view, hop 0 could compute hop 1's
+    /// shared secret against the directory's public keys, confirm the guess against
+    /// `gamma_1`, and repeat to the exit: one relay, the full route, and the plaintext.
+    ///
+    /// That was true of this crate until Ristretto blinding replaced re-derivation, and the
+    /// specific derivation that opened it, `subkey(shared, "next")`, is the first candidate
+    /// below. Confirmation is exact rather than statistical: `gamma` tells the attacker
+    /// whether a guessed secret is the right one.
+    #[test]
+    fn a_hop_cannot_derive_the_next_hops_shared_secret() {
+        let ks = keys(3);
+        let r = route(&ks);
+        let (secrets, _) = Packet::derive_path(&r, [42u8; 32]).unwrap();
+        let view = hop_view(&ks, Packet::wrap(&r, b"secret", [42u8; 32]).unwrap());
+
+        let next_public = r[1].public.point().unwrap();
+        let mut candidates: Vec<Scalar> = Vec::new();
+        // The historical break, verbatim.
+        candidates.push(Scalar::from_bytes_mod_order(subkey(&view.shared, "next")));
+        // Every other single-step derivation from the same view.
+        for label in ["eph", "next", "blind", "node", "", "mu", "pi"] {
+            candidates.push(scalar(label, &[&view.shared]));
+            candidates.push(scalar(label, &[&view.alpha, &view.shared]));
+            candidates.push(scalar(label, &[&view.shared, &view.alpha]));
+            candidates.push(Scalar::from_bytes_mod_order(subkey(&view.shared, label)));
+        }
+        // The blinding factor itself, which the hop legitimately knows.
+        candidates.push(blinding(&view.alpha, &view.shared));
+
+        for c in &candidates {
+            let guess = shared_from(&(c * next_public));
+            assert_ne!(
+                guess, secrets[1],
+                "a hop recovered the next hop's shared secret"
+            );
+            assert_ne!(
+                mac(&subkey(&guess, "mu"), &view.forwarded.beta),
+                view.forwarded.gamma,
+                "a hop guessed a secret that the next header authenticates"
+            );
+        }
+    }
+
+    /// The forwarded element is a blinding of the received one, which is why the above holds.
+    ///
+    /// The hop multiplies a point whose discrete logarithm it does not know by a scalar it
+    /// does. The product's logarithm stays unknown to it, and that is the entire mechanism.
+    #[test]
+    fn the_element_a_hop_forwards_is_a_blinding_of_the_one_it_received() {
+        let ks = keys(3);
+        let view = hop_view(&ks, Packet::wrap(&route(&ks), b"m", [9u8; 32]).unwrap());
+
+        let received = CompressedRistretto(view.alpha).decompress().unwrap();
+        let expected = blinding(&view.alpha, &view.shared) * received;
+        assert_eq!(view.forwarded.alpha, expected.compress().to_bytes());
+        assert_ne!(view.forwarded.alpha, view.alpha, "the element must move");
+    }
+
+    /// An element outside the group, or the identity, is refused rather than processed.
+    ///
+    /// The identity would make every sender's secret with this node the same known constant.
+    #[test]
+    fn a_degenerate_element_is_not_a_packet() {
+        let ks = keys(1);
+        let mut p = Packet::wrap(&route(&ks), b"m", [3u8; 32]).unwrap();
+
+        p.alpha = RistrettoPoint::identity().compress().to_bytes();
+        let mut seen = SeenTags::new();
+        assert_eq!(p.clone().peel(&ks[0], &mut seen), Err(MixError::Malformed));
+
+        p.alpha = [0xff; 32];
+        assert_eq!(p.peel(&ks[0], &mut seen), Err(MixError::Malformed));
+        assert!(MixPublic::from_bytes([0xff; 32]).is_none());
+        assert!(MixPublic::from_bytes(RistrettoPoint::identity().compress().to_bytes()).is_none());
     }
 
     /// Walk a packet to its destination, returning the delivered payload.
@@ -1154,26 +1351,38 @@ mod adversarial {
         }
     }
 
-    /// Random bytes of the right length must decode structurally and then fail to peel.
+    /// Random bytes of the right length decode structurally and then fail to peel.
     ///
-    /// The decoder must not be a cheaper oracle than peeling. If it could reject forgeries by
-    /// shape, an adversary would learn from the shape alone.
+    /// The decoder must not be a cheaper oracle than peeling: `from_bytes` accepts anything
+    /// of the right length, so an adversary learns nothing from shape.
+    ///
+    /// Two refusals are possible and both are refusals. Roughly half of random 32-byte
+    /// strings are not valid Ristretto encodings, so those are rejected before the MAC. That
+    /// is not an oracle, because the adversary supplied the bytes and can test their validity
+    /// without asking the node; it is a node that does one less scalar multiplication for
+    /// junk, which is the right direction.
     #[test]
-    fn random_bytes_decode_structurally_and_fail_only_at_the_mac() {
+    fn random_bytes_decode_structurally_and_never_peel() {
         let k = MixKey::from_seed([12u8; 32]);
         let mut seen = SeenTags::new();
-        let mut rejected = 0;
+        let mut reached_the_mac = 0;
         for i in 0..200u32 {
             let mut buf = vec![0u8; PACKET_BYTES];
             let mut h = blake3::Hasher::new();
             h.update(&i.to_le_bytes());
             let mut r = h.finalize_xof();
             r.fill(&mut buf);
-            let mut p = Packet::from_bytes(&buf).expect("structure accepted anything sized");
-            assert_eq!(p.peel(&k, &mut seen), Err(MixError::BadMac));
-            rejected += 1;
+            let p = Packet::from_bytes(&buf).expect("structure accepted anything sized");
+            match p.peel(&k, &mut seen) {
+                Err(MixError::BadMac) => reached_the_mac += 1,
+                Err(MixError::Malformed) => {}
+                other => panic!("random bytes peeled: {other:?}"),
+            }
         }
-        assert_eq!(rejected, 200);
+        assert!(
+            reached_the_mac > 0,
+            "the group check became the only rejection, so the MAC is untested here"
+        );
     }
 
 }

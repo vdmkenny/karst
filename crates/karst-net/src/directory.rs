@@ -30,11 +30,10 @@
 //! Johnson, Wails, Wagh, Mittal, *Guard Placement Attacks on Path Selection Algorithms for
 //! Tor*, PoPETs 2019(4)). Selection is uniform within a layer until that is settled.
 
-use karst_mix::packet::{Hop, MAX_HOPS};
+use karst_mix::packet::{Hop, MixPublic, MAX_HOPS};
 use karst_node::MixNode;
 use rand::Rng;
 use std::net::SocketAddr;
-use x25519_dalek::PublicKey;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RouteError {
@@ -49,7 +48,7 @@ pub enum RouteError {
 pub struct NodeInfo {
     pub id: u16,
     pub addr: SocketAddr,
-    pub mix_public: PublicKey,
+    pub mix_public: MixPublic,
     /// Which mixing stage this node serves. Providers sit in the last layer.
     pub layer: u8,
 }

@@ -384,10 +384,10 @@ name = "karst-mix"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "curve25519-dalek",
  "karst-id",
  "karst-object",
  "rand",
- "x25519-dalek",
 ]
 
 [[package]]
@@ -412,7 +412,6 @@ version = "0.1.0"
 dependencies = [
  "karst-mix",
  "rand",
- "x25519-dalek",
 ]
 
 [[package]]

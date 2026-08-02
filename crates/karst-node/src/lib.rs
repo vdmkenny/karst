@@ -19,7 +19,7 @@
 use std::collections::BTreeMap;
 
 use karst_mix::clock::Clock;
-use karst_mix::packet::{MixError, MixKey, Packet, Peeled, SeenTags};
+use karst_mix::packet::{MixError, MixKey, MixPublic, Packet, Peeled, SeenTags};
 use rand::seq::SliceRandom;
 
 /// Why a node refused a packet.
@@ -129,7 +129,7 @@ impl MixNode {
         }
     }
 
-    pub fn public(&self) -> x25519_dalek::PublicKey {
+    pub fn public(&self) -> MixPublic {
         self.key.public()
     }
 

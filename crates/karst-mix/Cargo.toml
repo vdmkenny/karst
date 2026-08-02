@@ -14,4 +14,4 @@ karst-id.workspace = true
 karst-object.workspace = true
 blake3.workspace = true
 rand.workspace = true
-x25519-dalek = { version = "2", features = ["static_secrets"] }
+curve25519-dalek = "4"
