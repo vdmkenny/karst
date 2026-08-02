@@ -426,6 +426,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "karst-path"
+version = "0.1.0"
+dependencies = [
+ "karst-id",
+ "karst-object",
+]
+
+[[package]]
 name = "karst-seal"
 version = "0.1.0"
 dependencies = [

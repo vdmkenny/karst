@@ -208,7 +208,8 @@ participation. Whether physically carried storage can be made routine rather tha
 
 ### L1 Path
 
-*Fixes error 03. Status: sketched.*
+*Fixes error 03. Status: **built** (`karst-path`); segments, composition and accountability
+implemented, distribution of segments unbuilt.*
 
 **Lever removed.** BGP convergence, and the registry that allocated your prefix.
 
@@ -220,7 +221,44 @@ the end to end path themselves and carry it in the packet. There is no global co
 so there is no route leak, no hijack, and no national withdrawal. There is no allocation
 authority to revoke from, because nothing was ever allocated.
 
-This is SCION's design. It is not a thought experiment and it carries production traffic.
+**What a signature buys, stated narrowly.** A segment is a claim of willingness by a named
+party, not a promise of delivery. Signing removes exactly one thing: announcing a route you do
+not operate. It does not stop an operator dropping traffic it agreed to carry, and no signature
+can, because carriage is a future act and a signature is about the present. So the property is
+that **a path names, in advance and verifiably, every party that must misbehave for it to
+fail**: attribution rather than prevention, which is the shape this design keeps arriving at.
+
+The binding that carries this is narrower than it looks. A segment carries its operator's
+verifying key, an address is that key's hash, and the two must agree. Checking the signature
+alone is not enough, because an attacker can sign bytes that **name the victim** and present
+their own key: the signature verifies under the key given, and without the binding the segment
+reads as the victim's. That is announcing a route you do not operate, arriving through the
+check meant to stop it.
+
+**Two senders holding different segments are both correct**, and neither advertises anything
+onward. That is the absence of convergence rather than a weaker form of it.
+
+This is SCION's design rather than a new one, and the honest summary is narrower than "it
+works". SCION has carried commercial traffic since 2017, and after nine years its
+specifications remain Internet-Drafts on the Independent Submission stream carrying the
+boilerplate that the work "is not endorsed by the IETF and has no formal standing in the IETF
+standards process". Its own authors published a break of its data plane: standard SCION's
+hop-field authorisation permits token reuse, so a forged token sends arbitrarily many packets,
+which is what EPIC (Legner, Klenze, Wyss, Sprenger, Perrig, USENIX Security 2020) exists to fix
+with per-packet MACs.
+
+**Why the alternative is not better.** BGP's deployed defence is RPKI route origin validation,
+and its record is worth reading before concluding that a global routing consensus can be
+secured incrementally. Coverage looks reasonable and enforcement does not: about two thirds of
+prefixes carry a ROA, while measurement puts fully protected networks at 12.3%, and 68.5% of
+networks that tools classify as protected are **not enforcing anything** and merely inherit
+filtering from a transit provider. Disabling validation at thirteen tier-1 networks restores
+reachability for RPKI-invalid routes across 23.8% of the internet, which is a centralisation
+result rather than a resilience one. RPKI also fails open by design, so an adversary who stalls
+a publication point disables validation for everything depending on it (*Stalloris*, USENIX
+Security 2022). And BGPsec, the path-validating successor, has essentially no deployment, with
+a peer-reviewed result showing partial deployment can introduce **new** vulnerabilities
+(Lychev, Goldberg, Schapira, SIGCOMM 2013).
 
 **Interaction with L4.** Path selection also determines anonymity, and **selection is uniform
 over admitted relays**. A structural preference that relay operators can read is a placement
