@@ -333,7 +333,7 @@ fn main() -> std::io::Result<()> {
     let announced: std::collections::BTreeSet<karst_object::Cid> = [doc_cid].into_iter().collect();
     let census_obj = Census::publish(&alice_id, &announced, 100, 100_000, 1);
     let mut census = CensusMonitor::new();
-    census.accept(Census::from_object(&census_obj).unwrap());
+    census.accept(&census_obj);
 
     match census.check(&cat, 200) {
         Completeness::Complete => println!("  \x1b[32mcomplete: everything alice committed to is here\x1b[0m"),

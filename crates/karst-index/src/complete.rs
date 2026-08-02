@@ -167,6 +167,12 @@ impl Census {
 #[derive(Debug, Clone, Default)]
 pub struct CensusMonitor {
     latest: Option<Census>,
+    /// The object the held census was decoded from.
+    ///
+    /// Without it `matches_witnessed` had nothing of the monitor's own to compare against and
+    /// checked a caller-supplied object against a caller-supplied digest, which two honest
+    /// values satisfy while the monitor holds a third. The binding has to name *this* census.
+    held: Option<Cid>,
 }
 
 /// What a checkpoint must commit to for a census to be witnessed.
@@ -192,11 +198,15 @@ impl CensusMonitor {
     /// Without the sequence check, replaying an old census makes a reader believe they are
     /// complete when the publisher has said more since, which is the freeze attack arriving
     /// through the detector rather than around it.
-    pub fn accept(&mut self, c: Census) -> bool {
+    pub fn accept(&mut self, obj: &Object) -> bool {
+        let Ok(c) = Census::from_object(obj) else {
+            return false;
+        };
         match &self.latest {
             Some(held) if c.sequence <= held.sequence => false,
             _ => {
                 self.latest = Some(c);
+                self.held = Some(obj.cid());
                 true
             }
         }
@@ -207,19 +217,15 @@ impl CensusMonitor {
     }
 
     /// Whether the census this monitor holds is the one a witnessed checkpoint covers.
-    ///
     /// A reader that skips this is trusting a census no witness has ever seen, which is the
-    /// whole of the gap between the two mechanisms.
-    pub fn matches_witnessed(
-        &self,
-        census_obj: &Object,
-        state: &Cid,
-        witnessed: &Cid,
-    ) -> bool {
-        match &self.latest {
-            None => false,
-            Some(_) => witnessed_digest(census_obj, state) == *witnessed,
+    /// whole of the gap between the two mechanisms. A reader that calls it against a census
+    /// other than the one its monitor holds is doing the same thing while believing otherwise,
+    /// so the object offered must be the object accepted.
+    pub fn matches_witnessed(&self, census_obj: &Object, state: &Cid, witnessed: &Cid) -> bool {
+        if self.held != Some(census_obj.cid()) {
+            return false;
         }
+        witnessed_digest(census_obj, state) == *witnessed
     }
 
     /// Compare a catalogue against what the publisher committed to.
@@ -295,7 +301,7 @@ mod tests {
 
         let obj = Census::publish(&pubr, &targets(5), 100, 1_000, 1);
         let mut m = CensusMonitor::new();
-        assert!(m.accept(Census::from_object(&obj).unwrap()));
+        assert!(m.accept(&obj));
         assert_eq!(m.check(&cat, 200), Completeness::Complete);
         assert!(!m.check(&cat, 200).suspect());
     }
@@ -317,7 +323,7 @@ mod tests {
 
         let obj = Census::publish(&pubr, &targets(8), 100, 1_000, 1);
         let mut m = CensusMonitor::new();
-        m.accept(Census::from_object(&obj).unwrap());
+        m.accept(&obj);
         assert_eq!(
             m.check(&cat, 200),
             Completeness::Missing {
@@ -342,7 +348,7 @@ mod tests {
 
         let obj = Census::publish(&pubr, &targets(5), 100, 1_000, 1);
         let mut m = CensusMonitor::new();
-        m.accept(Census::from_object(&obj).unwrap());
+        m.accept(&obj);
         assert!(matches!(
             m.check(&cat, 200),
             Completeness::Divergent { .. }
@@ -367,7 +373,7 @@ mod tests {
         let pubr = ident(1);
         let obj = Census::publish(&pubr, &targets(3), 100, 50, 1);
         let mut m = CensusMonitor::new();
-        m.accept(Census::from_object(&obj).unwrap());
+        m.accept(&obj);
         let cat = Catalogue::new();
         assert!(matches!(m.check(&cat, 999), Completeness::Expired { .. }));
         assert!(m.check(&cat, 999).suspect());
@@ -377,17 +383,15 @@ mod tests {
     #[test]
     fn an_old_census_cannot_be_replayed_over_a_newer_one() {
         let pubr = ident(1);
-        let newer = Census::from_object(&Census::publish(&pubr, &targets(9), 200, 1_000, 7))
-            .unwrap();
-        let older = Census::from_object(&Census::publish(&pubr, &targets(2), 100, 1_000, 3))
-            .unwrap();
+        let newer = Census::publish(&pubr, &targets(9), 200, 1_000, 7);
+        let older = Census::publish(&pubr, &targets(2), 100, 1_000, 3);
 
         let mut m = CensusMonitor::new();
-        assert!(m.accept(newer));
-        assert!(!m.accept(older.clone()), "an older census was accepted");
+        assert!(m.accept(&newer));
+        assert!(!m.accept(&older), "an older census was accepted");
         assert_eq!(m.latest().unwrap().announced, 9);
         // And a census at the same sequence, which is the cheapest forgery to try.
-        assert!(!m.accept(older));
+        assert!(!m.accept(&older));
     }
 
     /// A census must not be forgeable in another publisher's name.
@@ -465,7 +469,7 @@ mod tests {
 
         let obj = Census::publish(&pubr, &targets(6), 100, 1_000, 1);
         let mut m = CensusMonitor::new();
-        m.accept(Census::from_object(&obj).unwrap());
+        m.accept(&obj);
         assert_eq!(
             m.check(&cat, 200),
             Completeness::Missing {
@@ -494,7 +498,7 @@ mod tests {
 
         let obj = Census::publish(&pubr, &targets(6), 100, 1_000, 1);
         let mut m = CensusMonitor::new();
-        m.accept(Census::from_object(&obj).unwrap());
+        m.accept(&obj);
         assert_eq!(
             m.check(&cat, 200),
             Completeness::Missing {
@@ -518,7 +522,7 @@ mod tests {
         let state = Cid::of(b"state root");
         let obj = Census::publish(&pubr, &targets(5), 100, 1_000, 1);
         let mut m = CensusMonitor::new();
-        m.accept(Census::from_object(&obj).unwrap());
+        m.accept(&obj);
 
         let witnessed = witnessed_digest(&obj, &state);
         assert!(m.matches_witnessed(&obj, &state, &witnessed));
@@ -534,6 +538,41 @@ mod tests {
         // And a checkpoint over a different state does not vouch for this census either.
         let elsewhere = witnessed_digest(&obj, &Cid::of(b"different state"));
         assert!(!m.matches_witnessed(&obj, &state, &elsewhere));
+    }
+
+    /// The binding must name the census the monitor will actually report on.
+    ///
+    /// This is the attack the previous case had backwards. It is not the forged census that
+    /// gets offered to `matches_witnessed`; it is the **honest** one. A publisher witnesses
+    /// census A, then shows the target reader census B on a later sequence. `accept` takes B
+    /// because it is monotonic, so `check()` reports against B. The reader then verifies A
+    /// against a checkpoint that genuinely covers A, and both caller-supplied values agree
+    /// with each other.
+    ///
+    /// Every input is honest and the answer is still wrong, because nothing in the comparison
+    /// was the monitor's. The reader is shown green on both mechanisms while holding a census
+    /// no witness has seen.
+    #[test]
+    fn a_witnessed_census_does_not_vouch_for_the_one_the_monitor_holds() {
+        let pubr = ident(1);
+        let state = Cid::of(b"state root");
+
+        let witnessed_census = Census::publish(&pubr, &targets(5), 100, 1_000, 1);
+        let checkpoint_digest = witnessed_digest(&witnessed_census, &state);
+
+        // The reader is served a later census instead. Monotonic, so it is taken.
+        let served = Census::publish(&pubr, &targets(1), 100, 1_000, 2);
+        let mut m = CensusMonitor::new();
+        assert!(m.accept(&witnessed_census));
+        assert!(m.accept(&served), "a later census is accepted, as it must be");
+
+        assert!(
+            !m.matches_witnessed(&witnessed_census, &state, &checkpoint_digest),
+            "a checkpoint over a census the monitor no longer holds was accepted as covering it"
+        );
+
+        // The only thing that vouches for the held census is a checkpoint over the held census.
+        assert!(m.matches_witnessed(&served, &state, &witnessed_digest(&served, &state)));
     }
 
     /// A reader holding no census must not be able to claim one is witnessed.
