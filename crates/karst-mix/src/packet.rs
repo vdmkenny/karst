@@ -38,11 +38,33 @@
 //!
 //! # What this is not
 //!
-//! One deviation from the paper, deliberate and stated rather than buried:
+//! Deviations from the paper, enumerated. An audit found the previous version of this list
+//! said "one deviation" and understated the wide-block cipher, which is the pattern
+//! `docs/28-blinding.md` was written to condemn, so it is spelled out here instead.
 //!
-//! 1. **Primitives are BLAKE3-based** rather than the paper's. The MAC is a keyed BLAKE3, the
-//!    stream is its XOF, and the wide-block cipher is a four-round unbalanced Feistel in the
-//!    LIONESS shape rather than LIONESS itself.
+//! 1. **Primitives are BLAKE3-based** rather than the paper's. The MAC is a keyed BLAKE3 and
+//!    the stream is its XOF. Both are documented uses of a vetted primitive.
+//!
+//! 2. **The wide-block cipher is in the LIONESS shape and is not LIONESS.** The round
+//!    structure matches Anderson and Biham (FSE 1996) exactly: four unbalanced rounds
+//!    S, H, S, H, with the left half at 32 bytes to satisfy the paper's `|L| = keylen(S)`
+//!    requirement, and `wide_decrypt` is its exact inverse. Three things differ:
+//!    - The paper uses four **independent** keys; these are four subkeys of one, so their
+//!      independence is computational rather than information-theoretic.
+//!    - The paper computes `S(L xor K)`, keying the stream cipher with the round key XORed
+//!      into the left half. This hashes the two together instead, so the round function is a
+//!      joint PRF of `(L, K)` rather than the paper's construction.
+//!    - The hash rounds carry no domain-separation label, unlike every other hash here.
+//!
+//!    None of these is known to weaken the construction under a PRF assumption on BLAKE3, and
+//!    the tagging resistance the payload depends on is exercised directly. But it is not the
+//!    function LIONESS's analysis is stated over, and `lioness-rs` now exists as a candidate
+//!    replacement. See issue #152.
+//!
+//! 3. **A length field accompanies the zero prefix.** The paper's payload is `0_kappa || m`
+//!    with the exit checking the prefix; this is `0_kappa || len || m || padding`. The prefix
+//!    check is the paper's and is present; the length field is extra and tells the exit the
+//!    message length, which callers who care must defeat by always filling the payload.
 //!
 //! This is not a reviewed implementation and should not be deployed as one.
 
@@ -67,6 +89,19 @@ pub const MAC_BYTES: usize = 16;
 pub const BLOCK: usize = ROUTING_BYTES + MAC_BYTES;
 
 pub const ALPHA_BYTES: usize = 32;
+/// Sphinx's kappa, in bytes: the all-zero prefix the exit checks.
+///
+/// This is the paper's only end-to-end payload integrity check, and it was missing. A 4-byte
+/// length field with a range test stood in its place, which a random payload passes with
+/// probability about 2^-22 rather than 2^-128: a corrupted payload was handed upward as a
+/// genuine message roughly one time in four million.
+pub const ZERO_PREFIX_BYTES: usize = 16;
+/// Length field. Not in the paper; see the deviation note in the module doc.
+const LEN_BYTES: usize = 4;
+/// What a payload spends before it carries a message.
+pub const PAYLOAD_OVERHEAD: usize = ZERO_PREFIX_BYTES + LEN_BYTES;
+/// The largest message one packet carries.
+pub const MAX_MESSAGE_BYTES: usize = PAYLOAD_BYTES - PAYLOAD_OVERHEAD;
 pub const HEADER_BYTES: usize = MAX_HOPS * BLOCK;
 pub const PAYLOAD_BYTES: usize = PACKET_BYTES - ALPHA_BYTES - MAC_BYTES - HEADER_BYTES;
 
@@ -147,22 +182,27 @@ fn mac(key: &[u8; 32], data: &[u8]) -> [u8; MAC_BYTES] {
     out
 }
 
+/// XOR a keystream across the whole buffer.
+///
+/// `zip` stops at the shorter side, so a keystream shorter than its buffer used to leave the
+/// tail in plaintext with no error. Encryption and decryption truncate identically, so every
+/// round-trip test in this file would still have passed. The length is now checked.
 fn xor(buf: &mut [u8], ks: &[u8]) {
+    assert_eq!(buf.len(), ks.len(), "keystream length must match the buffer");
     for (b, k) in buf.iter_mut().zip(ks.iter()) {
         *b ^= *k;
     }
 }
 
 /// Constant-time comparison, so a hop does not leak where a forged MAC first diverged.
+///
+/// `subtle` rather than a loop written here. It is already in the build through
+/// `curve25519-dalek`, so this declares an edge on code the binary already contains, and the
+/// property it provides is one a hand-written loop can lose to a compiler that is free to
+/// short-circuit a comparison the source did not.
 fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
+    use subtle::ConstantTimeEq;
+    a.ct_eq(b).into()
 }
 
 // ---------------------------------------------------------------- wide-block cipher
@@ -263,7 +303,7 @@ impl core::fmt::Display for MixError {
         match self {
             MixError::BadRoute => write!(f, "route must be between 1 and {MAX_HOPS} hops"),
             MixError::PayloadTooLarge => {
-                write!(f, "payload exceeds {} bytes", PAYLOAD_BYTES - 4)
+                write!(f, "payload exceeds {} bytes", MAX_MESSAGE_BYTES)
             }
             MixError::BadMac => write!(f, "header MAC did not verify"),
             MixError::Replay => write!(f, "packet already seen"),
@@ -536,19 +576,29 @@ impl Packet {
         if n == 0 || n > MAX_HOPS {
             return Err(MixError::BadRoute);
         }
-        if message.len() + 4 > PAYLOAD_BYTES {
+        if message.len() + PAYLOAD_OVERHEAD > PAYLOAD_BYTES {
             return Err(MixError::PayloadTooLarge);
         }
 
         let (secrets, alphas) = Self::derive_path(route, seed)?;
 
-        // Payload: length prefix, message, deterministic padding. Encrypted from the inside
-        // out so each hop peels exactly one layer.
+        // Payload: Sphinx's zero prefix, then a length field, the message, and deterministic
+        // padding. Encrypted from the inside out so each hop peels exactly one layer.
+        //
+        // The zero prefix is what makes a modified payload detectable at the exit. delta
+        // carries no MAC, by design, so without it nothing distinguishes a delivered message
+        // from noise that happened to decode.
         let mut delta = vec![0u8; PAYLOAD_BYTES];
-        delta[..4].copy_from_slice(&(message.len() as u32).to_le_bytes());
-        delta[4..4 + message.len()].copy_from_slice(message);
-        let pad = stream(&secrets[n - 1], "pad", PAYLOAD_BYTES - 4 - message.len());
-        delta[4 + message.len()..].copy_from_slice(&pad);
+        let at = ZERO_PREFIX_BYTES;
+        delta[at..at + LEN_BYTES].copy_from_slice(&(message.len() as u32).to_le_bytes());
+        let body = at + LEN_BYTES;
+        delta[body..body + message.len()].copy_from_slice(message);
+        let pad = stream(
+            &secrets[n - 1],
+            "pad",
+            PAYLOAD_BYTES - body - message.len(),
+        );
+        delta[body + message.len()..].copy_from_slice(&pad);
         for s in secrets.iter().take(n).rev() {
             wide_encrypt(&subkey(s, "pi"), &mut delta);
         }
@@ -632,13 +682,21 @@ impl Packet {
         match flag {
             FLAG_DROP => Ok(Peeled::Drop { delay_ms }),
             FLAG_DELIVER => {
-                let len = u32::from_le_bytes(self.delta[..4].try_into().unwrap()) as usize;
-                if len + 4 > PAYLOAD_BYTES {
+                // The paper's check, in constant time: a payload that did not survive intact
+                // is refused rather than handed upward.
+                if !ct_eq(&self.delta[..ZERO_PREFIX_BYTES], &[0u8; ZERO_PREFIX_BYTES]) {
                     return Err(MixError::Malformed);
                 }
+                let at = ZERO_PREFIX_BYTES;
+                let len =
+                    u32::from_le_bytes(self.delta[at..at + LEN_BYTES].try_into().unwrap()) as usize;
+                if len + PAYLOAD_OVERHEAD > PAYLOAD_BYTES {
+                    return Err(MixError::Malformed);
+                }
+                let body = at + LEN_BYTES;
                 Ok(Peeled::Deliver {
                     delay_ms,
-                    payload: self.delta[4..4 + len].to_vec(),
+                    payload: self.delta[body..body + len].to_vec(),
                 })
             }
             FLAG_FORWARD => {
@@ -765,6 +823,73 @@ mod tests {
             },
             _ => panic!("expected a forward"),
         }
+    }
+
+    /// A payload that did not survive intact is refused, not delivered.
+    ///
+    /// `delta` carries no MAC, by design: Sphinx relies on the wide-block cipher to make any
+    /// modification diffuse, and on an all-zero prefix at the exit to notice that it did. The
+    /// prefix was missing here and a 4-byte length field with a range test stood in for it.
+    ///
+    /// **A random-corruption test cannot show this.** The length check alone refuses garbage
+    /// about 4194303 times in 4194304, so any feasible number of random flips passes with or
+    /// without the prefix, and a test built that way passes against the defect. The gap is
+    /// between 2^-22 and 2^-128, and the only way to exhibit it is to construct the payload
+    /// the length check waves through: a valid length field over a prefix that is not zero,
+    /// which is exactly what an attacker gets one time in four million for free.
+    #[test]
+    fn a_payload_that_passes_the_length_check_is_still_refused_without_the_prefix() {
+        let ks = keys(1);
+        let r = route(&ks);
+        let (secrets, _) = Packet::derive_path(&r, [77u8; 32]).unwrap();
+
+        // The plaintext an exit would see: a perfectly valid length, over a corrupted prefix.
+        let mut plain = vec![0u8; PAYLOAD_BYTES];
+        plain[0] = 1; // one bit of the zero prefix, and the whole check turns on it
+        plain[ZERO_PREFIX_BYTES..ZERO_PREFIX_BYTES + LEN_BYTES]
+            .copy_from_slice(&4u32.to_le_bytes());
+        plain[ZERO_PREFIX_BYTES + LEN_BYTES..][..4].copy_from_slice(b"oops");
+
+        let mut p = Packet::wrap(&r, b"anything", [77u8; 32]).unwrap();
+        wide_encrypt(&subkey(&secrets[0], "pi"), &mut plain);
+        p.delta = plain;
+
+        let mut seen = SeenTags::new();
+        assert_eq!(
+            p.peel(&ks[0], &mut seen),
+            Err(MixError::Malformed),
+            "a payload with a valid length field and a corrupted prefix was delivered"
+        );
+    }
+
+    /// Diffusion still holds: a single flipped bit does not survive as a marked message.
+    #[test]
+    fn a_flipped_payload_bit_never_delivers_the_original() {
+        let ks = keys(1);
+        let r = route(&ks);
+        for i in 0..200u32 {
+            let mut p = Packet::wrap(&r, b"the real message", [i as u8 ^ 0x5a; 32]).unwrap();
+            let at = (i as usize * 7) % p.delta.len();
+            p.delta[at] ^= 1 << (i % 8);
+
+            let mut seen = SeenTags::new();
+            if let Ok(Peeled::Deliver { payload, .. }) = p.peel(&ks[0], &mut seen) {
+                assert_ne!(payload, b"the real message", "corruption produced the original");
+            }
+        }
+    }
+
+    /// The largest message the paper's overhead leaves room for still round-trips.
+    #[test]
+    fn the_maximum_message_still_fits() {
+        let ks = keys(3);
+        let r = route(&ks);
+        let m = vec![0x5a; MAX_MESSAGE_BYTES];
+        assert_eq!(deliver(&ks, Packet::wrap(&r, &m, [1u8; 32]).unwrap()).unwrap(), m);
+        assert_eq!(
+            Packet::wrap(&r, &vec![0u8; MAX_MESSAGE_BYTES + 1], [1u8; 32]),
+            Err(MixError::PayloadTooLarge)
+        );
     }
 
     /// The property the whole layer rests on: a relay on the route cannot open the rest of it.
@@ -905,7 +1030,7 @@ mod tests {
     fn every_packet_is_the_same_size_at_every_hop() {
         let ks = keys(4);
         let r = route(&ks);
-        for len in [0usize, 1, 100, PAYLOAD_BYTES - 4] {
+        for len in [0usize, 1, 100, MAX_MESSAGE_BYTES] {
             let mut cur = Packet::wrap(&r, &vec![7u8; len], [3u8; 32]).unwrap();
             assert_eq!(cur.to_bytes().len(), PACKET_BYTES);
             let mut seen: Vec<SeenTags> = (0..4).map(|_| SeenTags::new()).collect();
@@ -1334,7 +1459,7 @@ mod adversarial {
     fn the_wire_encoding_round_trips() {
         let k = MixKey::from_seed([11u8; 32]);
         let route = vec![Hop { id: 0, public: k.public(), delay_ms: 3 }];
-        for n in [0usize, 1, 100, PAYLOAD_BYTES - 5] {
+        for n in [0usize, 1, 100, MAX_MESSAGE_BYTES - 1] {
             let p = Packet::wrap(&route, &vec![0xA5; n], [n as u8; 32]).unwrap();
             let bytes = p.to_bytes();
             assert_eq!(bytes.len(), PACKET_BYTES);
