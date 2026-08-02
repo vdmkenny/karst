@@ -81,6 +81,12 @@ pub enum PathError {
     Empty,
     /// Longer than a sender will carry.
     TooLong,
+    /// The store already holds as many segments from this point as it will keep.
+    ///
+    /// Identities are free by design, so an adversary mints operators and hands over as many
+    /// individually valid segments as it likes. Refusing at the door is what keeps the
+    /// composition search from being handed its own input size.
+    TooMany,
 }
 
 /// The most segments in one path.
@@ -201,6 +207,16 @@ pub struct Segments {
 }
 
 impl Segments {
+    /// Segments kept per starting point.
+    ///
+    /// A sender needs a handful of ways out of any given point; it does not need every offer
+    /// in the world, and holding them all is how the search below gets its exponent.
+    pub const MAX_PER_POINT: usize = 64;
+    /// Paths one composition will return.
+    pub const MAX_PATHS: usize = 256;
+    /// Search steps one composition will take, whether or not they reach anywhere.
+    pub const MAX_VISITS: usize = 1 << 16;
+
     pub fn new() -> Self {
         Segments::default()
     }
@@ -212,9 +228,13 @@ impl Segments {
     pub fn learn(&mut self, s: Segment) -> Result<(), PathError> {
         s.verify()?;
         let e = self.by_from.entry(s.from).or_default();
-        if !e.contains(&s) {
-            e.push(s);
+        if e.contains(&s) {
+            return Ok(());
         }
+        if e.len() >= Self::MAX_PER_POINT {
+            return Err(PathError::TooMany);
+        }
+        e.push(s);
         Ok(())
     }
 
@@ -226,14 +246,27 @@ impl Segments {
         self.len() == 0
     }
 
-    /// Every valid path from `from` to `to`, up to `MAX_SEGMENTS`.
+    /// Every valid path from `from` to `to`, up to `MAX_SEGMENTS` and [`Segments::MAX_PATHS`].
     ///
     /// Returned in a deterministic order that carries no preference. Ranking paths is an L4
     /// decision, and a structural preference relay operators can read is a placement target.
+    ///
+    /// # Why this is bounded twice
+    ///
+    /// `MAX_SEGMENTS` bounds path *length* and says nothing about path *count*. With `k`
+    /// segments between each consecutive pair of points, an eight-point chain has `k^7`
+    /// paths: at `k = 20` that is 1.28 billion `Path` values built and cloned inside one
+    /// call, from segments that are each individually valid and correctly signed. The
+    /// enumeration is the attack, not the segments.
+    ///
+    /// So the search is bounded on output (`MAX_PATHS`) and on work (`MAX_VISITS`), because
+    /// the two are not the same: a search can explore exponentially many branches that reach
+    /// no destination at all and return nothing while doing it.
     pub fn compose(&self, from: Point, to: Point, now: u64) -> Vec<Path> {
         let mut out = Vec::new();
         let mut stack: Vec<Segment> = Vec::new();
-        self.walk(from, to, now, &mut stack, &mut out);
+        let mut visits = 0usize;
+        self.walk(from, to, now, &mut stack, &mut out, &mut visits);
         out.sort_by_key(|p| {
             (
                 p.hops(),
@@ -250,10 +283,15 @@ impl Segments {
         now: u64,
         stack: &mut Vec<Segment>,
         out: &mut Vec<Path>,
+        visits: &mut usize,
     ) {
-        if stack.len() >= MAX_SEGMENTS {
+        if stack.len() >= MAX_SEGMENTS || out.len() >= Self::MAX_PATHS {
             return;
         }
+        if *visits >= Self::MAX_VISITS {
+            return;
+        }
+        *visits += 1;
         let Some(next) = self.by_from.get(&at) else {
             return;
         };
@@ -271,9 +309,12 @@ impl Segments {
                     out.push(p);
                 }
             } else {
-                self.walk(s.to, to, now, stack, out);
+                self.walk(s.to, to, now, stack, out, visits);
             }
             stack.pop();
+            if out.len() >= Self::MAX_PATHS || *visits >= Self::MAX_VISITS {
+                return;
+            }
         }
     }
 }
@@ -290,6 +331,82 @@ mod tests {
 
     fn pt(n: u32) -> Point {
         op(n + 10_000).address()
+    }
+
+    /// Individually valid segments, arranged so that enumerating them is the attack.
+    ///
+    /// `k` operators offer carriage between each consecutive pair of points along a chain,
+    /// which is a completely ordinary thing for a competitive network to look like. Every
+    /// signature checks. `MAX_SEGMENTS` bounds the length of each path and does nothing about
+    /// there being `k^7` of them.
+    #[test]
+    fn a_dense_mesh_does_not_hand_the_sender_an_exponential() {
+        let mut segs = Segments::new();
+        let mut refused = 0;
+        for hop in 0..8u32 {
+            for k in 0..20u32 {
+                if segs
+                    .learn(Segment::offer(
+                        &op(hop * 100 + k),
+                        pt(hop),
+                        pt(hop + 1),
+                        100,
+                    ))
+                    .is_err()
+                {
+                    refused += 1;
+                }
+            }
+        }
+        assert_eq!(refused, 0, "twenty ways out of a point is not a flood");
+
+        let start = std::time::Instant::now();
+        let paths = segs.compose(pt(0), pt(8), 0);
+        assert!(
+            paths.len() <= Segments::MAX_PATHS,
+            "returned {} paths",
+            paths.len()
+        );
+        assert!(
+            start.elapsed().as_secs() < 5,
+            "composition took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// A store bounds what it holds, so the search cannot be handed its own input size.
+    #[test]
+    fn a_store_refuses_more_ways_out_of_a_point_than_it_will_keep() {
+        let mut segs = Segments::new();
+        let mut accepted = 0;
+        for k in 0..(Segments::MAX_PER_POINT as u32 + 500) {
+            if segs.learn(Segment::offer(&op(k), pt(0), pt(k + 1), 100)).is_ok() {
+                accepted += 1;
+            }
+        }
+        assert_eq!(accepted, Segments::MAX_PER_POINT);
+        assert_eq!(
+            segs.learn(Segment::offer(&op(9999), pt(0), pt(9998), 100)),
+            Err(PathError::TooMany)
+        );
+    }
+
+    /// A search that reaches nowhere must still stop.
+    ///
+    /// Output caps do not bound work: a dense mesh with no route to the destination explores
+    /// exponentially many branches and returns an empty vector while doing it.
+    #[test]
+    fn a_search_that_finds_nothing_still_terminates() {
+        let mut segs = Segments::new();
+        for hop in 0..8u32 {
+            for k in 0..20u32 {
+                segs.learn(Segment::offer(&op(hop * 100 + k), pt(hop), pt(hop + 1), 100))
+                    .unwrap();
+            }
+        }
+        let start = std::time::Instant::now();
+        assert!(segs.compose(pt(0), pt(9999), 0).is_empty());
+        assert!(start.elapsed().as_secs() < 5, "took {:?}", start.elapsed());
     }
 
     /// A sender composes a path with nothing consulted but segments it holds.

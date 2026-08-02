@@ -30,6 +30,19 @@
 //! A recipient collecting from a box that refused deposits is told so, and can act on it. This
 //! is the same choice made everywhere else in this design: an adversary who causes loss should
 //! cause a loss that is **visible** rather than one that is deniable.
+//!
+//! # An empty box is not remembered forever
+//!
+//! `DEFAULT_TOTAL` bounds stored items and bounds nothing about the number of tags. A box
+//! emptied by its owner used to stay in the map at zero items, so `{deposit to a fresh tag,
+//! drain it}` grew the map permanently at two packets an iteration while `held` never rose
+//! above one. Empty boxes are therefore dropped.
+//!
+//! A box emptied but carrying a refusal count is the awkward case, because that count is the
+//! only record that mail was lost and the tag owner has not seen it yet. Those are kept, up to
+//! `MAX_REFUSAL_MEMORY`, oldest forgotten first. Forgetting is counted in
+//! [`Provider::forgotten`] rather than done quietly, since a provider that silently loses the
+//! evidence of loss is worse than one that admits it.
 
 use std::collections::{BTreeMap, VecDeque};
 
@@ -59,6 +72,8 @@ pub struct Collected {
 struct Box_ {
     items: VecDeque<Vec<u8>>,
     refused: u64,
+    /// Creation order, for age-ordered eviction. Never the tag, which the adversary picks.
+    seq: u64,
 }
 
 #[derive(Debug)]
@@ -67,11 +82,18 @@ pub struct Provider {
     per_box: usize,
     total: usize,
     held: usize,
+    next_seq: u64,
+    forgotten: u64,
 }
 
 impl Provider {
     pub const DEFAULT_PER_BOX: usize = 1024;
     pub const DEFAULT_TOTAL: usize = 1 << 20;
+    /// How many emptied boxes may be kept solely to report a refusal count.
+    ///
+    /// Producing one costs an adversary `per_box + 1` deposits and a drain, so this is not a
+    /// cheap structure to grind, but it is not a free one either and it needs a bound.
+    pub const MAX_REFUSAL_MEMORY: usize = 1 << 14;
 
     pub fn new() -> Self {
         Provider {
@@ -79,6 +101,8 @@ impl Provider {
             per_box: Self::DEFAULT_PER_BOX,
             total: Self::DEFAULT_TOTAL,
             held: 0,
+            next_seq: 0,
+            forgotten: 0,
         }
     }
 
@@ -92,6 +116,43 @@ impl Provider {
 
     pub fn held(&self) -> usize {
         self.held
+    }
+
+    /// Boxes currently tracked. Bounded, which is the point.
+    pub fn boxes(&self) -> usize {
+        self.boxes.len()
+    }
+
+    /// Refusal counts dropped to stay inside [`Provider::MAX_REFUSAL_MEMORY`].
+    ///
+    /// Non-zero means some owner will collect an under-reported refusal count. It is a worse
+    /// outcome than remembering and a better one than running out of memory, and it is
+    /// readable rather than silent.
+    pub fn forgotten(&self) -> u64 {
+        self.forgotten
+    }
+
+    /// Drop what carries no information, then bound what does.
+    fn prune(&mut self) {
+        self.boxes.retain(|_, b| !b.items.is_empty() || b.refused > 0);
+
+        let empties = self.boxes.values().filter(|b| b.items.is_empty()).count();
+        if empties <= Self::MAX_REFUSAL_MEMORY {
+            return;
+        }
+        // Oldest first, by creation order rather than by tag: a tag is chosen by whoever
+        // deposits, so evicting on it hands the adversary the choice of victim.
+        let mut ages: Vec<(u64, Tag)> = self
+            .boxes
+            .iter()
+            .filter(|(_, b)| b.items.is_empty())
+            .map(|(t, b)| (b.seq, *t))
+            .collect();
+        ages.sort_unstable();
+        for (_, tag) in ages.into_iter().take(empties - Self::MAX_REFUSAL_MEMORY) {
+            self.boxes.remove(&tag);
+            self.forgotten += 1;
+        }
     }
 
     /// File a delivered payload.
@@ -108,7 +169,14 @@ impl Provider {
         if self.held >= self.total {
             return Err(DepositError::ProviderFull);
         }
-        let b = self.boxes.entry(tag).or_default();
+        let seq = self.next_seq;
+        let b = self.boxes.entry(tag).or_insert_with(|| Box_ {
+            seq,
+            ..Box_::default()
+        });
+        if b.seq == seq {
+            self.next_seq += 1;
+        }
         if b.items.len() >= self.per_box {
             b.refused += 1;
             return Err(DepositError::BoxFull);
@@ -152,7 +220,9 @@ impl Provider {
                 if item.is_some() {
                     self.held -= 1;
                 }
-                (item, b.refused)
+                let refused = b.refused;
+                self.prune();
+                (item, refused)
             }
         }
     }
@@ -188,6 +258,55 @@ mod tests {
         let mut v = vec![tag; MAILBOX_BYTES];
         v.extend(std::iter::repeat(body).take(ENVELOPE_BYTES));
         v
+    }
+
+    fn tagged(tag: &[u8; MAILBOX_BYTES], body: u8) -> Vec<u8> {
+        let mut v = tag.to_vec();
+        v.extend(std::iter::repeat(body).take(ENVELOPE_BYTES));
+        v
+    }
+
+    /// The bound that `DEFAULT_TOTAL` does not provide.
+    ///
+    /// `{deposit to a fresh tag, drain it}` keeps `held` at one forever, so the item bound
+    /// never engages, while each iteration used to leave an entry in the map permanently. Two
+    /// packets bought a permanent allocation, which is a memory exhaustion at line rate.
+    #[test]
+    fn draining_a_box_does_not_leave_it_behind() {
+        let mut p = Provider::new();
+        for i in 0..5_000u32 {
+            let mut tag = [0u8; MAILBOX_BYTES];
+            tag[..4].copy_from_slice(&i.to_le_bytes());
+            p.deposit(&tagged(&tag, 7)).unwrap();
+            assert!(p.take_one(&tag).0.is_some());
+        }
+        assert_eq!(p.held(), 0);
+        assert_eq!(p.boxes(), 0, "an emptied box with nothing to report was kept");
+    }
+
+    /// Refusal counts survive an emptied box, up to a bound, and forgetting is visible.
+    ///
+    /// A box emptied while carrying refusals is the one empty box worth keeping: the count is
+    /// the only record that mail was lost. It is still not worth keeping without limit, and an
+    /// owner handed an under-reported count should be able to find out that happened.
+    #[test]
+    fn a_refusal_count_outlives_the_box_but_not_without_limit() {
+        let mut p = Provider::with_limits(1, 1 << 20);
+        let mut tag = [9u8; MAILBOX_BYTES];
+        p.deposit(&tagged(&tag, 1)).unwrap();
+        assert_eq!(p.deposit(&tagged(&tag, 2)), Err(DepositError::BoxFull));
+        assert_eq!(p.take_one(&tag), (Some(vec![1u8; ENVELOPE_BYTES]), 1));
+        assert_eq!(p.boxes(), 1, "the refusal count was dropped with the box");
+
+        for i in 0..(Provider::MAX_REFUSAL_MEMORY as u32 + 64) {
+            tag = [0u8; MAILBOX_BYTES];
+            tag[..4].copy_from_slice(&i.to_le_bytes());
+            p.deposit(&tagged(&tag, 1)).unwrap();
+            p.deposit(&tagged(&tag, 2)).ok();
+            p.take_one(&tag);
+        }
+        assert!(p.boxes() <= Provider::MAX_REFUSAL_MEMORY + 1);
+        assert!(p.forgotten() > 0, "eviction must be countable, not silent");
     }
 
     #[test]

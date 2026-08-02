@@ -506,6 +506,55 @@ pub struct Doc {
     nodes: BTreeMap<Cid, Node>,
 }
 
+/// A bound on how much work an untrusted document may cost the reader.
+///
+/// Containment is a DAG, not a tree: nothing stops a `Section` listing the same child twice,
+/// and nothing should, because including one node in two places is a legitimate thing to do
+/// with content-addressed nodes. But a chain of sixty-four such nodes doubles the work per
+/// level, so roughly six kilobytes of correctly signed, correctly verified objects cost 2^64
+/// visits. A cycle detector does not help here; the hostile shape has no cycle.
+///
+/// So the bound is on total visits rather than on repetition, plus a depth cap so a long
+/// linear chain cannot overflow the stack instead. Honest documents are nowhere near either.
+/// A document that exceeds them is truncated visibly, because a reader silently shown less
+/// than a publisher wrote is worse off than one told the document is hostile.
+struct Budget {
+    visits: usize,
+    depth: usize,
+    exhausted: bool,
+}
+
+impl Budget {
+    /// A rendered document larger than this is past any screen and any reader's patience.
+    const MAX_VISITS: usize = 1 << 16;
+    /// Deeper than this is a chain, not a structure. Also keeps the recursion off the stack
+    /// limit: the walk is depth-first and native frames are not free.
+    const MAX_DEPTH: usize = 64;
+
+    fn new() -> Self {
+        Budget {
+            visits: 0,
+            depth: 0,
+            exhausted: false,
+        }
+    }
+
+    /// Enter one node. The caller must [`Budget::leave`] on every path out.
+    fn enter(&mut self) -> bool {
+        if self.depth >= Self::MAX_DEPTH || self.visits >= Self::MAX_VISITS {
+            self.exhausted = true;
+            return false;
+        }
+        self.visits += 1;
+        self.depth += 1;
+        true
+    }
+
+    fn leave(&mut self) {
+        self.depth -= 1;
+    }
+}
+
 impl Doc {
     pub fn new() -> Self {
         Doc::default()
@@ -545,11 +594,23 @@ impl Doc {
     /// differently, and none of them is privileged. The document has no opinion.
     pub fn render_text(&self, root: &Cid) -> String {
         let mut out = String::new();
-        self.render_into(root, 0, &mut out);
+        let mut budget = Budget::new();
+        self.render_into(root, 0, &mut out, &mut budget);
+        if budget.exhausted {
+            out.push_str("[truncated: document exceeds the rendering budget]\n");
+        }
         out
     }
 
-    fn render_into(&self, cid: &Cid, depth: usize, out: &mut String) {
+    fn render_into(&self, cid: &Cid, depth: usize, out: &mut String, budget: &mut Budget) {
+        if !budget.enter() {
+            return;
+        }
+        self.render_node(cid, depth, out, budget);
+        budget.leave();
+    }
+
+    fn render_node(&self, cid: &Cid, depth: usize, out: &mut String, budget: &mut Budget) {
         let pad = "  ".repeat(depth);
         let Some(node) = self.nodes.get(cid) else {
             out.push_str(&format!("{pad}[missing {}]\n", cid.short()));
@@ -592,7 +653,7 @@ impl Doc {
                     };
                     out.push_str(&format!("{pad}{bullet} "));
                     let mut sub = String::new();
-                    self.render_into(item, 0, &mut sub);
+                    self.render_into(item, 0, &mut sub, budget);
                     out.push_str(sub.trim_start());
                 }
             }
@@ -624,7 +685,7 @@ impl Doc {
                     out.push_str(&format!("{pad}{title}\n"));
                 }
                 for c in children {
-                    self.render_into(c, depth, out);
+                    self.render_into(c, depth, out, budget);
                 }
             }
         }
@@ -639,22 +700,31 @@ impl Doc {
     /// See [`Doc::linked_records`].
     pub fn records(&self, root: &Cid) -> Vec<(String, BTreeMap<String, Value>)> {
         let mut out = Vec::new();
-        self.collect_records(root, &mut out);
+        let mut budget = Budget::new();
+        self.collect_records(root, &mut out, &mut budget);
         out
     }
 
-    fn collect_records(&self, cid: &Cid, out: &mut Vec<(String, BTreeMap<String, Value>)>) {
-        let Some(node) = self.nodes.get(cid) else {
+    fn collect_records(
+        &self,
+        cid: &Cid,
+        out: &mut Vec<(String, BTreeMap<String, Value>)>,
+        budget: &mut Budget,
+    ) {
+        if !budget.enter() {
             return;
-        };
-        if let Node::Record { schema, fields } = node {
-            out.push((schema.clone(), fields.clone()));
         }
-        for r in node.contained() {
-            if self.nodes.contains_key(&r) {
-                self.collect_records(&r, out);
+        if let Some(node) = self.nodes.get(cid) {
+            if let Node::Record { schema, fields } = node {
+                out.push((schema.clone(), fields.clone()));
+            }
+            for r in node.contained() {
+                if self.nodes.contains_key(&r) {
+                    self.collect_records(&r, out, budget);
+                }
             }
         }
+        budget.leave();
     }
 
     /// Records reachable by *following links out of* this document, tagged with the node
@@ -702,6 +772,85 @@ impl Doc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A document whose containment DAG doubles at every level.
+    ///
+    /// Each section lists the same child twice. Nothing rejects that and nothing should: one
+    /// node in two places is a legitimate use of content addressing. But `k` levels means
+    /// `2^k` visits for a walk that does not count, so the objects stay tiny while the work
+    /// does not. Returns the root.
+    fn doubling_chain(doc: &mut Doc, levels: usize) -> Cid {
+        let mut cur = doc.add(Node::Prose {
+            runs: vec![Run::plain("leaf")],
+        });
+        for i in 0..levels {
+            cur = doc.add(Node::Section {
+                title: format!("level {i}"),
+                children: vec![cur, cur],
+            });
+        }
+        cur
+    }
+
+    /// A hostile document costs the reader a bounded amount and says so.
+    ///
+    /// Sixty-four doubling levels is roughly six kilobytes of correctly signed, correctly
+    /// verified nodes and 2^64 visits for an uncounted walk. Both entry points are read paths
+    /// for material chosen by whoever the reader chose to read, and `records` is what an agent
+    /// calls, so an agent is hit too.
+    #[test]
+    fn a_doubling_document_does_not_cost_the_reader_the_world() {
+        let mut doc = Doc::new();
+        let root = doubling_chain(&mut doc, 64);
+
+        let text = doc.render_text(&root);
+        assert!(
+            text.contains("[truncated"),
+            "a truncated render must say so rather than look complete"
+        );
+        assert!(text.len() < 4 << 20, "render produced {} bytes", text.len());
+        assert!(doc.records(&root).len() <= 1 << 16);
+    }
+
+    /// A chain long enough to overflow the stack is refused rather than survived by luck.
+    #[test]
+    fn a_deep_chain_does_not_overflow_the_stack() {
+        let mut doc = Doc::new();
+        let mut cur = doc.add(Node::Prose {
+            runs: vec![Run::plain("leaf")],
+        });
+        for i in 0..50_000 {
+            cur = doc.add(Node::Section {
+                title: format!("{i}"),
+                children: vec![cur],
+            });
+        }
+        assert!(doc.render_text(&cur).contains("[truncated"));
+        assert!(doc.records(&cur).is_empty());
+    }
+
+    /// The bound must not truncate anything a publisher would actually write.
+    #[test]
+    fn an_ordinary_document_is_not_truncated() {
+        let mut doc = Doc::new();
+        let mut sections = Vec::new();
+        for i in 0..200 {
+            let p = doc.add(Node::Prose {
+                runs: vec![Run::plain(&format!("paragraph {i}"))],
+            });
+            sections.push(doc.add(Node::Section {
+                title: format!("section {i}"),
+                children: vec![p],
+            }));
+        }
+        let root = doc.add(Node::Section {
+            title: "book".into(),
+            children: sections,
+        });
+        let text = doc.render_text(&root);
+        assert!(!text.contains("[truncated"));
+        assert!(text.contains("paragraph 199"));
+    }
 
     fn money(minor: i64) -> Value {
         Value::Money {
