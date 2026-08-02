@@ -19,7 +19,7 @@
 use karst_mix::packet::PAYLOAD_BYTES;
 
 /// Bytes usable in a delivered payload, once Sphinx has taken its length prefix.
-pub const FRAGMENT_BYTES: usize = PAYLOAD_BYTES - 4;
+pub const FRAGMENT_BYTES: usize = karst_mix::packet::MAX_MESSAGE_BYTES;
 
 /// The mailbox a fragment is filed under, in clear, because a provider must read it to file it.
 pub const MAILBOX_BYTES: usize = 32;

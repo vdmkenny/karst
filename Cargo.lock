@@ -507,6 +507,7 @@ dependencies = [
  "karst-id",
  "karst-object",
  "rand",
+ "subtle",
 ]
 
 [[package]]
