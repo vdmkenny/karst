@@ -13,9 +13,12 @@
 //! - **The credential "signature" is a 61-bit symmetric tag.** Verification needs the signing
 //!   key, so every verifier can forge, and ~2^61 offline hashes recover the issuing key from a
 //!   single observed credential. (#134)
-//! - **Every key and every blinding factor derives from a 64-bit seed**, including in
-//!   `blind.rs`, which turns that module's information-theoretic unlinkability into a 2^64
-//!   offline search available to exactly the party blinding defends against. (#136)
+//! - **Every key and every serial in this module derives from a 64-bit seed**, so an adversary
+//!   who guesses a wallet's seed predicts every serial it will ever spend. (#136)
+//!
+//! The `blind` module is the exception and is sound: it is RFC 9474 as implemented by
+//! `blind-rsa-signatures`, with keys and blinding factors from the system CSPRNG. It is not
+//! composed with the issuance path above, which is why that path is still a placeholder.
 //!
 //! What is worth reading here is the *structure*: which acts are separated, what each ledger
 //! observes, and why double-spend attribution can be made to work without identifying honest

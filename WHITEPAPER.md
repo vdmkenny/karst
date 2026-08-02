@@ -650,12 +650,15 @@ so producing a split view requires corrupting witnesses rather than fooling a re
 the direction Certificate Transparency moved after client-to-client gossip failed to deploy
 (Syta et al., *Keeping Authorities Honest or Bust*, IEEE S&P 2016).
 
-**A witness can refuse and cannot lie**, and this is true only because it countersigns a
-**signed object** rather than a struct handed to it. An earlier version took a bare checkpoint
-whose publisher was a caller-supplied field, so anyone could name a victim and have honest
-witnesses countersign a digest that victim never made: the witnesses substituted, which is the
-one thing this claim says they cannot do. It never originates a statement; it countersigns a
+**A witness can refuse and cannot lie.** It never originates a statement; it countersigns a
 publisher's own signed checkpoint or declines.
+
+That holds only because a witness countersigns a **signed object** rather than a struct handed
+to it. The distinction is the whole property: if the publisher were a field the caller filled
+in, anyone could name a victim and collect honest countersignatures on a digest that victim
+never made, and the witnesses would have substituted a statement rather than attested one. A
+witness therefore verifies the publisher's signature before its own goes on, and a checkpoint
+that does not verify is refused rather than countersigned.
 
 **Extending is not the same as advancing.** A checkpoint links back to the one it continues, and
 a witness refuses anything that does not. Comparing sequence numbers alone let a publisher keep
@@ -1475,9 +1478,20 @@ bearer belongs to an incumbent has not left the incumbent, whatever the sixteen 
 do. That is the single most important thing to understand about the current state of this
 repository.
 
-Two others belong next to it. **The cryptography is unreviewed**, and one break has already been
-found and fixed after shipping (#101). **Nothing here has been deployed**, so every number in this
-paper that is not from cited literature comes from a simulator in this repository.
+Two others belong next to it.
+
+**The cryptography is unreviewed.** No construction here has had outside analysis, and the
+project's own audits have found total breaks in shipped code more than once. Where a maintained
+implementation of a standard exists it is used rather than reimplemented: HPKE comes from the
+`hpke` crate against RFC 9180's test vectors, signatures from `ed25519-dalek`, group operations
+from `curve25519-dalek`, constant-time comparison from `subtle`. Where one does not, the
+construction is a published scheme with its deviations enumerated in the module that implements
+it. Two layers currently fall short of their own claims and say so in their status lines: L5's
+private set intersection is unsound in the mutual-output form used here, and L14's credential
+cryptography is a placeholder with no unforgeability.
+
+**Nothing here has been deployed.** Every number in this paper that is not from cited literature
+comes from a simulator in this repository.
 
 ---
 
