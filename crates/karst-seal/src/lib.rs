@@ -5,9 +5,24 @@
 //! the recipient. Content confidentiality is therefore a separate mechanism, not a consequence
 //! of mixing, and it must not reintroduce the identifiers mixing just removed.
 //!
-//! The construction is HPKE base mode (RFC 9180) with DHKEM(X25519) and ChaCha20-Poly1305: a
-//! fresh ephemeral key per message, a shared secret by Diffie-Hellman, key and nonce derived
-//! together, and the ciphertext bound to associated data.
+//! The construction is HPKE base mode, RFC 9180, ciphersuite
+//! DHKEM(X25519, HKDF-SHA256) / HKDF-SHA256 / ChaCha20-Poly1305, as implemented by the `hpke`
+//! crate. A fresh encapsulation per message, and the ciphertext bound to associated data.
+//!
+//! # Why the standard rather than the shape of it
+//!
+//! This module used to say "HPKE base mode (RFC 9180)" over a key schedule written here: a
+//! BLAKE3 derivation of a key and a nonce from the raw Diffie-Hellman output. That
+//! construction was defensible and it was not RFC 9180, so the citation was decoration. It
+//! also skipped what the RFC's schedule is *for*: `ExtractAndExpand` over a labelled
+//! `suite_id`, domain separation between the KEM and the key schedule, and a base nonce
+//! XORed with a sequence number rather than a nonce derived once and reused per context.
+//!
+//! Nothing here was known to be broken. That is the wrong bar: a construction nobody has
+//! analysed is not the same as one that has been, and the RFC is the analysed one. The
+//! primitive is now the specification, verified against the RFC's own test vectors by the
+//! crate that implements it, and the only cryptography in this file is the choice of
+//! ciphersuite.
 //!
 //! # Why the key is not the identity key
 //!
@@ -31,16 +46,26 @@
 //! recipient performs; it reveals a ciphertext's destination only to someone who already had
 //! the destination in mind.
 
-use chacha20poly1305::aead::{Aead, KeyInit, Payload};
-use chacha20poly1305::{ChaCha20Poly1305, Key, Nonce};
-use x25519_dalek::{PublicKey, StaticSecret};
+use hpke::aead::ChaCha20Poly1305;
+use hpke::kdf::HkdfSha256;
+use hpke::kem::X25519HkdfSha256;
+use hpke::{Deserializable, Kem as KemTrait, OpModeR, OpModeS, Serializable};
+use x25519_dalek::PublicKey;
 
-/// Bytes prepended to every sealed message: the sender's ephemeral public key.
+type Kem = X25519HkdfSha256;
+
+/// Binds every ciphertext to this protocol and version.
+///
+/// RFC 9180's `info` is the application's own domain separation. Without it a ciphertext
+/// produced by any other HPKE application against the same key would decrypt here.
+const INFO: &[u8] = b"karst.seal.v2";
+
+/// Bytes prepended to every sealed message: the encapsulated key, then the AEAD tag.
 pub const OVERHEAD: usize = 32 + 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SealError {
-    /// Too short to contain an ephemeral key and a tag.
+    /// Too short to contain an encapsulated key and a tag.
     Truncated,
     /// Authentication failed. Indistinguishable from "not addressed to this key", by design.
     NotForYou,
@@ -49,7 +74,8 @@ pub enum SealError {
 /// A key others can encrypt to.
 #[derive(Clone)]
 pub struct SealingKey {
-    secret: StaticSecret,
+    secret: <Kem as KemTrait>::PrivateKey,
+    public: <Kem as KemTrait>::PublicKey,
 }
 
 /// Deliberately opaque. A sealing key printed into a log is a sealing key that is public.
@@ -61,19 +87,20 @@ impl std::fmt::Debug for SealingKey {
 
 impl SealingKey {
     pub fn generate() -> Self {
-        SealingKey {
-            secret: StaticSecret::random_from_rng(rand::rngs::OsRng),
-        }
+        let (secret, public) = Kem::gen_keypair();
+        SealingKey { secret, public }
     }
 
+    /// Derive a key from a seed, by the KEM's own `DeriveKeyPair` rather than by treating the
+    /// seed as a scalar. RFC 9180 §7.1.3 specifies that derivation; doing it any other way
+    /// here would be the same mistake this module just stopped making.
     pub fn from_seed(seed: [u8; 32]) -> Self {
-        SealingKey {
-            secret: StaticSecret::from(derive(&seed, "karst.seal.v1.identity", &[])),
-        }
+        let (secret, public) = Kem::derive_keypair(&seed);
+        SealingKey { secret, public }
     }
 
     pub fn public(&self) -> PublicKey {
-        PublicKey::from(&self.secret)
+        PublicKey::from(<[u8; 32]>::try_from(self.public.to_bytes().as_slice()).expect("32 bytes"))
     }
 
     /// Recover a sealed message, or learn nothing.
@@ -81,20 +108,17 @@ impl SealingKey {
         if sealed.len() < OVERHEAD {
             return Err(SealError::Truncated);
         }
-        let mut epk = [0u8; 32];
-        epk.copy_from_slice(&sealed[..32]);
-        let shared = self.secret.diffie_hellman(&PublicKey::from(epk)).to_bytes();
-        let (key, nonce) = schedule(&shared, &epk, self.public().as_bytes());
-
-        ChaCha20Poly1305::new(Key::from_slice(&key))
-            .decrypt(
-                Nonce::from_slice(&nonce),
-                Payload {
-                    msg: &sealed[32..],
-                    aad,
-                },
-            )
-            .map_err(|_| SealError::NotForYou)
+        let encapped = <Kem as KemTrait>::EncappedKey::from_bytes(&sealed[..32])
+            .map_err(|_| SealError::NotForYou)?;
+        hpke::single_shot_open::<ChaCha20Poly1305, HkdfSha256, Kem>(
+            &OpModeR::Base,
+            &self.secret,
+            &encapped,
+            INFO,
+            &sealed[32..],
+            aad,
+        )
+        .map_err(|_| SealError::NotForYou)
     }
 }
 
@@ -104,64 +128,77 @@ impl SealingKey {
 /// file the message goes there, so that it cannot be altered without the recipient noticing,
 /// and cannot be lifted onto a different ciphertext.
 pub fn seal(recipient: &PublicKey, aad: &[u8], plaintext: &[u8]) -> Vec<u8> {
-    let eph = StaticSecret::random_from_rng(rand::rngs::OsRng);
-    seal_with(&eph, recipient, aad, plaintext)
-}
-
-fn seal_with(
-    eph: &StaticSecret,
-    recipient: &PublicKey,
-    aad: &[u8],
-    plaintext: &[u8],
-) -> Vec<u8> {
-    let epk = PublicKey::from(eph).to_bytes();
-    let shared = eph.diffie_hellman(recipient).to_bytes();
-    let (key, nonce) = schedule(&shared, &epk, recipient.as_bytes());
-
-    let ct = ChaCha20Poly1305::new(Key::from_slice(&key))
-        .encrypt(
-            Nonce::from_slice(&nonce),
-            Payload {
-                msg: plaintext,
-                aad,
-            },
-        )
-        .expect("chacha20poly1305 encryption is infallible for in-memory input");
+    let pk = <Kem as KemTrait>::PublicKey::from_bytes(recipient.as_bytes())
+        .expect("an X25519 public key is a valid HPKE public key");
+    let (encapped, ct) = hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, Kem>(
+        &OpModeS::Base,
+        &pk,
+        INFO,
+        plaintext,
+        aad,
+    )
+    .expect("HPKE sealing is infallible for in-memory input");
 
     let mut out = Vec::with_capacity(32 + ct.len());
-    out.extend_from_slice(&epk);
+    out.extend_from_slice(&encapped.to_bytes());
     out.extend_from_slice(&ct);
     out
-}
-
-/// Derive the key and nonce together.
-///
-/// Both the ephemeral and the recipient key enter the derivation, so a shared secret cannot be
-/// reused under a different pairing even if one were somehow repeated. The nonce is derived
-/// rather than fixed for the same reason: it costs nothing and removes a class of mistake.
-fn schedule(shared: &[u8; 32], epk: &[u8; 32], rpk: &[u8; 32]) -> ([u8; 32], [u8; 12]) {
-    let mut ctx = Vec::with_capacity(64);
-    ctx.extend_from_slice(epk);
-    ctx.extend_from_slice(rpk);
-    let key = derive(shared, "karst.seal.v1.key", &ctx);
-    let n = derive(shared, "karst.seal.v1.nonce", &ctx);
-    let mut nonce = [0u8; 12];
-    nonce.copy_from_slice(&n[..12]);
-    (key, nonce)
-}
-
-fn derive(ikm: &[u8; 32], label: &str, ctx: &[u8]) -> [u8; 32] {
-    let mut h = blake3::Hasher::new();
-    h.update(label.as_bytes());
-    h.update(ikm);
-    h.update(&(ctx.len() as u64).to_le_bytes());
-    h.update(ctx);
-    *h.finalize().as_bytes()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The ciphersuite is a decision, so it is pinned rather than left to whatever compiles.
+    ///
+    /// RFC 9180 identifiers: KEM 0x0020 DHKEM(X25519, HKDF-SHA256), KDF 0x0001 HKDF-SHA256,
+    /// AEAD 0x0003 ChaCha20Poly1305. A silent change here is a change to what every stored
+    /// ciphertext was encrypted under.
+    #[test]
+    fn the_ciphersuite_is_the_one_this_module_documents() {
+        use hpke::aead::Aead as AeadTrait;
+        use hpke::kdf::Kdf as KdfTrait;
+        assert_eq!(<Kem as KemTrait>::KEM_ID, 0x0020);
+        assert_eq!(<HkdfSha256 as KdfTrait>::KDF_ID, 0x0001);
+        assert_eq!(<ChaCha20Poly1305 as AeadTrait>::AEAD_ID, 0x0003);
+    }
+
+    /// A ciphertext from another HPKE application must not open here.
+    ///
+    /// RFC 9180's `info` is the application's domain separation, and it is the one part of
+    /// the construction the RFC leaves to the caller. Omitting it would mean any other
+    /// application's ciphertext to the same key decrypts as ours.
+    #[test]
+    fn a_ciphertext_from_another_application_does_not_open() {
+        let k = SealingKey::from_seed([4u8; 32]);
+        let pk = <Kem as KemTrait>::PublicKey::from_bytes(k.public().as_bytes()).unwrap();
+
+        let (encapped, ct) = hpke::single_shot_seal::<ChaCha20Poly1305, HkdfSha256, Kem>(
+            &OpModeS::Base,
+            &pk,
+            b"some.other.application",
+            b"not for karst",
+            b"",
+        )
+        .unwrap();
+        let mut sealed = encapped.to_bytes().to_vec();
+        sealed.extend_from_slice(&ct);
+
+        assert_eq!(k.open(b"", &sealed), Err(SealError::NotForYou));
+    }
+
+    /// A seed derives the same key every time, through the KEM's own derivation.
+    #[test]
+    fn a_seed_derives_a_stable_key() {
+        assert_eq!(
+            SealingKey::from_seed([9u8; 32]).public().as_bytes(),
+            SealingKey::from_seed([9u8; 32]).public().as_bytes()
+        );
+        assert_ne!(
+            SealingKey::from_seed([9u8; 32]).public().as_bytes(),
+            SealingKey::from_seed([10u8; 32]).public().as_bytes()
+        );
+    }
 
     #[test]
     fn a_sealed_message_opens_for_its_recipient_and_nobody_else() {
