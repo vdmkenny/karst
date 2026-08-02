@@ -35,7 +35,7 @@ list of everything the design makes worse.
 > [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 519 tests
+cargo test          # 520 tests
 cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-index --bin karst-search    # discovery with 200,000 sybils in the room
 cargo run --release -p karst-stack --bin karst-stack-demo  # the whole stack, composed
@@ -113,7 +113,10 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 
 1. **No global singletons.** No namespace, allocator, routing table, trust root, membership
    roll, or governance body. Zero or *n*, never one.
-2. **No ambient authority.** Every right is an explicit, attenuable, revocable capability.
+2. **No ambient authority.** Every right is an explicit, attenuable capability, verified
+   offline against the object it names. **Not revocable**: nothing here revokes, and the
+   price of verification without a callback is that a delegation stands until it expires or
+   runs out of uses. See `docs/29-capability-costs.md`.
 3. **Small enough to reimplement is a security property.** A specification only two
    organisations can afford to implement has a de facto owner regardless of who wrote it.
 4. **Reject, never recover.** Malformed input is an error, and every accepted byte string

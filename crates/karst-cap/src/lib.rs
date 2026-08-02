@@ -444,7 +444,6 @@ impl Capability {
 pub struct Request {
     pub operation: String,
     pub amount: u64,
-    pub at: u64,
     /// Replay protection. The verifier refuses a nonce it has already retired.
     pub nonce: [u8; 16],
     /// Binds the invocation to its exact arguments, so a signature over this request
@@ -460,7 +459,6 @@ impl Request {
             .cid(resource)
             .str(&self.operation)
             .u64(self.amount)
-            .u64(self.at)
             .bytes(&self.nonce)
             .cid(&self.args_digest);
         e.finish()
@@ -570,11 +568,20 @@ impl UseLedger {
 ///
 /// Takes the ledger by mutable reference because authorising and consuming must be one
 /// step. Checking first and consuming later is where replay windows come from.
+///
+/// # `now` comes from the verifier
+///
+/// It used to be a field of [`Request`], which the holder fills in and signs. A holder of an
+/// expired capability would then sign a request claiming an earlier time and `ExpiresAt` would
+/// pass, so the one caveat that bounds a capability in time was set by the party it bounds.
+/// This is the same defect as the `use_index` that `MaxUses` used to trust, fixed the same
+/// way: **the verifier does not read its clock off the attacker.**
 pub fn authorize(
     effective: &[Caveat],
     req: &Request,
     cap_id: Cid,
     ledger: &mut UseLedger,
+    now: u64,
 ) -> Result<(), CapError> {
     let mut max_uses = None;
 
@@ -595,11 +602,8 @@ pub fn authorize(
                     max % 100
                 )));
             }
-            Caveat::ExpiresAt(t) if req.at >= *t => {
-                return Err(CapError::Refused(format!(
-                    "expired at t{t}, now t{}",
-                    req.at
-                )));
+            Caveat::ExpiresAt(t) if now >= *t => {
+                return Err(CapError::Refused(format!("expired at t{t}, now t{now}")));
             }
             Caveat::MaxUses(n) => max_uses = Some(*n),
             _ => {}
@@ -843,11 +847,11 @@ mod tests {
         );
     }
 
-    fn req(op: &str, amount: u64, at: u64, nonce: u8) -> Request {
+    /// A request carries no time. The verifier supplies it; see `authorize`.
+    fn req(op: &str, amount: u64, nonce: u8) -> Request {
         Request {
             operation: op.into(),
             amount,
-            at,
             nonce: [nonce; 16],
             args_digest: Cid::of(b"args"),
         }
@@ -869,7 +873,7 @@ mod tests {
         let eff = scoped.verify(clinic.address()).unwrap();
         let mut ledger = UseLedger::new();
         assert!(matches!(
-            authorize(&eff, &req("book", 900_000, 0, 1), scoped.id(), &mut ledger),
+            authorize(&eff, &req("book", 900_000, 1), scoped.id(), &mut ledger, 0),
             Err(CapError::Refused(_))
         ));
     }
@@ -884,20 +888,51 @@ mod tests {
         let id = Cid::of(b"cap");
 
         let mut l = UseLedger::new();
-        assert!(authorize(&eff, &req("book", 4500, 50, 0), id, &mut l).is_ok());
+        assert!(authorize(&eff, &req("book", 4500, 0), id, &mut l, 50).is_ok());
 
-        for (i, bad) in [
-            req("cancel", 0, 50, 10),
-            req("book", 20_000, 50, 11),
-            req("book", 100, 100, 12),
+        // The time is the verifier's, so each case states it separately rather than letting
+        // the request carry it. That separation is the point: the expiry case below is only a
+        // real test because the holder no longer chooses the number it is compared against.
+        for (i, (bad, now)) in [
+            (req("cancel", 0, 10), 50),
+            (req("book", 20_000, 11), 50),
+            (req("book", 100, 12), 100),
         ]
         .into_iter()
         .enumerate()
         {
             let mut l = UseLedger::new();
             assert!(
-                authorize(&eff, &bad, id, &mut l).is_err(),
+                authorize(&eff, &bad, id, &mut l, now).is_err(),
                 "case {i} should have been refused"
+            );
+        }
+    }
+
+    /// The one time bound a capability has must not be set by the party it bounds.
+    ///
+    /// `ExpiresAt` was compared against `Request.at`, a field the holder fills in and signs.
+    /// A holder of a long-expired capability signed a request claiming an earlier time and
+    /// the caveat passed, so the expiry bounded honest holders only, which is the set that
+    /// does not need bounding.
+    ///
+    /// There is no field to lie in now, which is why this test can only be written as "the
+    /// verifier says what time it is".
+    #[test]
+    fn an_expired_capability_cannot_be_used_by_claiming_an_earlier_time() {
+        let eff = vec![Caveat::ExpiresAt(100), Caveat::MaxUses(100)];
+        let id = Cid::of(b"cap");
+        let mut ledger = UseLedger::new();
+
+        assert!(authorize(&eff, &req("book", 0, 1), id, &mut ledger, 99).is_ok());
+        assert!(authorize(&eff, &req("book", 0, 2), id, &mut ledger, 100).is_err());
+
+        // The holder's move was to keep presenting an earlier time. The request has no room
+        // for one, and the verifier's clock is not an argument the holder supplies.
+        for n in 3..8u8 {
+            assert!(
+                authorize(&eff, &req("book", 0, n), id, &mut ledger, 10_000).is_err(),
+                "attempt {n} was accepted after expiry"
             );
         }
     }
@@ -913,13 +948,13 @@ mod tests {
         let id = Cid::of(b"cap");
         let mut ledger = UseLedger::new();
 
-        assert!(authorize(&eff, &req("book", 0, 0, 1), id, &mut ledger).is_ok());
+        assert!(authorize(&eff, &req("book", 0, 1), id, &mut ledger, 0).is_ok());
 
         // The adversarial client repeats the call with a fresh nonce and no memory of
         // having spent anything. There is no field it can lie about that helps.
         for n in 2..6u8 {
             assert!(
-                authorize(&eff, &req("book", 0, 0, n), id, &mut ledger).is_err(),
+                authorize(&eff, &req("book", 0, n), id, &mut ledger, 0).is_err(),
                 "replay {n} was accepted"
             );
         }
@@ -932,10 +967,10 @@ mod tests {
         let id = Cid::of(b"cap");
         let mut ledger = UseLedger::new();
 
-        let r = req("book", 0, 0, 7);
-        assert!(authorize(&eff, &r, id, &mut ledger).is_ok());
+        let r = req("book", 0, 7);
+        assert!(authorize(&eff, &r, id, &mut ledger, 0).is_ok());
         assert_eq!(
-            authorize(&eff, &r, id, &mut ledger),
+            authorize(&eff, &r, id, &mut ledger, 0),
             Err(CapError::Replayed)
         );
         // A refused call consumes nothing.
@@ -948,9 +983,9 @@ mod tests {
         let id = Cid::of(b"cap");
         let mut ledger = UseLedger::new();
 
-        assert!(authorize(&eff, &req("cancel", 0, 0, 1), id, &mut ledger).is_err());
+        assert!(authorize(&eff, &req("cancel", 0, 1), id, &mut ledger, 0).is_err());
         assert_eq!(ledger.uses(&id), 0, "a rejected call must be free");
-        assert!(authorize(&eff, &req("book", 0, 0, 2), id, &mut ledger).is_ok());
+        assert!(authorize(&eff, &req("book", 0, 2), id, &mut ledger, 0).is_ok());
     }
 
     #[test]
@@ -962,8 +997,8 @@ mod tests {
         let mut a = UseLedger::new();
         let mut b = UseLedger::new();
 
-        assert!(authorize(&eff, &req("book", 0, 0, 1), id, &mut a).is_ok());
-        assert!(authorize(&eff, &req("book", 0, 0, 1), id, &mut b).is_ok());
+        assert!(authorize(&eff, &req("book", 0, 1), id, &mut a, 0).is_ok());
+        assert!(authorize(&eff, &req("book", 0, 1), id, &mut b, 0).is_ok());
     }
 
     /// Regression for issue #30, reported by @matthiasantierens.
@@ -981,11 +1016,11 @@ mod tests {
             .unwrap();
 
         // The rightful holder can exercise it.
-        let good = SignedInvocation::sign(&agent, &scoped, req("book", 100, 0, 1));
+        let good = SignedInvocation::sign(&agent, &scoped, req("book", 100, 1));
         assert_eq!(good.verify_possession(&scoped).unwrap(), agent.address());
 
         // Someone who copied the bytes cannot.
-        let stolen = SignedInvocation::sign(&thief, &scoped, req("book", 100, 0, 2));
+        let stolen = SignedInvocation::sign(&thief, &scoped, req("book", 100, 2));
         assert_eq!(
             stolen.verify_possession(&scoped),
             Err(CapError::NotTheHolder)
@@ -1004,7 +1039,7 @@ mod tests {
             .unwrap();
         assert_ne!(a.id(), b.id());
 
-        let signed = SignedInvocation::sign(&agent, &a, req("book", 100, 0, 1));
+        let signed = SignedInvocation::sign(&agent, &a, req("book", 100, 1));
         assert!(signed.verify_possession(&a).is_ok());
         assert_eq!(
             signed.verify_possession(&b),

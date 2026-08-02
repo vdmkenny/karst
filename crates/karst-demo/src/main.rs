@@ -193,8 +193,8 @@ fn main() {
 
     println!("\n  agent books within budget:");
     let inv1 = SignedInvocation::sign(
-        &agent, &agent_cap, request_for("book", 4500, 10, [1; 16], &args));
-    match resource.invoke(&agent_cap, &inv1, &args, &mut ledger) {
+        &agent, &agent_cap, request_for("book", 4500, [1; 16], &args));
+    match resource.invoke(&agent_cap, &inv1, &args, &mut ledger, 10) {
         Ok(r) => {
             for line in r.describe().lines() {
                 println!("    {line}");
@@ -207,16 +207,16 @@ fn main() {
     let mut cargs = BTreeMap::new();
     cargs.insert("booking".to_string(), Value::Ref(resource.cid()));
     let inv2 = SignedInvocation::sign(
-        &agent, &agent_cap, request_for("cancel", 0, 10, [2; 16], &cargs));
-    match resource.invoke(&agent_cap, &inv2, &cargs, &mut ledger) {
+        &agent, &agent_cap, request_for("cancel", 0, [2; 16], &cargs));
+    match resource.invoke(&agent_cap, &inv2, &cargs, &mut ledger, 10) {
         Ok(_) => println!("    ALLOWED  <- this would be a bug"),
         Err(e) => println!("    {e}"),
     }
 
     println!("  agent tries to use it a second time, with a fresh nonce:");
     let inv3 = SignedInvocation::sign(
-        &agent, &agent_cap, request_for("book", 4500, 10, [3; 16], &args));
-    match resource.invoke(&agent_cap, &inv3, &args, &mut ledger) {
+        &agent, &agent_cap, request_for("book", 4500, [3; 16], &args));
+    match resource.invoke(&agent_cap, &inv3, &args, &mut ledger, 10) {
         Ok(_) => println!("    ALLOWED  <- this would be a bug"),
         Err(e) => println!("    {e}"),
     }
@@ -224,8 +224,8 @@ fn main() {
     println!("  someone who copied the capability tries to spend it:");
     let thief = Identity::generate();
     let stolen = SignedInvocation::sign(
-        &thief, &agent_cap, request_for("book", 4500, 10, [4; 16], &args));
-    match resource.invoke(&agent_cap, &stolen, &args, &mut ledger) {
+        &thief, &agent_cap, request_for("book", 4500, [4; 16], &args));
+    match resource.invoke(&agent_cap, &stolen, &args, &mut ledger, 10) {
         Ok(_) => println!("    ALLOWED  <- this would be a bug"),
         Err(e) => println!("    {e}"),
     }
