@@ -35,7 +35,7 @@ list of everything the design makes worse.
 > [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 484 tests
+cargo test          # 503 tests
 cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-index --bin karst-search    # discovery with 200,000 sybils in the room
 cargo run --release -p karst-stack --bin karst-stack-demo  # the whole stack, composed
@@ -121,8 +121,12 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
    signed documents come to mean two things. Enforced by `karst-fuzz`, not by assertion.
 5. **State the costs.** A design that lists only its properties is a manifesto.
 6. **Attack it, do not exercise it.** Tests that confirm a thing works find fewer defects than
-   tests that ask what an adversary with a stated capability does. Four defects in this repo
-   were found the second way and none of them by the first.
+   tests that ask what an adversary with a stated capability does. Every defect found in this
+   repo was found the second way and none by the first. The largest was a total break of L4
+   that eighty-six passing tests did not see, because every one of them put the adversary
+   outside the route and the adversary that mattered was on it (#101, `docs/28-blinding.md`).
+   Naming the adversary is the part that does the work; if the name is wrong the tests are
+   decoration.
 7. **A test must be able to fail.** Naming a security property is not testing it. Four tests
    here asserted properties they were structurally incapable of detecting, and each passed
    from the day it was written:
