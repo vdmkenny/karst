@@ -187,13 +187,76 @@ pub struct IssuanceRequest {
 
 /// Proof that a relay carried traffic, which is how credentials enter circulation.
 ///
-/// Signed by whoever received the service. This is the acquisition side, and it is
-/// deliberately linkable: it says a relay did work, which is public anyway.
+/// **Signed by whoever received the service**, and the signature is checked. This is the
+/// acquisition side, and it is deliberately linkable: it says a relay did work, which is
+/// public anyway.
+///
+/// The struct carried no authenticator while its documentation said it was signed, so
+/// `EarnLedger::draw` accepted any warrant a caller constructed. An attacker forged warrants
+/// naming any relay, drained the balance that relay had worked for, and minted credentials
+/// against work it had not done. A comment describing a check nobody performs is worse than
+/// no comment, because a reader who believes it stops looking.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct EarnedWarrant {
     pub relay: [u8; 32],
     pub units: u64,
     pub epoch: u64,
+    /// The served party's key, which is who attests that the work happened.
+    pub served: [u8; 32],
+    /// Makes two attestations for the same work distinct.
+    ///
+    /// Without it, a served party attesting twice for the same relay, units and epoch signs
+    /// byte-identical warrants, and a ledger cannot tell an honest second attestation from a
+    /// replay of the first.
+    nonce: [u8; 16],
+    signature: [u8; 64],
+}
+
+impl EarnedWarrant {
+    /// What a served party signs to attest that a relay carried its traffic.
+    fn signing_bytes(
+        relay: &[u8; 32],
+        units: u64,
+        epoch: u64,
+        served: &[u8; 32],
+        nonce: &[u8; 16],
+    ) -> Vec<u8> {
+        let mut v = b"karst.value.v2.warrant".to_vec();
+        v.extend_from_slice(relay);
+        v.extend_from_slice(&units.to_le_bytes());
+        v.extend_from_slice(&epoch.to_le_bytes());
+        v.extend_from_slice(served);
+        v.extend_from_slice(nonce);
+        v
+    }
+
+    /// Attest that `relay` carried `units` for the signer, in `epoch`.
+    pub fn attest(served: &karst_id::Identity, relay: [u8; 32], units: u64, epoch: u64) -> Self {
+        let mut nonce = [0u8; 16];
+        rand::thread_rng().fill(&mut nonce);
+        let key = served.key_bytes();
+        let sig = served
+            .sign(&Self::signing_bytes(&relay, units, epoch, &key, &nonce))
+            .to_bytes();
+        EarnedWarrant {
+            relay,
+            units,
+            epoch,
+            served: key,
+            nonce,
+            signature: sig,
+        }
+    }
+
+    /// Whether the named served party really signed this.
+    pub fn verify(&self) -> Result<(), ValueError> {
+        let peer = karst_id::Peer::from_key_bytes(&self.served).map_err(|_| ValueError::Invalid)?;
+        peer.verify(
+            &Self::signing_bytes(&self.relay, self.units, self.epoch, &self.served, &self.nonce),
+            &karst_id::Signature::from_bytes(&self.signature),
+        )
+        .map_err(|_| ValueError::Invalid)
+    }
 }
 
 // ---------------------------------------------------------------- credential
@@ -347,6 +410,11 @@ impl SpendLedger {
 pub struct EarnLedger {
     earned: BTreeMap<[u8; 32], u64>,
     drawn: BTreeMap<[u8; 32], u64>,
+    /// Warrants already drawn against, so one cannot be presented twice.
+    spent: BTreeSet<[u8; 16]>,
+    /// Warrants older than this are refused. `epoch` was stored and never read, so a warrant
+    /// never expired and there was no replay window at all.
+    horizon: u64,
 }
 
 impl EarnLedger {
@@ -364,8 +432,23 @@ impl EarnLedger {
             - self.drawn.get(relay).copied().unwrap_or(0)
     }
 
+    /// Refuse warrants from before this epoch.
+    pub fn advance_to(&mut self, epoch: u64) {
+        self.horizon = self.horizon.max(epoch);
+    }
+
     /// Authorise issuance against earned service.
+    ///
+    /// The signature is checked first, because everything after it is arithmetic on numbers
+    /// the warrant supplies.
     pub fn draw(&mut self, warrant: &EarnedWarrant) -> Result<(), ValueError> {
+        warrant.verify()?;
+        if warrant.epoch < self.horizon {
+            return Err(ValueError::Invalid);
+        }
+        if !self.spent.insert(warrant.nonce) {
+            return Err(ValueError::AlreadySpent);
+        }
         let available = self.balance(&warrant.relay);
         if warrant.units > available {
             return Err(ValueError::Unearned {
@@ -382,12 +465,81 @@ impl EarnLedger {
 mod tests {
     use super::*;
 
+    /// A forged warrant does not mint, and does not drain the relay it names.
+    ///
+    /// The struct carried no authenticator while its doc said it was signed, so `draw`
+    /// accepted anything a caller constructed. An attacker named any relay, spent down the
+    /// balance that relay had worked for, and minted against work it had not done.
+    #[test]
+    fn a_warrant_nobody_signed_does_not_draw() {
+        let relay = [3u8; 32];
+        let mut earn = EarnLedger::new();
+        earn.credit(relay, 10);
+
+        // An attacker can construct the public fields; it cannot produce the signature.
+        let honest = EarnedWarrant::attest(&served(), relay, 4, 1);
+        let mut forged = honest.clone();
+        forged.units = 9;
+        assert_eq!(earn.draw(&forged), Err(ValueError::Invalid));
+        assert_eq!(earn.balance(&relay), 10, "a forgery moved the balance");
+
+        // And a warrant naming a different served party than the one who signed.
+        let mut impersonating = honest.clone();
+        impersonating.served = karst_id::Identity::from_seed([9u8; 32]).key_bytes();
+        assert_eq!(earn.draw(&impersonating), Err(ValueError::Invalid));
+
+        // The honest one still works, so the negatives above are not vacuous.
+        assert!(earn.draw(&honest).is_ok());
+        assert_eq!(earn.balance(&relay), 6);
+    }
+
+    /// One attestation authorises one draw.
+    #[test]
+    fn a_warrant_cannot_be_presented_twice() {
+        let relay = [4u8; 32];
+        let mut earn = EarnLedger::new();
+        earn.credit(relay, 10);
+
+        let w = EarnedWarrant::attest(&served(), relay, 3, 1);
+        assert!(earn.draw(&w).is_ok());
+        assert_eq!(earn.draw(&w), Err(ValueError::AlreadySpent));
+        assert_eq!(earn.balance(&relay), 7, "a replay drew twice");
+
+        // Two honest attestations for identical work are distinct and both draw.
+        let a = EarnedWarrant::attest(&served(), relay, 2, 1);
+        let b = EarnedWarrant::attest(&served(), relay, 2, 1);
+        assert_ne!(a, b, "identical work must not produce identical warrants");
+        assert!(earn.draw(&a).is_ok());
+        assert!(earn.draw(&b).is_ok());
+    }
+
+    /// A warrant from before the horizon is refused, so `epoch` is read rather than stored.
+    #[test]
+    fn a_stale_warrant_is_refused() {
+        let relay = [5u8; 32];
+        let mut earn = EarnLedger::new();
+        earn.credit(relay, 10);
+        earn.advance_to(7);
+
+        assert_eq!(
+            earn.draw(&EarnedWarrant::attest(&served(), relay, 1, 6)),
+            Err(ValueError::Invalid)
+        );
+        assert!(earn.draw(&EarnedWarrant::attest(&served(), relay, 1, 7)).is_ok());
+    }
+
+    /// The party attesting that a relay carried its traffic.
+    fn served() -> karst_id::Identity {
+        karst_id::Identity::from_seed([77u8; 32])
+    }
+
     fn warrant(relay: u8, units: u64) -> EarnedWarrant {
-        EarnedWarrant {
-            relay: [relay; 32],
+        EarnedWarrant::attest(
+            &karst_id::Identity::from_seed([77u8; 32]),
+            [relay; 32],
             units,
-            epoch: 1,
-        }
+            1,
+        )
     }
 
     /// One issuer set, generated once. RSA key generation is slow.
@@ -559,16 +711,16 @@ mod tests {
         let relay = [7u8; 32];
 
         assert_eq!(
-            earn.draw(&EarnedWarrant { relay, units: 5, epoch: 1 }),
+            earn.draw(&EarnedWarrant::attest(&served(), relay, 5, 1)),
             Err(ValueError::Unearned { requested: 5, earned: 0 })
         );
 
         earn.credit(relay, 10);
-        assert!(earn.draw(&EarnedWarrant { relay, units: 6, epoch: 1 }).is_ok());
+        assert!(earn.draw(&EarnedWarrant::attest(&served(), relay, 6, 1)).is_ok());
         assert_eq!(earn.balance(&relay), 4);
 
         assert_eq!(
-            earn.draw(&EarnedWarrant { relay, units: 5, epoch: 1 }),
+            earn.draw(&EarnedWarrant::attest(&served(), relay, 5, 1)),
             Err(ValueError::Unearned { requested: 5, earned: 4 })
         );
     }
@@ -588,7 +740,7 @@ mod tests {
         let mut minted = 0;
         for _ in 0..3 {
             let req = w
-                .request(&pk, EarnedWarrant { relay, units: 1, epoch: 1 })
+                .request(&pk, EarnedWarrant::attest(&served(), relay, 1, 1))
                 .unwrap();
             earn.draw(&req.warrant).unwrap();
             let sig = set.sign(&req).unwrap();
