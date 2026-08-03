@@ -16,8 +16,31 @@ L4 Mixing is Loopix. Poisson mixing with independent per-message delays, cover t
 and self-injected loop traffic that lets mixes and clients detect active attacks, in a
 stratified topology. The paper claims traffic analysis resistance against a global
 network adversary, which is exactly the adversary onion routing declines to defend
-against, and reports mix throughput above 300 messages per second with end-to-end
-latency on the order of seconds.
+against, and reports that a mix node's bandwidth grows linearly to around 225
+messages per second before flattening, with end-to-end latency on the order of seconds.
+The abstract's "upwards of 300 messages per second" is a lower bound and not a ceiling;
+see `26-media.md` for why the difference matters and which experiment produced which
+number.
+
+**Loopix's parameters, verified against arXiv:1703.00536v1 Table 1 and the figure captions,
+because two of them are easy to get backwards.**
+
+| Symbol | What it is |
+|---|---|
+| `lambda_P` | payload traffic rate, user |
+| `lambda_L` | loop traffic rate, user |
+| `lambda_D` | drop cover traffic rate, **user only** |
+| `lambda_M` | loop traffic rate, **mix**. Not a mix drop-cover rate; mixes emit loops and nothing else |
+| `mu` | the exponential **rate** of the per-hop delay. The mean delay is `1/mu` |
+| `l` | path length |
+
+Table 1 glosses `mu` as "The mean delay at mix Mi", and every use in the body contradicts that
+gloss: Figure 4's caption reads "for different delays with mean 1/mu", and Section 5 writes "the
+mean delay 1/mu sec.". Taking Table 1 literally inverts the parameter.
+
+The paper recommends no values. Every rate in it is an experimental setup, and the only
+guidance it gives is the ratio `lambda/mu >= 2` for the aggregate arrival rate at a mix. So a
+deployment cannot copy Loopix's numbers; it has to derive its own. See `15-fundamental-limits.md`.
 
 Two honest notes. First, we did not invent this layer, we selected it. Second, Loopix
 calls itself low latency relative to other mix systems, meaning seconds rather than the

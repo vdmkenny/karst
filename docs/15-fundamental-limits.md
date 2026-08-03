@@ -59,6 +59,40 @@ Reading 1 is the correct one and it is now stated: the two costs buy two differe
 from two different adversaries. The trilemma governs the bandwidth cost; the n-1 attack governs
 the latency cost. Neither is redundant, and neither is optional.
 
+### And the passive result is conditional, which was not visible
+
+"Cover traffic alone reaches strong anonymity" is measured at one packet per client per tick.
+That is twenty-four packets of every client in flight at all times, and no deployment emits at
+that rate: constant-rate cover at one packet per tick is 1024 bytes per tick, forever.
+
+The harness could not ask what happens below it. The tick was both the emission period and the
+delay unit, so turning cover on pinned the rate at one packet per tick, and the regime where a
+client has **less than one packet in flight** was not expressible. `sim::passive_frontier`
+separates the two and measures it, at 200 clients, 3 layers, mean per-hop delay 8:
+
+| emit every | packets in flight | anonymity set | adversary gain |
+|---|---|---|---|
+| 1 | 24.0 | 200.0 | 1.00x |
+| 16 | 1.50 | 200.0 | 1.00x |
+| 64 | 0.38 | 199.5 | 1.00x |
+| 128 | 0.19 | 147.4 | 1.37x |
+| 256 | 0.09 | 106.3 | 1.90x |
+| 512 | 0.05 | 86.0 | 2.35x |
+
+So the claim holds, and it holds **conditionally**. A deployment that widens its emission
+interval to save bandwidth walks off this cliff without anything in the design noticing.
+
+**Little's law is the wrong rule, and it is wrong in the expensive direction.** The natural
+derivation says a client needs at least one packet in flight, `r * k * d >= 1`. The measurement
+puts the boundary near 0.2, so that rule costs about five times more bandwidth than the
+property requires. The reason is that the adversary's candidate window is not who has a packet
+in flight now but who emitted anywhere in the plausible delay window, and end-to-end delay is
+Erlang with a long tail.
+
+Stated as a rule rather than a constant, because the constant depends on the delay
+distribution: **the emission interval must stay inside the spread of the end-to-end delay, not
+merely inside its mean.**
+
 ---
 
 ## 2. Membership concealment, and a claim withdrawn

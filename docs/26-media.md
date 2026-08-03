@@ -31,12 +31,20 @@ Mohammadi and Kate (*Anonymity Trilemma: Strong Anonymity, Low Bandwidth Overhea
 Choose Two*, IEEE S&P 2018) prove the shape of it. Constant-rate emission is this design
 choosing strong anonymity and low latency, and paying in bandwidth.
 
-For calibration against a real system: Loopix's abstract claims a relay handles "upwards of 300
-messages per second" at under 1.5 ms of added delay, and its measurement section is more
-precise and more useful: bandwidth "increases linearly until it reaches around **225 messages
-per second**", after which growth is much smaller. 300 is the saturated ceiling; 225 is where
-linear scaling ends, and quoting the first as though it were the second would overstate the
-paper. Per-packet processing is about 0.6 ms.
+For calibration against a real system: Loopix's measurement section says bandwidth "increases
+linearly until it reaches around **225 messages per second**", after which "the performance of
+the mix node stabilizes and we observe a much smaller growth". The abstract separately says a
+relay handles "upwards of 300 messages per second".
+
+A previous version of this document called 300 "the saturated ceiling" and 225 the end of
+linear scaling. **The first half of that is wrong.** The paper states no saturated ceiling; 300
+appears only in the abstract, and "upwards of" makes it a lower bound rather than a cap.
+Quoting it as a ceiling reverses its direction. 225 is right, and the paper describes it as
+where linear growth ends rather than as a hard limit.
+
+The measured topology matters too, and is easy to take from the wrong experiment: the
+throughput and latency numbers come from **six mix nodes in three layers of two**, not the
+three-by-three topology used in the security simulation.
 
 That is a **node's** aggregate across all its clients, not one client's goodput, which is the
 number in the table above.

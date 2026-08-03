@@ -44,6 +44,14 @@ pub struct SimConfig {
     pub mixing: bool,
     /// Probability that a given client has a real message on a given tick.
     pub real_rate: f64,
+    /// Ticks between emissions when cover is on. One means every tick.
+    ///
+    /// Without this the tick is both the emission period and the delay unit, so cover-on
+    /// pins the rate at one packet per tick and every client always has `layers` packets in
+    /// flight. The regime the passive result actually depends on, where a client has **less
+    /// than one packet in flight**, is then not expressible, and "cover traffic does all the
+    /// work" reads as unconditional when it is not.
+    pub emit_every: u64,
     pub seed: u64,
 }
 
@@ -63,6 +71,7 @@ impl SimConfig {
             // in any given window, so even a bad design looks anonymous. Sparse traffic is
             // the hard case and therefore the honest one to measure.
             real_rate: 0.005,
+            emit_every: 1,
             seed,
         }
     }
@@ -166,15 +175,28 @@ pub fn run(cfg: &SimConfig) -> SimResult {
     // (sent_at, origin) for delivered real messages, plus the tick they came out.
     let mut deliveries: Vec<(u64, usize, u64)> = Vec::new();
 
+    // Emission phases, one per client.
+    //
+    // Staggered rather than aligned, and that is the adversarial choice as well as the
+    // realistic one. Aligned phases would put every client on the same ticks, so an emission
+    // tick has all N of them and the candidate set is trivially everyone. Aligning them also
+    // needs a shared clock, which this design refuses to have. So each client emits on its
+    // own offset, and the adversary gets to work with a thin slice of the population per tick.
+    let phase: Vec<u64> = (0..cfg.clients)
+        .map(|_| rng.gen_range(0..cfg.emit_every.max(1)))
+        .collect();
+
     for tick in 0..cfg.ticks {
         for c in 0..cfg.clients {
             let has_real = rng.gen_bool(cfg.real_rate);
             if has_real {
                 real_messages += 1;
             }
-            // Constant rate: emit every tick regardless. Otherwise emit only when there
-            // is something to say.
-            let emit = cfg.cover || has_real;
+            // Constant rate: emit on this client's own schedule. Otherwise emit only when
+            // there is something to say.
+            let on_schedule =
+                cfg.emit_every <= 1 || (tick + phase[c]).is_multiple_of(cfg.emit_every);
+            let emit = (cfg.cover && on_schedule) || has_real;
             if !emit {
                 continue;
             }
@@ -444,5 +466,127 @@ mod tests {
         let b = run(&SimConfig::karst(42));
         assert_eq!(a.delivered, b.delivered);
         assert_eq!(a.correlation_accuracy, b.correlation_accuracy);
+    }
+}
+
+/// Where "cover traffic does all the work" stops being true.
+///
+/// The headline passive result is measured at one packet per client per tick, which puts
+/// twenty-four packets of every client in flight at all times. A real client does not emit at
+/// that rate: constant-rate cover at one packet per tick is 1024 bytes per tick forever, and
+/// the interval a deployment can sustain is seconds rather than milliseconds.
+///
+/// So this asks what the original harness could not: **what happens when a client has less
+/// than one packet in flight?** Measured, at 200 clients, 3 layers, mean per-hop delay 8:
+///
+/// | emit every | in flight | anonymity set | adversary gain |
+/// |---|---|---|---|
+/// | 1 | 24.0 | 200.0 | 1.00x |
+/// | 16 | 1.50 | 200.0 | 1.00x |
+/// | 64 | 0.38 | 199.5 | 1.00x |
+/// | 128 | 0.19 | 147.4 | 1.37x |
+/// | 256 | 0.09 | 106.3 | 1.90x |
+/// | 512 | 0.05 | 86.0 | 2.35x |
+///
+/// **Little's law is the wrong rule here, and it is wrong in the safe direction.** The natural
+/// derivation says a client needs at least one packet in flight, `r * k * d >= 1`. The
+/// measurement says the result holds at 0.38 and does not break until roughly 0.2, so the
+/// rule is conservative by about a factor of five.
+///
+/// The reason is that the adversary's candidate window is not "who has a packet in flight now"
+/// but "who emitted anywhere in the plausible delay window", and end-to-end delay is
+/// Erlang-distributed with a long tail. The window is far wider than the mean, so clients
+/// emitting well outside one mean latency are still candidates.
+///
+/// Stated as a rule rather than a number, because the constant depends on the delay
+/// distribution: **the emission interval must stay inside the spread of the end-to-end delay,
+/// not merely inside its mean.**
+pub fn passive_frontier(seed: u64) -> Vec<(u64, f64, f64, f64)> {
+    let mut out = Vec::new();
+    for emit_every in [1u64, 16, 64, 128, 192, 256, 384, 512] {
+        let cfg = SimConfig {
+            label: format!("cover every {emit_every} ticks"),
+            emit_every,
+            ticks: 6000,
+            ..SimConfig::karst(seed)
+        };
+        let r = run(&cfg);
+        // Packets in flight per client, by Little's law.
+        let in_flight = (cfg.layers as f64 * cfg.mean_delay) / emit_every as f64;
+        out.push((emit_every, in_flight, r.mean_anonymity_set, r.advantage()));
+    }
+    out
+}
+
+#[cfg(test)]
+mod frontier_tests {
+    use super::*;
+
+    /// The passive result is conditional, and the condition is Little's law.
+    ///
+    /// `karst-mixsim` reports that cover alone reaches the ceiling and delay adds nothing.
+    /// That is measured at one packet per tick per client, where every client always has
+    /// `layers * mean_delay` packets in flight. It is a true statement about that regime and
+    /// it was being read as a statement about cover traffic in general.
+    ///
+    /// This asserts the boundary exists: at a realistic emission interval the anonymity set
+    /// falls away from the ceiling, and where it falls is where packets in flight drops below
+    /// one. A design that sets its emission rate without checking this is choosing its
+    /// anonymity set by accident.
+    #[test]
+    fn cover_alone_stops_saturating_when_a_client_has_under_one_packet_in_flight() {
+        let rows = passive_frontier(11);
+        let ceiling = rows[0].2;
+        assert!(
+            ceiling > 190.0,
+            "the dense end must saturate, or the comparison below means nothing"
+        );
+
+        let sparse = rows.last().expect("rows");
+        assert!(
+            sparse.1 < 0.1,
+            "the sparse end must be well under one packet in flight, got {:.2}",
+            sparse.1
+        );
+        assert!(
+            sparse.2 < ceiling * 0.5,
+            "the anonymity set held at {:.1} of {:.1} with only {:.2} packets in flight, \
+             so this measurement does not show the boundary it claims to",
+            sparse.2,
+            ceiling,
+            sparse.1
+        );
+    }
+
+    /// Little's law is conservative here, and the design should know by how much.
+    ///
+    /// The natural derivation of a passive rule is that every client needs at least one packet
+    /// in flight, `r * k * d >= 1`. If that were the boundary, the anonymity set would already
+    /// be falling at one packet in flight. It is not: it is still at the ceiling well below
+    /// that, because the adversary's candidate window is the spread of the end-to-end delay
+    /// rather than its mean, and an Erlang tail is wide.
+    ///
+    /// Asserting this keeps anyone from tightening the emission rate to satisfy a rule that
+    /// costs about five times more bandwidth than the measurement requires.
+    #[test]
+    fn one_packet_in_flight_is_not_where_the_boundary_is() {
+        let rows = passive_frontier(11);
+        let ceiling = rows[0].2;
+
+        let below_one: Vec<_> = rows.iter().filter(|r| r.1 < 1.0 && r.1 > 0.3).collect();
+        assert!(
+            !below_one.is_empty(),
+            "no sample sits between 0.3 and 1.0 packets in flight, so this proves nothing"
+        );
+        for r in below_one {
+            assert!(
+                r.2 > ceiling * 0.95,
+                "at {:.2} packets in flight the set was {:.1} of {:.1}, so Little's law is \
+                 the right boundary after all and the documented rule is wrong",
+                r.1,
+                r.2,
+                ceiling
+            );
+        }
     }
 }
