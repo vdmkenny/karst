@@ -349,10 +349,7 @@ mod tests {
         let obj = Census::publish(&pubr, &targets(5), 100, 1_000, 1);
         let mut m = CensusMonitor::new();
         m.accept(&obj);
-        assert!(matches!(
-            m.check(&cat, 200),
-            Completeness::Divergent { .. }
-        ));
+        assert!(matches!(m.check(&cat, 200), Completeness::Divergent { .. }));
     }
 
     /// A reader with no commitment must be told they cannot conclude anything.
@@ -428,17 +425,28 @@ mod tests {
         for i in (0..20u32).rev() {
             backward.insert(Cid::of(&i.to_le_bytes()));
         }
-        assert_eq!(base, backward, "a BTreeSet settles order before digest_of is called");
+        assert_eq!(
+            base, backward,
+            "a BTreeSet settles order before digest_of is called"
+        );
         assert_eq!(digest_of(&base), digest_of(&backward));
 
         // Membership sensitivity, which is the part an implementation can get wrong.
         let mut fewer = base.clone();
         fewer.remove(&Cid::of(&7u32.to_le_bytes()));
-        assert_ne!(digest_of(&base), digest_of(&fewer), "a removal did not change it");
+        assert_ne!(
+            digest_of(&base),
+            digest_of(&fewer),
+            "a removal did not change it"
+        );
 
         let mut more = base.clone();
         more.insert(Cid::of(&999u32.to_le_bytes()));
-        assert_ne!(digest_of(&base), digest_of(&more), "an addition did not change it");
+        assert_ne!(
+            digest_of(&base),
+            digest_of(&more),
+            "an addition did not change it"
+        );
 
         // A swap that keeps the count changes it, so the count is not standing in for content.
         let mut swapped = fewer.clone();
@@ -490,9 +498,15 @@ mod tests {
 
         for i in 0..6u32 {
             let target = Cid::of(&i.to_le_bytes());
-            let obj = crate::Claim::new(target, pubr.address(), Verdict::Commend, &terms(&["topic"]), 0)
-                .unwrap()
-                .publish(&pubr, i as u64);
+            let obj = crate::Claim::new(
+                target,
+                pubr.address(),
+                Verdict::Commend,
+                &terms(&["topic"]),
+                0,
+            )
+            .unwrap()
+            .publish(&pubr, i as u64);
             cat.claim(crate::Claim::from_object(&obj).unwrap(), &t);
         }
 
@@ -564,7 +578,10 @@ mod tests {
         let served = Census::publish(&pubr, &targets(1), 100, 1_000, 2);
         let mut m = CensusMonitor::new();
         assert!(m.accept(&witnessed_census));
-        assert!(m.accept(&served), "a later census is accepted, as it must be");
+        assert!(
+            m.accept(&served),
+            "a later census is accepted, as it must be"
+        );
 
         assert!(
             !m.matches_witnessed(&witnessed_census, &state, &checkpoint_digest),
@@ -584,5 +601,4 @@ mod tests {
         let d = witnessed_digest(&obj, &Cid::of(b"s"));
         assert!(!m.matches_witnessed(&obj, &Cid::of(b"s"), &d));
     }
-
 }

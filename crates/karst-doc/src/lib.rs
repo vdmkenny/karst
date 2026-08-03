@@ -33,7 +33,10 @@ pub enum Value {
     Int(i64),
     Bool(bool),
     /// Minor units plus an ISO currency code. Never a float, never a formatted string.
-    Money { minor: i64, currency: String },
+    Money {
+        minor: i64,
+        currency: String,
+    },
     /// Logical instant. Rendering into a human calendar is the client's business.
     Instant(u64),
     /// A reference to another node or object. Not a location.
@@ -480,7 +483,10 @@ impl Node {
     /// Following these is always a deliberate act by the reader, never automatic.
     pub fn links(&self) -> Vec<Cid> {
         match self {
-            Node::Prose { runs } => runs.iter().filter_map(|r| r.link.map(|l| l.fallback())).collect(),
+            Node::Prose { runs } => runs
+                .iter()
+                .filter_map(|r| r.link.map(|l| l.fallback()))
+                .collect(),
             Node::Quote { source, .. } => vec![*source],
             Node::Media { source, .. } => vec![*source],
             Node::Record { fields, .. } => fields
@@ -708,7 +714,11 @@ impl Doc {
         };
         match node {
             Node::Heading { rank, text } => {
-                emit(out, budget, &format!("{pad}{} {}\n", "#".repeat(*rank as usize), text));
+                emit(
+                    out,
+                    budget,
+                    &format!("{pad}{} {}\n", "#".repeat(*rank as usize), text),
+                );
             }
             Node::Prose { runs } => {
                 let line: String = runs
@@ -1028,11 +1038,7 @@ mod tests {
 
         let start = std::time::Instant::now();
         let linked = doc.linked_records(&root);
-        assert!(
-            start.elapsed().as_secs() < 10,
-            "took {:?}",
-            start.elapsed()
-        );
+        assert!(start.elapsed().as_secs() < 10, "took {:?}", start.elapsed());
         assert!(linked.truncated, "the walk stopped and did not say so");
     }
 
@@ -1347,9 +1353,9 @@ mod tests {
     }
 }
 
-/// Following a link forward.
 pub mod resolve {
-    //! What a `Tracking` link resolves to, and what it refuses to resolve to.
+    //! Following a link forward: what a `Tracking` link resolves to, and what it refuses to
+    //! resolve to.
     //!
     //! Resolution walks forward from what the author saw, through `supersedes` edges the
     //! lineage has verified. Three things make this different from following a URL.
@@ -1508,7 +1514,10 @@ mod link_tests {
             }
             other => panic!("expected Superseded, got {other:?}"),
         }
-        assert!(resolve(&l, &lin).moved(), "the reader was not told it moved");
+        assert!(
+            resolve(&l, &lin).moved(),
+            "the reader was not told it moved"
+        );
     }
 
     /// A tracking link at the head reports current rather than superseded.
@@ -1554,7 +1563,13 @@ mod link_tests {
             .insert(Object::create(&id, "page", 1, b"left".to_vec(), Some(base)))
             .unwrap();
         let b = lin
-            .insert(Object::create(&id, "page", 1, b"right".to_vec(), Some(base)))
+            .insert(Object::create(
+                &id,
+                "page",
+                1,
+                b"right".to_vec(),
+                Some(base),
+            ))
             .unwrap();
 
         let l = Link::Tracking { seen: base };
@@ -1566,7 +1581,11 @@ mod link_tests {
             }
             other => panic!("a fork resolved to {other:?}"),
         }
-        assert_eq!(resolve(&l, &lin).target(), None, "a fork was given a default");
+        assert_eq!(
+            resolve(&l, &lin).target(),
+            None,
+            "a fork was given a default"
+        );
     }
 
     /// Somebody else's successor must not capture a tracking link.
@@ -1698,7 +1717,10 @@ mod link_tests {
         for t in [1u8, 2] {
             let mut ok = good.clone();
             ok[tag_at] = t;
-            assert!(Node::from_bytes(&ok).is_ok(), "assigned tag {t} was refused");
+            assert!(
+                Node::from_bytes(&ok).is_ok(),
+                "assigned tag {t} was refused"
+            );
         }
     }
     /// A reader must be able to see which kind of link they are following.
@@ -1717,8 +1739,13 @@ mod link_tests {
             ],
         });
         let text = doc.render_text(&root);
-        assert!(text.contains("pinned"), "a pinned link rendered without saying so: {text}");
-        assert!(text.contains("tracking"), "a tracking link rendered without saying so: {text}");
+        assert!(
+            text.contains("pinned"),
+            "a pinned link rendered without saying so: {text}"
+        );
+        assert!(
+            text.contains("tracking"),
+            "a tracking link rendered without saying so: {text}"
+        );
     }
-
 }

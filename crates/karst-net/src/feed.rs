@@ -316,7 +316,11 @@ mod tests {
                 got.push(o);
             }
         }
-        assert_eq!(got.len(), 1, "the feed yielded something alice did not sign");
+        assert_eq!(
+            got.len(),
+            1,
+            "the feed yielded something alice did not sign"
+        );
         assert_eq!(got[0].payload, b"the genuine article");
         assert!(
             feed.stats().wrong_author > 0,
@@ -385,7 +389,9 @@ mod tests {
         let alice = Client::from_seed([1u8; 32], mesh.provider_id);
         let mut bob = Client::from_seed([2u8; 32], mesh.provider_id);
 
-        let big: Vec<u8> = (0..crate::frame::DATA_BYTES * 6).map(|i| (i % 251) as u8).collect();
+        let big: Vec<u8> = (0..crate::frame::DATA_BYTES * 6)
+            .map(|i| (i % 251) as u8)
+            .collect();
         publish_object(&mut mesh, &alice, &author, 0, &big, 0);
         mesh.run(3_000);
 
@@ -448,5 +454,4 @@ mod tests {
             );
         }
     }
-
 }

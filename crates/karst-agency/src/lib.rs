@@ -59,7 +59,7 @@
 
 use std::collections::BTreeSet;
 
-use karst_doc::{Doc, Link, Node};
+use karst_doc::Doc;
 use karst_object::Cid;
 
 /// Something a document may ask for and does not get by default.
@@ -212,7 +212,11 @@ pub fn decide(declared: &[Cid], held: &BTreeSet<Cid>, request: &Request, policy:
     let mut fetches: Vec<Cid> = if !policy.fetch_referenced {
         Vec::new()
     } else if policy.reuse_cache {
-        declared.iter().filter(|c| !held.contains(c)).copied().collect()
+        declared
+            .iter()
+            .filter(|c| !held.contains(c))
+            .copied()
+            .collect()
     } else {
         declared.to_vec()
     };
@@ -277,6 +281,7 @@ pub fn declared_closure(doc: &Doc, root: &Cid) -> Vec<Cid> {
 mod tests {
     use super::*;
     use karst_doc::Run;
+    use karst_doc::{Link, Node};
 
     /// Build a document that references different things, as a hostile publisher would.
     fn doc_with(links: &[Cid]) -> (Doc, Cid) {
@@ -309,7 +314,12 @@ mod tests {
         for a in Ask::ALL {
             asking = asking.asking(a);
         }
-        let plan = decide(&declared_closure(&d, &root), &BTreeSet::new(), &asking.steps(1_000_000), &Policy::new());
+        let plan = decide(
+            &declared_closure(&d, &root),
+            &BTreeSet::new(),
+            &asking.steps(1_000_000),
+            &Policy::new(),
+        );
 
         for a in Ask::ALL {
             assert!(!plan.allows(a), "{a:?} was granted by default");
@@ -329,7 +339,12 @@ mod tests {
             .asking(Ask::Interrupt)
             .asking(Ask::Execute)
             .steps(u64::MAX);
-        let plan = decide(&declared_closure(&d, &root), &BTreeSet::new(), &greedy, &policy);
+        let plan = decide(
+            &declared_closure(&d, &root),
+            &BTreeSet::new(),
+            &greedy,
+            &policy,
+        );
 
         assert!(plan.allows(Ask::Motion));
         assert!(!plan.allows(Ask::Audio));
@@ -388,7 +403,13 @@ mod tests {
                 .granting(Ask::Interrupt),
         ];
 
-        let baseline = decide(&declared_closure(&d, &root), &BTreeSet::new(), &request, &clients[0]).fetches;
+        let baseline = decide(
+            &declared_closure(&d, &root),
+            &BTreeSet::new(),
+            &request,
+            &clients[0],
+        )
+        .fetches;
         assert_eq!(baseline.len(), 4, "vacuous: nothing was fetched");
         for (i, p) in clients.iter().enumerate() {
             assert_eq!(
@@ -439,7 +460,12 @@ mod tests {
     #[test]
     fn a_reader_can_refuse_to_fetch_anything() {
         let (d, root) = doc_with(&[cid(1), cid(2)]);
-        let plan = decide(&declared_closure(&d, &root), &BTreeSet::new(), &Request::new(), &Policy::new().offline());
+        let plan = decide(
+            &declared_closure(&d, &root),
+            &BTreeSet::new(),
+            &Request::new(),
+            &Policy::new().offline(),
+        );
         assert!(plan.fetches.is_empty());
     }
 
@@ -474,7 +500,12 @@ mod tests {
     #[test]
     fn what_a_document_asks_for_does_not_change_what_it_fetches() {
         let (d, root) = doc_with(&[cid(5), cid(6)]);
-        let quiet = decide(&declared_closure(&d, &root), &BTreeSet::new(), &Request::new(), &Policy::new());
+        let quiet = decide(
+            &declared_closure(&d, &root),
+            &BTreeSet::new(),
+            &Request::new(),
+            &Policy::new(),
+        );
         let greedy = decide(
             &declared_closure(&d, &root),
             &BTreeSet::new(),
@@ -491,7 +522,12 @@ mod tests {
     #[test]
     fn repeated_references_are_fetched_once() {
         let (d, root) = doc_with(&[cid(1), cid(1), cid(1), cid(2)]);
-        let plan = decide(&declared_closure(&d, &root), &BTreeSet::new(), &Request::new(), &Policy::new());
+        let plan = decide(
+            &declared_closure(&d, &root),
+            &BTreeSet::new(),
+            &Request::new(),
+            &Policy::new(),
+        );
         let mut expected = vec![cid(1), cid(2)];
         expected.sort();
         assert_eq!(plan.fetches, expected);
@@ -513,7 +549,12 @@ mod tests {
                 children: vec![cur, leaf],
             });
         }
-        let plan = decide(&declared_closure(&d, &cur), &BTreeSet::new(), &Request::new(), &Policy::new());
+        let plan = decide(
+            &declared_closure(&d, &cur),
+            &BTreeSet::new(),
+            &Request::new(),
+            &Policy::new(),
+        );
         assert_eq!(plan.fetches, vec![cid(1)]);
     }
 
@@ -527,7 +568,12 @@ mod tests {
         let root = d.add(Node::Prose {
             runs: vec![Run::tracking_link("live", cid(8))],
         });
-        let plan = decide(&declared_closure(&d, &root), &BTreeSet::new(), &Request::new(), &Policy::new());
+        let plan = decide(
+            &declared_closure(&d, &root),
+            &BTreeSet::new(),
+            &Request::new(),
+            &Policy::new(),
+        );
         assert_eq!(plan.fetches, vec![cid(8)]);
         assert_eq!(Link::Tracking { seen: cid(8) }.fallback(), cid(8));
     }
@@ -609,14 +655,11 @@ mod tests {
 
         // A store holding only the root sees nothing beneath it.
         let mut partial = Doc::new();
-        partial.add(
-            full.get(&root).expect("root is present").clone(),
-        );
+        partial.add(full.get(&root).expect("root is present").clone());
         let truncated = declared_closure(&partial, &root);
         assert!(
             truncated.len() < complete.len(),
             "vacuous: the partial store produced the same closure"
         );
     }
-
 }

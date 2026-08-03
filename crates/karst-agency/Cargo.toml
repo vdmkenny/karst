@@ -8,3 +8,6 @@ description = "L12 Agency: a document requests a rendering and the client decide
 [dependencies]
 karst-doc.workspace = true
 karst-object.workspace = true
+
+[lints]
+workspace = true

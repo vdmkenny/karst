@@ -9,3 +9,6 @@ description = "Authorship agency: declaring and verifying human versus machine a
 karst-id.workspace = true
 karst-object.workspace = true
 karst-cap.workspace = true
+
+[lints]
+workspace = true

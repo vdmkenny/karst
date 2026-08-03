@@ -79,10 +79,19 @@ fn main() {
         announce(&mut cat, who, target, terms, &trust);
     }
 
-    let names = [(paper, "a paper on continuous mixes"), (blog, "someone's notes"), (spam, "buy cheap mixing")];
+    let names = [
+        (paper, "a paper on continuous mixes"),
+        (blog, "someone's notes"),
+        (spam, "buy cheap mixing"),
+    ];
 
     rule("Searching 'mixing anonymity'");
-    show(&Ranker::new(trust.clone()), &cat, &["mixing", "anonymity"], &names);
+    show(
+        &Ranker::new(trust.clone()),
+        &cat,
+        &["mixing", "anonymity"],
+        &names,
+    );
     note("The spammer claimed identical terms and is not lying about existence, only quality.");
     note("Two axes decide the order: how well a statement matches the query, and how much the");
     note("reader weights whoever made it. The notes match half the query and are weighted 0.8,");
@@ -94,7 +103,12 @@ fn main() {
     for i in 0..200_000u32 {
         announce(&mut cat, 1_000 + i, spam, &["mixing", "anonymity"], &trust);
     }
-    show(&Ranker::new(trust.clone()), &cat, &["mixing", "anonymity"], &names);
+    show(
+        &Ranker::new(trust.clone()),
+        &cat,
+        &["mixing", "anonymity"],
+        &names,
+    );
     note(&format!(
         "The catalogue held {} of them and refused the rest, and all of them together are",
         cat.untrusted_held()
@@ -112,7 +126,12 @@ fn main() {
         .unwrap()
         .publish(&mod_id, 0);
     cat.claim(Claim::from_object(&mod_obj).unwrap(), &trust);
-    show(&Ranker::new(trust.clone()), &cat, &["mixing", "anonymity"], &names);
+    show(
+        &Ranker::new(trust.clone()),
+        &cat,
+        &["mixing", "anonymity"],
+        &names,
+    );
     note("Moderation, and the reader can drop this moderator and see the previous list again.");
 
     rule("A second reader, who trusts the spammer and not the researcher");
@@ -129,7 +148,12 @@ fn main() {
     ] {
         announce(&mut theirs, who, target, terms, &other);
     }
-    show(&Ranker::new(other), &theirs, &["mixing", "anonymity"], &names);
+    show(
+        &Ranker::new(other),
+        &theirs,
+        &["mixing", "anonymity"],
+        &names,
+    );
     note("Same statements, different order, and a different store. A catalogue is shaped by");
     note("its owner's trust, so there is no single ranking and no single index to capture.");
     println!();

@@ -183,11 +183,7 @@ pub fn statistical_disclosure(cfg: &DisclosureConfig) -> DisclosureResult {
         // Only meaningful once both populations have samples. With one side empty the score
         // degenerates to a raw rate and the ranking carries no information, so a "full
         // recall" reported there would be coincidence.
-        if round % 100 == 99
-            && rounds_to_full.is_none()
-            && rounds_with > 0
-            && rounds_without > 0
-        {
+        if round % 100 == 99 && rounds_to_full.is_none() && rounds_with > 0 && rounds_without > 0 {
             let scores = score(&with_alice, &without_alice, rounds_with, rounds_without);
             if recall_at_k(&scores, &contacts) >= 1.0 {
                 rounds_to_full = Some(round + 1);
@@ -407,4 +403,3 @@ mod tests {
         assert_eq!(a.rounds_to_full_recall, b.rounds_to_full_recall);
     }
 }
-

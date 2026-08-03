@@ -177,7 +177,11 @@ fn mac(key: &[u8; 32], data: &[u8]) -> [u8; MAC_BYTES] {
 /// tail in plaintext with no error. Encryption and decryption truncate identically, so every
 /// round-trip test in this file would still have passed. The length is now checked.
 fn xor(buf: &mut [u8], ks: &[u8]) {
-    assert_eq!(buf.len(), ks.len(), "keystream length must match the buffer");
+    assert_eq!(
+        buf.len(),
+        ks.len(),
+        "keystream length must match the buffer"
+    );
     for (b, k) in buf.iter_mut().zip(ks.iter()) {
         *b ^= *k;
     }
@@ -263,8 +267,6 @@ fn wide_decrypt(key: &[u8; 32], data: &mut [u8]) {
         .expect("length checked above");
 }
 
-
-
 // ---------------------------------------------------------------- types
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -275,7 +277,9 @@ pub enum Peeled {
         packet: Packet,
     },
     /// Cover traffic, which ends here.
-    Drop { delay_ms: u32 },
+    Drop {
+        delay_ms: u32,
+    },
     Deliver {
         delay_ms: u32,
         payload: Vec<u8>,
@@ -512,7 +516,10 @@ impl Packet {
     /// The seed is hashed into a scalar rather than used as one. A caller deriving seeds
     /// from a counter must not produce related keys, and `Scalar::from_bytes_mod_order_wide`
     /// over a 64-byte hash makes the seed space genuinely 2^256 as its type implies.
-    fn derive_path(route: &[Hop], seed: [u8; 32]) -> Result<(Vec<[u8; 32]>, Vec<[u8; 32]>), MixError> {
+    fn derive_path(
+        route: &[Hop],
+        seed: [u8; 32],
+    ) -> Result<(Vec<[u8; 32]>, Vec<[u8; 32]>), MixError> {
         let mut x = scalar("eph", &[&seed]);
         let mut alpha_point = &x * RISTRETTO_BASEPOINT_TABLE;
         let mut secrets = Vec::with_capacity(route.len());
@@ -591,11 +598,7 @@ impl Packet {
         delta[at..at + LEN_BYTES].copy_from_slice(&(message.len() as u32).to_le_bytes());
         let body = at + LEN_BYTES;
         delta[body..body + message.len()].copy_from_slice(message);
-        let pad = stream(
-            &secrets[n - 1],
-            "pad",
-            PAYLOAD_BYTES - body - message.len(),
-        );
+        let pad = stream(&secrets[n - 1], "pad", PAYLOAD_BYTES - body - message.len());
         delta[body + message.len()..].copy_from_slice(&pad);
         for s in secrets.iter().take(n).rev() {
             wide_encrypt(&subkey(s, "pi"), &mut delta);
@@ -618,8 +621,11 @@ impl Packet {
 
         for i in (0..n - 1).rev() {
             let mut nb = vec![0u8; HEADER_BYTES];
-            nb[..ROUTING_BYTES]
-                .copy_from_slice(&routing_block(FLAG_FORWARD, route[i + 1].id, route[i].delay_ms));
+            nb[..ROUTING_BYTES].copy_from_slice(&routing_block(
+                FLAG_FORWARD,
+                route[i + 1].id,
+                route[i].delay_ms,
+            ));
             nb[ROUTING_BYTES..BLOCK].copy_from_slice(&gamma);
             nb[BLOCK..].copy_from_slice(&beta[..HEADER_BYTES - BLOCK]);
             xor(&mut nb, &stream(&secrets[i], "rho", HEADER_BYTES));
@@ -782,7 +788,9 @@ mod tests {
     use super::*;
 
     fn keys(n: usize) -> Vec<MixKey> {
-        (0..n).map(|i| MixKey::from_seed([(i as u8) + 1; 32])).collect()
+        (0..n)
+            .map(|i| MixKey::from_seed([(i as u8) + 1; 32]))
+            .collect()
     }
 
     fn route(ks: &[MixKey]) -> Vec<Hop> {
@@ -859,7 +867,10 @@ mod tests {
             let key = lioness_rs::Key::<Independent>::try_from(&raw[..]).unwrap();
             Independent::new(&key).encrypt_block(&mut ours).unwrap();
 
-            assert_eq!(ours, theirs, "the two implementations disagree at {len} bytes");
+            assert_eq!(
+                ours, theirs,
+                "the two implementations disagree at {len} bytes"
+            );
             assert_ne!(ours, plain);
         }
     }
@@ -974,7 +985,10 @@ mod tests {
 
             let mut seen = SeenTags::new();
             if let Ok(Peeled::Deliver { payload, .. }) = p.peel(&ks[0], &mut seen) {
-                assert_ne!(payload, b"the real message", "corruption produced the original");
+                assert_ne!(
+                    payload, b"the real message",
+                    "corruption produced the original"
+                );
             }
         }
     }
@@ -985,7 +999,10 @@ mod tests {
         let ks = keys(3);
         let r = route(&ks);
         let m = vec![0x5a; MAX_MESSAGE_BYTES];
-        assert_eq!(deliver(&ks, Packet::wrap(&r, &m, [1u8; 32]).unwrap()).unwrap(), m);
+        assert_eq!(
+            deliver(&ks, Packet::wrap(&r, &m, [1u8; 32]).unwrap()).unwrap(),
+            m
+        );
         assert_eq!(
             Packet::wrap(&r, &vec![0u8; MAX_MESSAGE_BYTES + 1], [1u8; 32]),
             Err(MixError::PayloadTooLarge)
@@ -1110,12 +1127,16 @@ mod tests {
         let p = Packet::wrap(&r, b"x", [1u8; 32]).unwrap();
         let mut seen: Vec<SeenTags> = (0..3).map(|_| SeenTags::new()).collect();
 
-        let Peeled::Forward { delay_ms, packet, .. } = p.peel(&ks[0], &mut seen[0]).unwrap() else {
+        let Peeled::Forward {
+            delay_ms, packet, ..
+        } = p.peel(&ks[0], &mut seen[0]).unwrap()
+        else {
             panic!()
         };
         assert_eq!(delay_ms, 10);
-        let Peeled::Forward { delay_ms, packet, .. } =
-            packet.peel(&ks[1], &mut seen[1]).unwrap()
+        let Peeled::Forward {
+            delay_ms, packet, ..
+        } = packet.peel(&ks[1], &mut seen[1]).unwrap()
         else {
             panic!()
         };
@@ -1135,8 +1156,7 @@ mod tests {
             assert_eq!(cur.to_bytes().len(), PACKET_BYTES);
             let mut seen: Vec<SeenTags> = (0..4).map(|_| SeenTags::new()).collect();
             for i in 0..3 {
-                let Peeled::Forward { packet, .. } = cur.peel(&ks[i], &mut seen[i]).unwrap()
-                else {
+                let Peeled::Forward { packet, .. } = cur.peel(&ks[i], &mut seen[i]).unwrap() else {
                     panic!()
                 };
                 assert_eq!(packet.to_bytes().len(), PACKET_BYTES);
@@ -1323,7 +1343,9 @@ mod adversarial {
     use super::*;
 
     fn keys(n: usize) -> Vec<MixKey> {
-        (0..n).map(|i| MixKey::from_seed([(i as u8) + 1; 32])).collect()
+        (0..n)
+            .map(|i| MixKey::from_seed([(i as u8) + 1; 32]))
+            .collect()
     }
     fn route(ks: &[MixKey]) -> Vec<Hop> {
         ks.iter()
@@ -1427,7 +1449,10 @@ mod adversarial {
             }
             checked += 1;
         }
-        assert_eq!(checked, PAYLOAD_BYTES, "the sweep did not cover the payload");
+        assert_eq!(
+            checked, PAYLOAD_BYTES,
+            "the sweep did not cover the payload"
+        );
 
         // Positive control: untampered, the same route delivers the message, so the sweep is
         // not passing because delivery never works.
@@ -1437,11 +1462,7 @@ mod adversarial {
     }
 
     /// Walk a packet with caller-supplied replay state.
-    fn deliver_with(
-        ks: &[MixKey],
-        p: Packet,
-        seen: &mut [SeenTags],
-    ) -> Result<Vec<u8>, MixError> {
+    fn deliver_with(ks: &[MixKey], p: Packet, seen: &mut [SeenTags]) -> Result<Vec<u8>, MixError> {
         let mut cur = p;
         for i in 0..ks.len() {
             match cur.peel(&ks[i], &mut seen[i])? {
@@ -1506,7 +1527,10 @@ mod adversarial {
             let mut seed = [0u8; 32];
             seed[0] = i;
             let p = Packet::wrap(&route, b"m", seed).unwrap();
-            assert!(seen.insert(p.to_bytes()), "seed {i} collided with an earlier one");
+            assert!(
+                seen.insert(p.to_bytes()),
+                "seed {i} collided with an earlier one"
+            );
         }
     }
 
@@ -1539,10 +1563,22 @@ mod adversarial {
         let mut a = real;
         let mut b = cover;
         for i in 0..2 {
-            let Peeled::Forward { packet: pa, next: na, delay_ms: da } =
-                a.peel(&ks[i], &mut seen[i]).unwrap() else { panic!("real died early") };
-            let Peeled::Forward { packet: pb, next: nb, delay_ms: db } =
-                b.peel(&ks[i], &mut seen2[i]).unwrap() else { panic!("cover died early") };
+            let Peeled::Forward {
+                packet: pa,
+                next: na,
+                delay_ms: da,
+            } = a.peel(&ks[i], &mut seen[i]).unwrap()
+            else {
+                panic!("real died early")
+            };
+            let Peeled::Forward {
+                packet: pb,
+                next: nb,
+                delay_ms: db,
+            } = b.peel(&ks[i], &mut seen2[i]).unwrap()
+            else {
+                panic!("cover died early")
+            };
             assert_eq!(na, nb, "routing differs at hop {i}");
             assert_eq!(da, db, "delay differs at hop {i}");
             a = pa;
@@ -1550,15 +1586,25 @@ mod adversarial {
         }
 
         // Only the last hop learns the difference.
-        assert!(matches!(a.peel(&ks[2], &mut seen[2]), Ok(Peeled::Deliver { .. })));
-        assert!(matches!(b.peel(&ks[2], &mut seen2[2]), Ok(Peeled::Drop { .. })));
+        assert!(matches!(
+            a.peel(&ks[2], &mut seen[2]),
+            Ok(Peeled::Deliver { .. })
+        ));
+        assert!(matches!(
+            b.peel(&ks[2], &mut seen2[2]),
+            Ok(Peeled::Drop { .. })
+        ));
     }
 
     /// Serialising and reading back must be exact for any packet.
     #[test]
     fn the_wire_encoding_round_trips() {
         let k = MixKey::from_seed([11u8; 32]);
-        let route = vec![Hop { id: 0, public: k.public(), delay_ms: 3 }];
+        let route = vec![Hop {
+            id: 0,
+            public: k.public(),
+            delay_ms: 3,
+        }];
         for n in [0usize, 1, 100, MAX_MESSAGE_BYTES - 1] {
             let p = Packet::wrap(&route, &vec![0xA5; n], [n as u8; 32]).unwrap();
             let bytes = p.to_bytes();
@@ -1609,5 +1655,4 @@ mod adversarial {
             "the group check became the only rejection, so the MAC is untested here"
         );
     }
-
 }

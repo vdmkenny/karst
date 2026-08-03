@@ -239,7 +239,10 @@ mod tests {
 
         w.record(2, cid(1));
         w.end_round(&[1, 2]);
-        assert!(w.lagging().is_empty(), "a caught-up replica is still accused");
+        assert!(
+            w.lagging().is_empty(),
+            "a caught-up replica is still accused"
+        );
     }
 
     /// Persistence is what separates withholding from lag.
@@ -364,5 +367,4 @@ mod tests {
         assert_eq!(behind.len(), 1);
         assert_eq!(behind[0].provider, 1);
     }
-
 }

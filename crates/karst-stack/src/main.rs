@@ -32,6 +32,42 @@ const PER_LAYER: usize = 2;
 const PROVIDERS: usize = 4;
 const LAMBDA: f64 = 60.0;
 
+/// What the demo checked, and whether it held.
+///
+/// The demo prints its failures in red and used to exit zero, so a regression that stopped
+/// delivery entirely was invisible to anything but a human reading the output. It caught a real
+/// one that 551 unit tests did not, and then said nothing a machine could act on.
+///
+/// Every claim the demo makes about itself goes through here.
+#[derive(Default)]
+struct Checks {
+    failed: Vec<String>,
+}
+
+impl Checks {
+    fn require(&mut self, held: bool, what: &str) -> bool {
+        if !held {
+            self.failed.push(what.to_string());
+        }
+        held
+    }
+
+    fn report(&self) -> std::process::ExitCode {
+        if self.failed.is_empty() {
+            println!("  \x1b[32mall {} checks held\x1b[0m", CHECKS_EXPECTED);
+            return std::process::ExitCode::SUCCESS;
+        }
+        println!("\n\x1b[31m{} check(s) failed\x1b[0m", self.failed.len());
+        for f in &self.failed {
+            println!("  \x1b[31m- {f}\x1b[0m");
+        }
+        std::process::ExitCode::FAILURE
+    }
+}
+
+/// How many checks a healthy run makes. A run that makes fewer exited early.
+const CHECKS_EXPECTED: usize = 8;
+
 fn rule(t: &str) {
     println!("\n\x1b[1m{}\x1b[0m", t);
     println!("{}", "-".repeat(t.len()));
@@ -76,7 +112,18 @@ fn write_document(prior: karst_object::Cid) -> (Doc, karst_object::Cid) {
     (doc, root)
 }
 
-fn main() -> std::io::Result<()> {
+fn main() -> std::process::ExitCode {
+    match run() {
+        Ok(code) => code,
+        Err(e) => {
+            println!("\x1b[31mthe demo could not run: {e}\x1b[0m");
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run() -> std::io::Result<std::process::ExitCode> {
+    let mut checks = Checks::default();
     println!("\n\x1b[1mKARST: the stack, composed\x1b[0m");
     note("L2 identity, L3 wire, L4 mixing, L5 membership, L6 objects, L8 witness, L10 documents, L14 value, L15 discovery.");
 
@@ -89,7 +136,11 @@ fn main() -> std::io::Result<()> {
     let mut collect_addrs: Vec<(u16, SocketAddr)> = Vec::new();
 
     for layer in 0..LAYERS {
-        let count = if layer == LAYERS - 1 { PROVIDERS } else { PER_LAYER };
+        let count = if layer == LAYERS - 1 {
+            PROVIDERS
+        } else {
+            PER_LAYER
+        };
         for _ in 0..count {
             let key = MixKey::from_seed(rand::random());
             let public = key.public();
@@ -258,13 +309,23 @@ fn main() -> std::io::Result<()> {
 
     rule("What arrived");
 
+    checks.require(
+        received.len() >= want,
+        "every published object reached the reader",
+    );
+    checks.require(watch.agreed(), "the replicas agreed on what they held");
     if received.len() < want {
-        println!("  \x1b[31monly {} of {want} objects arrived\x1b[0m", received.len());
+        println!(
+            "  \x1b[31monly {} of {want} objects arrived\x1b[0m",
+            received.len()
+        );
         stop.store(true, Ordering::Relaxed);
         for t in threads {
             let _ = t.join();
         }
-        return Ok(());
+        // Bail out, but as a failure. A demo that stops early and exits zero is how a total
+        // delivery regression stayed invisible to everything but a human reading the output.
+        return Ok(checks.report());
     }
     println!(
         "  {} objects, every one verified against alice's key",
@@ -294,10 +355,7 @@ fn main() -> std::io::Result<()> {
             cat.announce(a, &trust);
         }
     }
-    let hits = Ranker::new(trust).search(
-        &cat,
-        &["provenance".to_string(), "trust".to_string()],
-    );
+    let hits = Ranker::new(trust).search(&cat, &["provenance".to_string(), "trust".to_string()]);
     for h in &hits {
         println!("  {:>6.3}  {}", h.score, h.target.short());
     }
@@ -323,7 +381,10 @@ fn main() -> std::io::Result<()> {
             note("Links say which kind they are. A citation is fixed; a tracking link follows");
             note("its target and says so, and a reader is never left guessing which they got.");
         }
-        _ => println!("  \x1b[31mthe document did not reassemble\x1b[0m"),
+        _ => {
+            checks.require(false, "the document reassembled and rendered");
+            println!("  \x1b[31mthe document did not reassemble\x1b[0m");
+        }
     }
 
     rule("Bob checks he was shown everything");
@@ -336,12 +397,17 @@ fn main() -> std::io::Result<()> {
     census.accept(&census_obj);
 
     match census.check(&cat, 200) {
-        Completeness::Complete => println!("  \x1b[32mcomplete: everything alice committed to is here\x1b[0m"),
+        Completeness::Complete => {
+            println!("  \x1b[32mcomplete: everything alice committed to is here\x1b[0m")
+        }
         other => println!("  \x1b[33m{other:?}\x1b[0m"),
     }
     // And what a reader who was shown less would see.
     let starved = Catalogue::new();
-    println!("  a reader shown nothing sees: {:?}", census.check(&starved, 200));
+    println!(
+        "  a reader shown nothing sees: {:?}",
+        census.check(&starved, 200)
+    );
     note("Without this, a topic with no results and a topic whose results were withheld are");
     note("the same observation. Content addressing verifies what arrives and says nothing");
     note("about what did not.");
@@ -350,11 +416,13 @@ fn main() -> std::io::Result<()> {
 
     // Three witnesses bob chose. They countersign only what extends what they have seen.
     let mut witnesses: Vec<Witness> = (500..503u32)
-        .map(|i| Witness::new(Identity::from_seed({
-            let mut s = [0u8; 32];
-            s[..4].copy_from_slice(&i.to_le_bytes());
-            s
-        })))
+        .map(|i| {
+            Witness::new(Identity::from_seed({
+                let mut s = [0u8; 32];
+                s[..4].copy_from_slice(&i.to_le_bytes());
+                s
+            }))
+        })
         .collect();
     let chosen: Vec<_> = witnesses.iter().map(|w| w.address()).collect();
     let policy = WitnessPolicy::new(chosen, 2);
@@ -411,7 +479,10 @@ fn main() -> std::io::Result<()> {
         policy.chosen.len()
     );
     match policy.accept(None, &forked_cosigned) {
-        Acceptance::Accepted => println!("  \x1b[31mand bob accepted it anyway\x1b[0m"),
+        Acceptance::Accepted => {
+            checks.require(false, "a forked history was refused");
+            println!("  \x1b[31mand bob accepted it anyway\x1b[0m");
+        }
         other => println!("  bob's verdict on it: {other:?}"),
     }
     note("A witness never originates a statement, so it can withhold and cannot substitute.");
@@ -432,7 +503,13 @@ fn main() -> std::io::Result<()> {
         }
     }
     println!("  provider {victim} is down, and alice publishes again");
-    let more = Object::create(&alice_id, "karst.doc.node.v1", 99, b"a later note".to_vec(), None);
+    let more = Object::create(
+        &alice_id,
+        "karst.doc.node.v1",
+        99,
+        b"a later note".to_vec(),
+        None,
+    );
     for p in &holders {
         alice.publish_to(feed, *p, &more.encode()).unwrap();
     }
@@ -485,12 +562,19 @@ fn main() -> std::io::Result<()> {
     let answer = bob_member.answer(&ask.blinded).expect("well formed");
     match ask.learn(&answer, bob_member.public_key()) {
         Ok(found) => {
+            checks.require(
+                found == vec![shared],
+                "the intersection is exactly the one contact both hold",
+            );
             for a in &found {
                 println!("  \x1b[32mshared contact: {}\x1b[0m", a.short());
             }
             note("Bob learned none of alice's other contacts and alice learned none of bob's.");
         }
-        Err(e) => println!("  \x1b[31m{e}\x1b[0m"),
+        Err(e) => {
+            checks.require(false, "an honest responder's answer verified");
+            println!("  \x1b[31m{e}\x1b[0m");
+        }
     }
 
     // The same exchange with a responder who holds nothing and tries to claim everything.
@@ -509,6 +593,10 @@ fn main() -> std::io::Result<()> {
         .collect();
     forged.theirs.sort_unstable();
     let claimed = ask2.learn(&forged, liar.public_key()).unwrap_or_default();
+    checks.require(
+        claimed.is_empty(),
+        "a responder holding nothing forged no shared contact",
+    );
     println!(
         "  a responder holding nothing claims {} shared contact(s)",
         claimed.len()
@@ -526,16 +614,18 @@ fn main() -> std::io::Result<()> {
 
     let warrant = karst_value::EarnedWarrant::attest(&alice_id, *relay.as_bytes(), 2, 1);
     match earn.draw(&warrant) {
-        Ok(()) => println!("  alice attests 2 units of service; the relay's balance is now {}", earn.balance(relay.as_bytes())),
+        Ok(()) => println!(
+            "  alice attests 2 units of service; the relay's balance is now {}",
+            earn.balance(relay.as_bytes())
+        ),
         Err(e) => println!("  \x1b[31m{e:?}\x1b[0m"),
     }
     // A warrant nobody signed draws nothing.
     let mut forged_warrant = warrant.clone();
     forged_warrant.units = 99;
-    println!(
-        "  a forged warrant for 99 units draws: {:?}",
-        earn.draw(&forged_warrant)
-    );
+    let forged_draw = earn.draw(&forged_warrant);
+    checks.require(forged_draw.is_err(), "a forged warrant drew nothing");
+    println!("  a forged warrant for 99 units draws: {forged_draw:?}");
 
     let issuer = karst_value::IssuerSet::new(1, 1).expect("issuer");
     let pk = issuer.public();
@@ -548,10 +638,19 @@ fn main() -> std::io::Result<()> {
     println!("  the issuer saw:   {}", hex8(&req.blinded.to_bytes()));
     println!("  the verifier saw: {}", hex8(&cred.serial));
     match spend.accept(&pk, &cred) {
-        Ok(rec) => println!("  \x1b[32mspent {} unit, serial {}\x1b[0m", rec.units, hex8(&rec.serial)),
-        Err(e) => println!("  \x1b[31m{e:?}\x1b[0m"),
+        Ok(rec) => println!(
+            "  \x1b[32mspent {} unit, serial {}\x1b[0m",
+            rec.units,
+            hex8(&rec.serial)
+        ),
+        Err(e) => {
+            checks.require(false, "a blind-issued credential spent once");
+            println!("  \x1b[31m{e:?}\x1b[0m");
+        }
     }
-    println!("  spending it again: {:?}", spend.accept(&pk, &cred));
+    let again = spend.accept(&pk, &cred);
+    checks.require(again.is_err(), "the same credential did not spend twice");
+    println!("  spending it again: {again:?}");
     note("The issuer signed a value it could not read. The verifier checked a public key and");
     note("could not have minted one. No field is common to the two transcripts, and no bank");
     note("was asked anything.");
@@ -573,7 +672,7 @@ fn main() -> std::io::Result<()> {
         let _ = t.join();
     }
     println!();
-    Ok(())
+    Ok(checks.report())
 }
 
 fn hex8(b: &[u8]) -> String {

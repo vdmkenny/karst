@@ -81,7 +81,11 @@ impl Directory {
     }
 
     pub fn layers(&self) -> u8 {
-        self.nodes.iter().map(|n| n.layer).max().map_or(0, |m| m + 1)
+        self.nodes
+            .iter()
+            .map(|n| n.layer)
+            .max()
+            .map_or(0, |m| m + 1)
     }
 
     fn delay(&self, rng: &mut impl Rng) -> u32 {
@@ -182,7 +186,11 @@ mod tests {
         let expected = trials as f64 / 8.0;
         for (i, c) in counts.iter().enumerate() {
             let dev = (*c as f64 - expected).abs() / expected;
-            assert!(dev < 0.1, "node {i} took {c} of {trials}, {:.1}% off", dev * 100.0);
+            assert!(
+                dev < 0.1,
+                "node {i} took {c} of {trials}, {:.1}% off",
+                dev * 100.0
+            );
         }
     }
 
@@ -193,12 +201,21 @@ mod tests {
         let mut rng = rand::thread_rng();
         let mut all = Vec::new();
         for _ in 0..20_000 {
-            all.extend(d.route_to(2, &mut rng).unwrap().iter().map(|h| h.delay_ms as f64));
+            all.extend(
+                d.route_to(2, &mut rng)
+                    .unwrap()
+                    .iter()
+                    .map(|h| h.delay_ms as f64),
+            );
         }
         let mean = all.iter().sum::<f64>() / all.len() as f64;
         let var = all.iter().map(|x| (x - mean).powi(2)).sum::<f64>() / all.len() as f64;
         assert!((mean - 50.0).abs() < 3.0, "mean {mean}");
-        assert!((var.sqrt() / mean - 1.0).abs() < 0.1, "sd/mean {}", var.sqrt() / mean);
+        assert!(
+            (var.sqrt() / mean - 1.0).abs() < 0.1,
+            "sd/mean {}",
+            var.sqrt() / mean
+        );
     }
 
     /// No hop may exceed what a node will hold, or the packet is refused in flight.
@@ -226,8 +243,18 @@ mod tests {
     fn a_missing_layer_is_an_error_rather_than_a_shorter_route() {
         let mut d = Directory::new(10.0);
         let k = MixKey::from_seed([1u8; 32]);
-        d.add(NodeInfo { id: 0, addr: "127.0.0.1:1".parse().unwrap(), mix_public: k.public(), layer: 0 });
-        d.add(NodeInfo { id: 9, addr: "127.0.0.1:1".parse().unwrap(), mix_public: k.public(), layer: 3 });
+        d.add(NodeInfo {
+            id: 0,
+            addr: "127.0.0.1:1".parse().unwrap(),
+            mix_public: k.public(),
+            layer: 0,
+        });
+        d.add(NodeInfo {
+            id: 9,
+            addr: "127.0.0.1:1".parse().unwrap(),
+            mix_public: k.public(),
+            layer: 3,
+        });
         let mut rng = rand::thread_rng();
         assert_eq!(d.route_to(9, &mut rng).unwrap_err(), RouteError::EmptyLayer);
     }
@@ -237,7 +264,12 @@ mod tests {
         let mut d = Directory::new(10.0);
         let k = MixKey::from_seed([1u8; 32]);
         for layer in 0..=(MAX_HOPS as u8) {
-            d.add(NodeInfo { id: layer as u16, addr: "127.0.0.1:1".parse().unwrap(), mix_public: k.public(), layer });
+            d.add(NodeInfo {
+                id: layer as u16,
+                addr: "127.0.0.1:1".parse().unwrap(),
+                mix_public: k.public(),
+                layer,
+            });
         }
         let mut rng = rand::thread_rng();
         assert_eq!(

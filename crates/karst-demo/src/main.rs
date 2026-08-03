@@ -47,7 +47,10 @@ fn main() {
 
     let evil = obj.tamper(b"transfer 9000 EUR".to_vec());
     println!("  relay rewrites the payload in flight:");
-    println!("    new name  {}  (different object entirely)", evil.cid().short());
+    println!(
+        "    new name  {}  (different object entirely)",
+        evil.cid().short()
+    );
     match evil.verify() {
         Ok(_) => println!("    ACCEPTED  <- this would be a bug"),
         Err(e) => println!("    rejected: {e}"),
@@ -197,7 +200,10 @@ fn main() {
 
     println!("\n  agent books within budget:");
     let inv1 = SignedInvocation::sign(
-        &agent, &agent_cap, request_for("book", 4500, [1; 16], &args));
+        &agent,
+        &agent_cap,
+        request_for("book", 4500, [1; 16], &args),
+    );
     match resource.invoke(&agent_cap, &inv1, &args, &mut ledger, 10) {
         Ok(r) => {
             for line in r.describe().lines() {
@@ -211,7 +217,10 @@ fn main() {
     let mut cargs = BTreeMap::new();
     cargs.insert("booking".to_string(), Value::Ref(resource.cid()));
     let inv2 = SignedInvocation::sign(
-        &agent, &agent_cap, request_for("cancel", 0, [2; 16], &cargs));
+        &agent,
+        &agent_cap,
+        request_for("cancel", 0, [2; 16], &cargs),
+    );
     match resource.invoke(&agent_cap, &inv2, &cargs, &mut ledger, 10) {
         Ok(_) => println!("    ALLOWED  <- this would be a bug"),
         Err(e) => println!("    {e}"),
@@ -219,7 +228,10 @@ fn main() {
 
     println!("  agent tries to use it a second time, with a fresh nonce:");
     let inv3 = SignedInvocation::sign(
-        &agent, &agent_cap, request_for("book", 4500, [3; 16], &args));
+        &agent,
+        &agent_cap,
+        request_for("book", 4500, [3; 16], &args),
+    );
     match resource.invoke(&agent_cap, &inv3, &args, &mut ledger, 10) {
         Ok(_) => println!("    ALLOWED  <- this would be a bug"),
         Err(e) => println!("    {e}"),
@@ -228,7 +240,10 @@ fn main() {
     println!("  someone who copied the capability tries to spend it:");
     let thief = Identity::generate();
     let stolen = SignedInvocation::sign(
-        &thief, &agent_cap, request_for("book", 4500, [4; 16], &args));
+        &thief,
+        &agent_cap,
+        request_for("book", 4500, [4; 16], &args),
+    );
     match resource.invoke(&agent_cap, &stolen, &args, &mut ledger, 10) {
         Ok(_) => println!("    ALLOWED  <- this would be a bug"),
         Err(e) => println!("    {e}"),
@@ -281,7 +296,12 @@ fn main() {
         ))
         .unwrap();
     let r2 = g
-        .insert(&Post::by_person(&troll, 2, "read the whitepaper sheeple", Some(t_root)))
+        .insert(&Post::by_person(
+            &troll,
+            2,
+            "read the whitepaper sheeple",
+            Some(t_root),
+        ))
         .unwrap();
     let _r3 = g
         .insert(&Post::create(
@@ -293,7 +313,10 @@ fn main() {
         ))
         .unwrap();
 
-    println!("  {} posts held locally, thread assembled from backlinks", g.len());
+    println!(
+        "  {} posts held locally, thread assembled from backlinks",
+        g.len()
+    );
 
     let mut strict = Board::new("karst-design", person.address(), Policy::Everything);
     strict.label(r2, Label::Hide);
@@ -331,7 +354,11 @@ fn main() {
         Agency::Delegated {
             resource_owner: clinic.address(),
             capability: Capability::issue(
-                &troll, karst_object::Cid::of(b"board:karst-design"), troll.address(), vec![]),
+                &troll,
+                karst_object::Cid::of(b"board:karst-design"),
+                troll.address(),
+                vec![],
+            ),
         },
     );
     match Post::from_object(&forged) {

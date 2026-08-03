@@ -8,3 +8,6 @@ description = "KARST L6/L7 file serving: chunked merkle manifests, dedup, verifi
 [dependencies]
 karst-id.workspace = true
 karst-object.workspace = true
+
+[lints]
+workspace = true

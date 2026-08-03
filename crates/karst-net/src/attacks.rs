@@ -10,7 +10,6 @@ use std::time::Instant;
 
 use karst_mix::packet::{MixKey, Packet};
 use karst_node::{MixNode, Outbound};
-use rand::Rng;
 
 use crate::client::{Client, Dispatch};
 use crate::directory::{Directory, NodeInfo};
@@ -109,10 +108,16 @@ fn a_dropping_mix_causes_loss_and_never_corruption() {
     let mut bob = Client::from_seed([2u8; 32], mesh.provider_id);
     let mut rng = rand::thread_rng();
 
-    let msg: Vec<u8> = (0..crate::frame::DATA_BYTES * 6).map(|i| (i % 251) as u8).collect();
+    let msg: Vec<u8> = (0..crate::frame::DATA_BYTES * 6)
+        .map(|i| (i % 251) as u8)
+        .collect();
     let mut corrupted = 0;
     for _ in 0..30 {
-        mesh.inject(alice.send(&mesh.dir, &bob.contact(), &msg, &mut rng).unwrap());
+        mesh.inject(
+            alice
+                .send(&mesh.dir, &bob.contact(), &msg, &mut rng)
+                .unwrap(),
+        );
         mesh.run(1_500);
         for item in mesh.provider.collect(&bob.mailbox()).items {
             if let Some(got) = bob.accept(&item) {
@@ -131,7 +136,11 @@ fn a_dropping_mix_causes_loss_and_never_corruption() {
     let mut clean = Mesh::new(4, 3);
     let alice2 = Client::from_seed([1u8; 32], clean.provider_id);
     let mut bob2 = Client::from_seed([2u8; 32], clean.provider_id);
-    clean.inject(alice2.send(&clean.dir, &bob2.contact(), &msg, &mut rng).unwrap());
+    clean.inject(
+        alice2
+            .send(&clean.dir, &bob2.contact(), &msg, &mut rng)
+            .unwrap(),
+    );
     clean.run(2_500);
     let got: Vec<Vec<u8>> = clean
         .provider
@@ -140,7 +149,11 @@ fn a_dropping_mix_causes_loss_and_never_corruption() {
         .into_iter()
         .filter_map(|i| bob2.accept(&i))
         .collect();
-    assert_eq!(got, vec![msg], "the message does not arrive even with nothing dropping");
+    assert_eq!(
+        got,
+        vec![msg],
+        "the message does not arrive even with nothing dropping"
+    );
 }
 
 /// A mix altering a packet must destroy it rather than mark it.
@@ -157,7 +170,9 @@ fn a_bit_flipped_in_flight_does_not_survive_to_the_provider() {
         let alice = Client::from_seed([1u8; 32], mesh.provider_id);
         let bob = Client::from_seed([2u8; 32], mesh.provider_id);
 
-        let ds = alice.send(&mesh.dir, &bob.contact(), b"traceable", &mut rng).unwrap();
+        let ds = alice
+            .send(&mesh.dir, &bob.contact(), b"traceable", &mut rng)
+            .unwrap();
         // Flip a bit as the first hop would, before injecting.
         let tampered: Vec<Dispatch> = ds
             .into_iter()
@@ -190,7 +205,9 @@ fn a_captured_packet_cannot_be_replayed_into_the_network() {
     let bob = Client::from_seed([2u8; 32], mesh.provider_id);
     let mut rng = rand::thread_rng();
 
-    let ds = alice.send(&mesh.dir, &bob.contact(), b"once", &mut rng).unwrap();
+    let ds = alice
+        .send(&mesh.dir, &bob.contact(), b"once", &mut rng)
+        .unwrap();
     let copy: Vec<Dispatch> = ds
         .iter()
         .map(|d| Dispatch {
@@ -230,7 +247,9 @@ fn colluding_entry_and_provider_link_at_the_rate_the_topology_allows() {
         // The adversary runs node 0 in the entry layer, and the provider.
         let alice = Client::from_seed([1u8; 32], mesh.provider_id);
         let bob = Client::from_seed([2u8; 32], mesh.provider_id);
-        let ds = alice.send(&mesh.dir, &bob.contact(), b"one fragment", &mut rng).unwrap();
+        let ds = alice
+            .send(&mesh.dir, &bob.contact(), b"one fragment", &mut rng)
+            .unwrap();
         if ds.iter().any(|d| d.via == 0) {
             linked += 1;
         }
@@ -264,7 +283,9 @@ fn longer_messages_touch_a_hostile_entry_more_often() {
         let mut touched = 0;
         let trials = 600;
         for _ in 0..trials {
-            let ds = alice.send(&mesh.dir, &bob.contact(), &msg, &mut rng).unwrap();
+            let ds = alice
+                .send(&mesh.dir, &bob.contact(), &msg, &mut rng)
+                .unwrap();
             assert_eq!(ds.len(), frags);
             if ds.iter().any(|d| d.via == 0) {
                 touched += 1;
@@ -316,7 +337,11 @@ fn real_and_cover_emissions_cost_the_same_to_produce() {
     // Cost of taking a real one out of a queue.
     let mut queue: Vec<Dispatch> = Vec::new();
     for _ in 0..200 {
-        queue.extend(alice.send(&mesh.dir, &bob.contact(), b"x", &mut rng).unwrap());
+        queue.extend(
+            alice
+                .send(&mesh.dir, &bob.contact(), b"x", &mut rng)
+                .unwrap(),
+        );
     }
     let mut real_ns = Vec::new();
     for _ in 0..200 {
@@ -355,7 +380,10 @@ fn a_clients_schedule_does_not_move_when_it_starts_talking() {
         let mut times = Vec::new();
         for t in 0..15_000u64 {
             if talking && t % 40 == 0 {
-                for _ in alice.send(&mesh.dir, &bob.contact(), b"chatter", &mut rng).unwrap() {
+                for _ in alice
+                    .send(&mesh.dir, &bob.contact(), b"chatter", &mut rng)
+                    .unwrap()
+                {
                     let _ = p.offer(1u8);
                 }
             }
@@ -383,7 +411,7 @@ fn a_drained_mailbox_is_indistinguishable_from_one_never_used() {
     let never: crate::provider::Tag = [2u8; 32];
 
     let mut payload = used.to_vec();
-    payload.extend(std::iter::repeat(9u8).take(crate::frame::ENVELOPE_BYTES));
+    payload.extend(std::iter::repeat_n(9u8, crate::frame::ENVELOPE_BYTES));
     p.deposit(&payload).unwrap();
 
     // Drained through the path that keeps the entry alive with its refusal count.
@@ -416,18 +444,29 @@ fn cover_and_real_packets_are_indistinguishable_in_route_shape() {
     let mut rng = rand::thread_rng();
 
     for _ in 0..64 {
-        let real = alice.send(&mesh.dir, &bob.contact(), b"m", &mut rng).unwrap();
+        let real = alice
+            .send(&mesh.dir, &bob.contact(), b"m", &mut rng)
+            .unwrap();
         let cover = alice.cover(&mesh.dir, mesh.provider_id, &mut rng).unwrap();
 
         // Both enter at some layer-0 node, and the entry is drawn from the same set.
         let real_layer = mesh.dir.get(real[0].via).unwrap().layer;
         let cover_layer = mesh.dir.get(cover.via).unwrap().layer;
-        assert_eq!(real_layer, cover_layer, "cover entered at a different layer");
+        assert_eq!(
+            real_layer, cover_layer,
+            "cover entered at a different layer"
+        );
         assert_eq!(real_layer, 0);
 
         // And the wire form is the one size, which is structural rather than asserted.
-        assert_eq!(real[0].packet.to_bytes().len(), karst_mix::packet::PACKET_BYTES);
-        assert_eq!(cover.packet.to_bytes().len(), karst_mix::packet::PACKET_BYTES);
+        assert_eq!(
+            real[0].packet.to_bytes().len(),
+            karst_mix::packet::PACKET_BYTES
+        );
+        assert_eq!(
+            cover.packet.to_bytes().len(),
+            karst_mix::packet::PACKET_BYTES
+        );
     }
 }
 
@@ -439,7 +478,9 @@ fn the_entry_node_cannot_read_the_destination() {
     let bob = Client::from_seed([2u8; 32], mesh.provider_id);
     let mut rng = rand::thread_rng();
 
-    let ds = alice.send(&mesh.dir, &bob.contact(), b"m", &mut rng).unwrap();
+    let ds = alice
+        .send(&mesh.dir, &bob.contact(), b"m", &mut rng)
+        .unwrap();
     let entry = ds[0].via as usize;
     let bytes = ds[0].packet.to_bytes();
     let tag = bob.mailbox();
@@ -451,7 +492,7 @@ fn the_entry_node_cannot_read_the_destination() {
     // And peeling one layer reveals only the next hop, not the last.
     let mut seen = karst_mix::packet::SeenTags::new();
     let key = MixKey::from_seed([(entry as u8).wrapping_add(1); 32]);
-    let mut p = ds.into_iter().next().unwrap().packet;
+    let p = ds.into_iter().next().unwrap().packet;
     let peeled = p.peel(&key, &mut seen).unwrap();
     match peeled {
         karst_mix::packet::Peeled::Forward { next, packet, .. } => {

@@ -469,12 +469,10 @@ mod tests {
         for hop in 0..8u32 {
             for k in 0..20u32 {
                 if segs
-                    .learn(Segment::offer(
-                        &op(hop * 100 + k),
-                        pt(hop),
-                        pt(hop + 1),
-                        100,
-                    ), 0)
+                    .learn(
+                        Segment::offer(&op(hop * 100 + k), pt(hop), pt(hop + 1), 100),
+                        0,
+                    )
                     .is_err()
                 {
                     refused += 1;
@@ -558,7 +556,8 @@ mod tests {
     fn expired_segments_do_not_occupy_the_store_forever() {
         let mut segs = Segments::new();
         for k in 0..20u32 {
-            segs.learn(Segment::offer(&op(k), pt(k), pt(k + 1), 100), 0).unwrap();
+            segs.learn(Segment::offer(&op(k), pt(k), pt(k + 1), 100), 0)
+                .unwrap();
         }
         assert_eq!(segs.points(), 20);
         segs.expire(500);
@@ -592,7 +591,11 @@ mod tests {
         for k in 0..(Segments::MAX_POINTS as u32 + 500) {
             let _ = segs.learn(Segment::offer(&op(k), pt(k), pt(k + 1), 1_000), 0);
         }
-        assert!(segs.points() <= Segments::MAX_POINTS, "{} points", segs.points());
+        assert!(
+            segs.points() <= Segments::MAX_POINTS,
+            "{} points",
+            segs.points()
+        );
     }
 
     /// A store bounds what it holds, so the search cannot be handed its own input size.
@@ -601,7 +604,10 @@ mod tests {
         let mut segs = Segments::new();
         let mut accepted = 0;
         for k in 0..(Segments::MAX_PER_POINT as u32 + 500) {
-            if segs.learn(Segment::offer(&op(k), pt(0), pt(k + 1), 100), 0).is_ok() {
+            if segs
+                .learn(Segment::offer(&op(k), pt(0), pt(k + 1), 100), 0)
+                .is_ok()
+            {
                 accepted += 1;
             }
         }
@@ -621,8 +627,11 @@ mod tests {
         let mut segs = Segments::new();
         for hop in 0..8u32 {
             for k in 0..20u32 {
-                segs.learn(Segment::offer(&op(hop * 100 + k), pt(hop), pt(hop + 1), 100), 0)
-                    .unwrap();
+                segs.learn(
+                    Segment::offer(&op(hop * 100 + k), pt(hop), pt(hop + 1), 100),
+                    0,
+                )
+                .unwrap();
             }
         }
         let start = std::time::Instant::now();
@@ -634,15 +643,20 @@ mod tests {
     #[test]
     fn a_sender_composes_a_path_from_what_it_holds() {
         let mut segs = Segments::new();
-        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 100), 0).unwrap();
-        segs.learn(Segment::offer(&op(2), pt(1), pt(2), 100), 0).unwrap();
+        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 100), 0)
+            .unwrap();
+        segs.learn(Segment::offer(&op(2), pt(1), pt(2), 100), 0)
+            .unwrap();
 
         let paths = segs.compose(pt(0), pt(2), 0);
         assert_eq!(paths.len(), 1);
         assert_eq!(paths[0].hops(), 2);
         assert_eq!(paths[0].source(), pt(0));
         assert_eq!(paths[0].destination(), pt(2));
-        assert_eq!(paths[0].accountable(), vec![op(1).address(), op(2).address()].tap());
+        assert_eq!(
+            paths[0].accountable(),
+            vec![op(1).address(), op(2).address()].tap()
+        );
     }
 
     trait Tap {
@@ -744,7 +758,10 @@ mod tests {
         let mut c = s.clone();
         c.expires_at = u64::MAX;
         assert_eq!(c.verify(), Err(PathError::Unsigned));
-        assert!(s.verify().is_ok(), "the untouched segment stopped verifying");
+        assert!(
+            s.verify().is_ok(),
+            "the untouched segment stopped verifying"
+        );
     }
 
     /// Segments that do not meet cannot be assembled.
@@ -760,8 +777,10 @@ mod tests {
     #[test]
     fn an_expired_segment_does_not_compose() {
         let mut segs = Segments::new();
-        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 50), 0).unwrap();
-        segs.learn(Segment::offer(&op(2), pt(1), pt(2), 100), 0).unwrap();
+        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 50), 0)
+            .unwrap();
+        segs.learn(Segment::offer(&op(2), pt(1), pt(2), 100), 0)
+            .unwrap();
 
         assert_eq!(segs.compose(pt(0), pt(2), 10).len(), 1);
         assert!(
@@ -785,9 +804,12 @@ mod tests {
 
         // And composition does not produce one even when the segments allow it.
         let mut segs = Segments::new();
-        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 100), 0).unwrap();
-        segs.learn(Segment::offer(&op(2), pt(1), pt(0), 100), 0).unwrap();
-        segs.learn(Segment::offer(&op(3), pt(1), pt(2), 100), 0).unwrap();
+        segs.learn(Segment::offer(&op(1), pt(0), pt(1), 100), 0)
+            .unwrap();
+        segs.learn(Segment::offer(&op(2), pt(1), pt(0), 100), 0)
+            .unwrap();
+        segs.learn(Segment::offer(&op(3), pt(1), pt(2), 100), 0)
+            .unwrap();
         for p in segs.compose(pt(0), pt(2), 0) {
             let mut seen = vec![p.source()];
             for s in p.segments() {
@@ -815,7 +837,12 @@ mod tests {
         assert_eq!(
             Path::assemble(
                 (0..MAX_SEGMENTS + 1)
-                    .map(|i| Segment::offer(&op(i as u32 + 1), pt(i as u32), pt(i as u32 + 1), 1_000))
+                    .map(|i| Segment::offer(
+                        &op(i as u32 + 1),
+                        pt(i as u32),
+                        pt(i as u32 + 1),
+                        1_000
+                    ))
                     .collect(),
                 0
             ),
@@ -868,9 +895,12 @@ mod tests {
     #[test]
     fn composition_is_deterministic_and_expresses_no_preference() {
         let mut segs = Segments::new();
-        segs.learn(Segment::offer(&op(1), pt(0), pt(3), 100), 0).unwrap();
-        segs.learn(Segment::offer(&op(2), pt(0), pt(1), 100), 0).unwrap();
-        segs.learn(Segment::offer(&op(3), pt(1), pt(3), 100), 0).unwrap();
+        segs.learn(Segment::offer(&op(1), pt(0), pt(3), 100), 0)
+            .unwrap();
+        segs.learn(Segment::offer(&op(2), pt(0), pt(1), 100), 0)
+            .unwrap();
+        segs.learn(Segment::offer(&op(3), pt(1), pt(3), 100), 0)
+            .unwrap();
 
         let first = segs.compose(pt(0), pt(3), 0);
         let second = segs.compose(pt(0), pt(3), 0);
@@ -881,9 +911,15 @@ mod tests {
 
         // Learning the same segments in a different order changes nothing.
         let mut other = Segments::new();
-        other.learn(Segment::offer(&op(3), pt(1), pt(3), 100), 0).unwrap();
-        other.learn(Segment::offer(&op(2), pt(0), pt(1), 100), 0).unwrap();
-        other.learn(Segment::offer(&op(1), pt(0), pt(3), 100), 0).unwrap();
+        other
+            .learn(Segment::offer(&op(3), pt(1), pt(3), 100), 0)
+            .unwrap();
+        other
+            .learn(Segment::offer(&op(2), pt(0), pt(1), 100), 0)
+            .unwrap();
+        other
+            .learn(Segment::offer(&op(1), pt(0), pt(3), 100), 0)
+            .unwrap();
         assert_eq!(other.compose(pt(0), pt(3), 0), first);
     }
 

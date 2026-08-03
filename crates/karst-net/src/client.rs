@@ -421,8 +421,12 @@ mod tests {
         let mut bob = Client::from_seed([2u8; 32], mesh.provider_id);
         let mut rng = rand::thread_rng();
 
-        let long: Vec<u8> = (0..frame::DATA_BYTES * 9 + 77).map(|i| (i % 251) as u8).collect();
-        let packets = alice.send(&mesh.dir, &bob.contact(), &long, &mut rng).unwrap();
+        let long: Vec<u8> = (0..frame::DATA_BYTES * 9 + 77)
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let packets = alice
+            .send(&mesh.dir, &bob.contact(), &long, &mut rng)
+            .unwrap();
         assert_eq!(packets.len(), 10);
         mesh.inject(packets);
         mesh.run(3_000);
@@ -446,7 +450,11 @@ mod tests {
         let mut bob = Client::from_seed([2u8; 32], mesh.provider_id);
         let mut rng = rand::thread_rng();
 
-        mesh.inject(alice.send(&mesh.dir, &bob.contact(), b"are you there", &mut rng).unwrap());
+        mesh.inject(
+            alice
+                .send(&mesh.dir, &bob.contact(), b"are you there", &mut rng)
+                .unwrap(),
+        );
         mesh.run(2_000);
         let heard = mesh
             .provider
@@ -457,7 +465,10 @@ mod tests {
             .unwrap();
         assert_eq!(heard, b"are you there");
 
-        mesh.inject(bob.send(&mesh.dir, &alice.contact(), b"yes", &mut rng).unwrap());
+        mesh.inject(
+            bob.send(&mesh.dir, &alice.contact(), b"yes", &mut rng)
+                .unwrap(),
+        );
         mesh.run(2_000);
         let reply = mesh
             .provider
@@ -478,7 +489,11 @@ mod tests {
         let mut rng = rand::thread_rng();
 
         let secret = b"a distinctive phrase that would be obvious in a buffer";
-        mesh.inject(alice.send(&mesh.dir, &bob.contact(), secret, &mut rng).unwrap());
+        mesh.inject(
+            alice
+                .send(&mesh.dir, &bob.contact(), secret, &mut rng)
+                .unwrap(),
+        );
         mesh.run(2_000);
 
         let c = mesh.provider.collect(&bob.mailbox());
@@ -499,13 +514,22 @@ mod tests {
         let bob = Client::from_seed([2u8; 32], mesh.provider_id);
         let mut rng = rand::thread_rng();
 
-        mesh.inject(alice.send(&mesh.dir, &bob.contact(), b"x", &mut rng).unwrap());
+        mesh.inject(
+            alice
+                .send(&mesh.dir, &bob.contact(), b"x", &mut rng)
+                .unwrap(),
+        );
         mesh.run(2_000);
         let small = mesh.provider.collect(&bob.mailbox()).items;
 
         mesh.inject(
             alice
-                .send(&mesh.dir, &bob.contact(), &vec![7u8; frame::DATA_BYTES], &mut rng)
+                .send(
+                    &mesh.dir,
+                    &bob.contact(),
+                    &vec![7u8; frame::DATA_BYTES],
+                    &mut rng,
+                )
                 .unwrap(),
         );
         mesh.run(2_000);
@@ -543,7 +567,11 @@ mod tests {
         let mut bob = Client::from_seed([2u8; 32], mesh.provider_id);
         let mut rng = rand::thread_rng();
 
-        mesh.inject(alice.send(&mesh.dir, &bob.contact(), b"genuine", &mut rng).unwrap());
+        mesh.inject(
+            alice
+                .send(&mesh.dir, &bob.contact(), b"genuine", &mut rng)
+                .unwrap(),
+        );
         mesh.run(2_000);
         let real = mesh.provider.collect(&bob.mailbox()).items.remove(0);
 
@@ -569,7 +597,11 @@ mod tests {
         let mut eve = Client::from_seed([3u8; 32], mesh.provider_id);
         let mut rng = rand::thread_rng();
 
-        mesh.inject(alice.send(&mesh.dir, &bob.contact(), b"private", &mut rng).unwrap());
+        mesh.inject(
+            alice
+                .send(&mesh.dir, &bob.contact(), b"private", &mut rng)
+                .unwrap(),
+        );
         mesh.run(2_000);
         for item in mesh.provider.collect(&bob.mailbox()).items {
             assert_eq!(eve.accept(&item), None);
@@ -687,8 +719,10 @@ mod tests {
 
         // And it does not verify for any other counter, so it authorises one drain.
         assert!(peer
-            .verify(&drain_challenge(c1 + 1), &karst_id::Signature::from_bytes(&s1))
+            .verify(
+                &drain_challenge(c1 + 1),
+                &karst_id::Signature::from_bytes(&s1)
+            )
             .is_err());
     }
-
 }

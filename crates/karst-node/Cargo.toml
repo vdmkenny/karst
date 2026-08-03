@@ -8,3 +8,6 @@ description = "A running mix node: delay queue, forwarding, local delivery"
 [dependencies]
 karst-mix.workspace = true
 rand.workspace = true
+
+[lints]
+workspace = true

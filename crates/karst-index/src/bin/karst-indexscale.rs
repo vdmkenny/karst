@@ -89,7 +89,7 @@ fn main() {
         let common_ms = t1.elapsed().as_secs_f64() * 1000.0;
 
         let growth = match prev {
-            Some((pn, pms)) if pms > 0.0 => {
+            Some((_pn, pms)) if pms > 0.0 => {
                 format!("{:.1}x per 4x", common_ms / pms.max(0.0001))
             }
             _ => "-".to_string(),

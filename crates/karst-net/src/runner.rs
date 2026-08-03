@@ -178,8 +178,7 @@ impl NodeRunner {
     }
 
     fn serve_collections(&mut self) {
-        let (Some(sock), Some(store)) = (self.collect_sock.as_ref(), self.provider.as_mut())
-        else {
+        let (Some(sock), Some(store)) = (self.collect_sock.as_ref(), self.provider.as_mut()) else {
             return;
         };
         let mut buf = [0u8; REQUEST_BYTES];
@@ -203,11 +202,11 @@ impl NodeRunner {
                     let mut sig = [0u8; 64];
                     sig.copy_from_slice(&buf[REQ_SIG..REQ_SIG + 64]);
                     let tag = crate::client::mailbox_tag(&cred);
-                    match store.drain_once(&tag, &cred, counter, &sig) {
-                        Ok(got) => got,
-                        // Silent. A refusal that answered would say whether the tag exists.
-                        Err(_) => (None, 0),
-                    }
+                    // Silent on refusal. An answer that differed would say whether the tag
+                    // exists, which is the one thing a stranger must not learn from asking.
+                    store
+                        .drain_once(&tag, &cred, counter, &sig)
+                        .unwrap_or_default()
                 }
                 // Reading a feed needs nothing, because a feed tag is public. It also takes
                 // nothing away, or any stranger could delete a publisher one packet at a time.
@@ -536,15 +535,12 @@ impl ClientRunner {
         rand::rngs::OsRng.fill_bytes(&mut nonce);
         let seq = self.next_request;
         self.next_request += 1;
-        let o = self
-            .outstanding
-            .entry((at, tag))
-            .or_insert(Outstanding {
-                drains: 0,
-                read_cursor: None,
-                nonces: Vec::new(),
-                seq,
-            });
+        let o = self.outstanding.entry((at, tag)).or_insert(Outstanding {
+            drains: 0,
+            read_cursor: None,
+            nonces: Vec::new(),
+            seq,
+        });
         o.seq = seq;
         o.nonces.push(nonce);
         // A provider that never answers must not grow this without bound.
@@ -817,7 +813,11 @@ mod tests {
             r.respond_to(&req, &r.provider, at, tag, 0, round);
 
             let got = r.collected(tag);
-            assert_eq!(got.len(), 1, "round {round}: the drained item was discarded");
+            assert_eq!(
+                got.len(),
+                1,
+                "round {round}: the drained item was discarded"
+            );
             assert_eq!(got[0][0], round);
         }
     }
@@ -900,7 +900,10 @@ mod tests {
         // The attacker spoofs the provider's source address and every echoed field. It cannot
         // see the request, so it cannot know the nonce.
         let spoof = UdpSocket::bind(r.provider_at).is_err();
-        assert!(spoof, "the provider's address is taken, so this test spoofs by reuse");
+        assert!(
+            spoof,
+            "the provider's address is taken, so this test spoofs by reuse"
+        );
         let mut resp = vec![0u8; RESPONSE_BYTES];
         resp[0] = STATUS_ITEM;
         resp[13..45].copy_from_slice(&tag);
@@ -945,7 +948,11 @@ mod tests {
         let req2 = r.last_request();
         r.respond_to(&req2, &r.provider, at, other, 0, 1);
         let _ = r.collected(other);
-        assert_eq!(r.runner.refused_seen(), 42, "the refusal count was overwritten");
+        assert_eq!(
+            r.runner.refused_seen(),
+            42,
+            "the refusal count was overwritten"
+        );
     }
 
     /// A datagram nobody asked for is not filed.
@@ -966,8 +973,14 @@ mod tests {
         }
         r.runner.pump();
 
-        assert!(r.runner.pending.is_empty(), "filed a response nobody asked for");
-        assert!(r.runner.feed_cursors.is_empty(), "a stranger moved a cursor");
+        assert!(
+            r.runner.pending.is_empty(),
+            "filed a response nobody asked for"
+        );
+        assert!(
+            r.runner.feed_cursors.is_empty(),
+            "a stranger moved a cursor"
+        );
     }
 
     /// A forged cursor cannot put a feed permanently out of reach.

@@ -426,7 +426,12 @@ mod tests {
 
         let mut g = Graph::new();
         let root = g
-            .insert(&Post::by_person(&alice, 0, "Is L16 actually workable?", None))
+            .insert(&Post::by_person(
+                &alice,
+                0,
+                "Is L16 actually workable?",
+                None,
+            ))
             .unwrap();
         let _r1 = g
             .insert(&Post::by_person(
@@ -437,7 +442,12 @@ mod tests {
             ))
             .unwrap();
         let r2 = g
-            .insert(&Post::by_person(&troll, 2, "read the whitepaper sheeple", Some(root)))
+            .insert(&Post::by_person(
+                &troll,
+                2,
+                "read the whitepaper sheeple",
+                Some(root),
+            ))
             .unwrap();
         let _r3 = g
             .insert(&Post::create(

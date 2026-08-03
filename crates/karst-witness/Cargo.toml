@@ -8,3 +8,6 @@ description = "L8 Witness: countersigning that a publisher only ever moved forwa
 [dependencies]
 karst-id.workspace = true
 karst-object.workspace = true
+
+[lints]
+workspace = true

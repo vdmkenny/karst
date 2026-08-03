@@ -31,7 +31,12 @@ fn main() {
     let mut wire = vec![p.to_bytes()];
     let mut cur = p;
     for (i, k) in keys.iter().take(2).enumerate() {
-        let Peeled::Forward { packet, next, delay_ms } = cur.peel(k, &mut seen[i]).unwrap() else {
+        let Peeled::Forward {
+            packet,
+            next,
+            delay_ms,
+        } = cur.peel(k, &mut seen[i]).unwrap()
+        else {
             unreachable!()
         };
         println!("  hop -> {next}, hold {delay_ms}ms, still {PACKET_BYTES} bytes");
@@ -83,7 +88,11 @@ fn main() {
 
     for cfg in &configs {
         let r = run(cfg);
-        let flag = if r.advantage() < 1.05 { "\x1b[32m" } else { "\x1b[31m" };
+        let flag = if r.advantage() < 1.05 {
+            "\x1b[32m"
+        } else {
+            "\x1b[31m"
+        };
         println!(
             "  {:<34} {:>7.3} {:>8.1} {}{:>8.1}x\x1b[0m {:>7.0}x",
             r.label,
@@ -101,15 +110,22 @@ fn main() {
         "  \x1b[2manon.set  clients the adversary cannot rule out. Ceiling is {}.\x1b[0m",
         base.clients
     );
-    println!("  \x1b[2madv.gain  how much better than guessing. 1.0x means the design held.\x1b[0m");
+    println!(
+        "  \x1b[2madv.gain  how much better than guessing. 1.0x means the design held.\x1b[0m"
+    );
     println!("  \x1b[2moverhead  packets sent per real message. This is what it costs.\x1b[0m");
 
     // -------------------------------------------------- delay tradeoff
     println!("\n\x1b[1mThe delay knob, with cover off\x1b[0m");
     println!("{}", "-".repeat(70));
-    println!("  \x1b[2mWith cover on the candidate set is already every client, so delay has\x1b[0m");
+    println!(
+        "  \x1b[2mWith cover on the candidate set is already every client, so delay has\x1b[0m"
+    );
     println!("  \x1b[2mnothing left to buy. Its effect is only measurable without cover.\x1b[0m");
-    println!("  {:<12} {:>10} {:>10}", "mean delay", "anon.set", "adv.gain");
+    println!(
+        "  {:<12} {:>10} {:>10}",
+        "mean delay", "anon.set", "adv.gain"
+    );
     for d in [1.0, 2.0, 4.0, 8.0, 16.0, 32.0] {
         let mut cfg = SimConfig::mixing_only(7);
         cfg.mean_delay = d;
@@ -125,7 +141,9 @@ fn main() {
     // -------------------------------------------------- active adversary
     println!("\n\x1b[1mActive adversary: the n-1 attack\x1b[0m");
     println!("{}", "-".repeat(70));
-    println!("  \x1b[2mSuppress every other honest packet entering a mix, inject packets you\x1b[0m");
+    println!(
+        "  \x1b[2mSuppress every other honest packet entering a mix, inject packets you\x1b[0m"
+    );
     println!("  \x1b[2mcan recognise, and anything else leaving is the target.\x1b[0m");
     println!(
         "  {:<24} {:>10} {:>11} {:>12} {:>10}",
@@ -137,7 +155,11 @@ fn main() {
             discipline: d,
             ..ActiveConfig::default()
         });
-        let flag = if r.isolation_rate > 0.1 { "\x1b[31m" } else { "\x1b[32m" };
+        let flag = if r.isolation_rate > 0.1 {
+            "\x1b[31m"
+        } else {
+            "\x1b[32m"
+        };
         println!(
             "  {:<24} {:>10.1} {}{:>10.1}%\x1b[0m {:>12.0} {:>9.1}%",
             r.label,
@@ -153,7 +175,9 @@ fn main() {
     println!(
         "\n  \x1b[2mDraining a Poisson mix from steady state to one packet takes {ticks:.0} ticks\x1b[0m"
     );
-    println!("  \x1b[2mand costs {packets:.0} suppressed packets. A batch mix needs one flush.\x1b[0m");
+    println!(
+        "  \x1b[2mand costs {packets:.0} suppressed packets. A batch mix needs one flush.\x1b[0m"
+    );
     println!("  \x1b[2mExponential residuals are memoryless, so waiting does not help the\x1b[0m");
     println!("  \x1b[2madversary: the backlog never ages out, it only drains.\x1b[0m");
 
@@ -175,7 +199,9 @@ fn main() {
         );
     }
     println!("  \x1b[2mA Poisson mix has no row here, because it has no round boundary for\x1b[0m");
-    println!("  \x1b[2manyone to disagree about. A mechanism you cannot misconfigure is worth\x1b[0m");
+    println!(
+        "  \x1b[2manyone to disagree about. A mechanism you cannot misconfigure is worth\x1b[0m"
+    );
     println!("  \x1b[2msomething that does not show up in a passive measurement.\x1b[0m");
 
     println!("\n\x1b[1mWhat this shows\x1b[0m");
@@ -183,7 +209,9 @@ fn main() {
     println!("  Onion routing is trivially broken by a whole-network observer, which is");
     println!("  not news: Tor says so itself. Volume alone identifies who was talking.");
     println!();
-    println!("  \x1b[1mAgainst a passive adversary, cover traffic does all the work.\x1b[0m Poisson");
+    println!(
+        "  \x1b[1mAgainst a passive adversary, cover traffic does all the work.\x1b[0m Poisson"
+    );
     println!("  delay alone still leaves a real advantage, and cover alone scores exactly");
     println!("  as well as cover plus delay. Passive evidence alone does not justify the");
     println!("  delay layer.");
@@ -196,7 +224,9 @@ fn main() {
     println!("  only drains, and draining it costs hundreds of suppressed packets that");
     println!("  loop traffic detects with certainty.");
     println!();
-    println!("  \x1b[1mBatching also needs a clock.\x1b[0m At one tick of skew, a third of batches");
+    println!(
+        "  \x1b[1mBatching also needs a clock.\x1b[0m At one tick of skew, a third of batches"
+    );
     println!("  hold fewer than three packets and the worst holds none. Continuous time");
     println!("  has no round boundary to disagree about.");
     println!();
@@ -207,7 +237,9 @@ fn main() {
     println!("  Still not modelled: node compromise, long-run intersection attacks across");
     println!("  sessions, packet loss, and a real implementation's bugs.");
     println!();
-    println!("  \x1b[1mThe cost is the honest headline.\x1b[0m Constant rate cover means every client");
+    println!(
+        "  \x1b[1mThe cost is the honest headline.\x1b[0m Constant rate cover means every client"
+    );
     println!("  transmits every tick forever, which at this duty cycle is roughly 200x the");
     println!("  bandwidth, charged continuously to everyone including everyone who did not");
     println!("  need it. Any presentation of this design that omits that number is selling");

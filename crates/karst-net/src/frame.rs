@@ -16,7 +16,6 @@
 //! to the fragment size. A sender wanting that concealed pads to a fixed fragment count, and
 //! that is a choice at a higher layer because only the sender knows what it is worth.
 
-
 /// Bytes usable in a delivered payload, once Sphinx has taken its length prefix.
 pub const FRAGMENT_BYTES: usize = karst_mix::packet::MAX_MESSAGE_BYTES;
 
@@ -286,24 +285,44 @@ mod tests {
         let mut r = Reassembler::new();
 
         assert_eq!(
-            r.accept(Fragment { msg_id: id, index: 0, total: 3, data: vec![1; 8] }),
+            r.accept(Fragment {
+                msg_id: id,
+                index: 0,
+                total: 3,
+                data: vec![1; 8]
+            }),
             Ok(None)
         );
 
         // The attack: same id, different total.
         assert_eq!(
-            r.accept(Fragment { msg_id: id, index: 0, total: 2, data: vec![0xff; 8] }),
+            r.accept(Fragment {
+                msg_id: id,
+                index: 0,
+                total: 2,
+                data: vec![0xff; 8]
+            }),
             Err(FrameError::Inconsistent)
         );
         assert_eq!(r.conflicting(), 1, "interference must be countable");
 
         // The publication still completes, from the genuine fragments alone.
         assert_eq!(
-            r.accept(Fragment { msg_id: id, index: 1, total: 3, data: vec![2; 8] }),
+            r.accept(Fragment {
+                msg_id: id,
+                index: 1,
+                total: 3,
+                data: vec![2; 8]
+            }),
             Ok(None)
         );
         let done = r
-            .accept(Fragment { msg_id: id, index: 2, total: 3, data: vec![3; 8] })
+            .accept(Fragment {
+                msg_id: id,
+                index: 2,
+                total: 3,
+                data: vec![3; 8],
+            })
             .expect("no error")
             .expect("the message completed");
         assert_eq!(done, [vec![1; 8], vec![2; 8], vec![3; 8]].concat());
@@ -314,16 +333,32 @@ mod tests {
     fn sustained_interference_is_counted_and_costs_nothing() {
         let id = [4u8; 16];
         let mut r = Reassembler::new();
-        r.accept(Fragment { msg_id: id, index: 0, total: 2, data: vec![1; 8] }).unwrap();
+        r.accept(Fragment {
+            msg_id: id,
+            index: 0,
+            total: 2,
+            data: vec![1; 8],
+        })
+        .unwrap();
 
         for _ in 0..500 {
-            let _ = r.accept(Fragment { msg_id: id, index: 0, total: 7, data: vec![0; 8] });
+            let _ = r.accept(Fragment {
+                msg_id: id,
+                index: 0,
+                total: 7,
+                data: vec![0; 8],
+            });
         }
         assert_eq!(r.conflicting(), 500);
         assert_eq!(r.tracking(), 1, "interference opened new state");
 
         assert!(r
-            .accept(Fragment { msg_id: id, index: 1, total: 2, data: vec![2; 8] })
+            .accept(Fragment {
+                msg_id: id,
+                index: 1,
+                total: 2,
+                data: vec![2; 8]
+            })
             .unwrap()
             .is_some());
     }
@@ -335,7 +370,13 @@ mod tests {
         for i in 0..10u8 {
             let mut id = [0u8; 16];
             id[0] = i;
-            r.accept(Fragment { msg_id: id, index: 0, total: 2, data: vec![i; 8] }).unwrap();
+            r.accept(Fragment {
+                msg_id: id,
+                index: 0,
+                total: 2,
+                data: vec![i; 8],
+            })
+            .unwrap();
         }
         assert_eq!(r.tracking(), 4);
         assert_eq!(r.evicted(), 6);
@@ -504,5 +545,4 @@ mod tests {
         // inner fragment plus padding of exactly the same width.
         assert_eq!(INNER_BYTES + karst_seal::OVERHEAD, BODY_BYTES);
     }
-
 }

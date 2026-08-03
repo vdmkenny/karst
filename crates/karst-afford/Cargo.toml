@@ -10,3 +10,6 @@ karst-id.workspace = true
 karst-object.workspace = true
 karst-cap.workspace = true
 karst-doc = { path = "../karst-doc" }
+
+[lints]
+workspace = true

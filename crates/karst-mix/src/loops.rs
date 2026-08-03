@@ -348,11 +348,7 @@ mod tests {
         t.expire(11);
 
         assert!((t.loss_rate() - 0.05).abs() < 0.01);
-        assert!(
-            t.alarm().is_none(),
-            "fired at baseline: {:?}",
-            t.alarm()
-        );
+        assert!(t.alarm().is_none(), "fired at baseline: {:?}", t.alarm());
     }
 
     #[test]
@@ -427,7 +423,6 @@ mod tests {
         }
     }
 }
-
 
 /// Attacks on the detector.
 #[cfg(test)]

@@ -338,7 +338,10 @@ mod tests {
             .collect();
 
         let p = plan_with(cid(255), &hostile, &Policy::private());
-        assert!(!p.leaks(), "a reader who refuses exposure was exposed anyway");
+        assert!(
+            !p.leaks(),
+            "a reader who refuses exposure was exposed anyway"
+        );
         assert_eq!(p.exposed_bytes, 0);
         assert_eq!(p.mixed.len(), hostile.len() + 1);
     }
@@ -382,7 +385,9 @@ mod tests {
         // And the reader can see what that decision costs before making it, which is the
         // whole point of measuring against total rather than exposed bytes.
         let days = p.seconds_if_all_mixed(60.0) / 86_400.0;
-        assert!(days > 1.0, "a film over the mix network should take days, got {days:.2}");
+        assert!(
+            days > 1.0,
+            "a film over the mix network should take days, got {days:.2}"
+        );
     }
-
 }

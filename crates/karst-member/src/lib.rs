@@ -393,8 +393,20 @@ mod tests {
         let (a_sees, b_sees) = exchange(&a, &b);
 
         let expected: std::collections::BTreeSet<Address> = set(30..40).into_iter().collect();
-        assert_eq!(a_sees.iter().copied().collect::<std::collections::BTreeSet<_>>(), expected);
-        assert_eq!(b_sees.iter().copied().collect::<std::collections::BTreeSet<_>>(), expected);
+        assert_eq!(
+            a_sees
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
+        assert_eq!(
+            b_sees
+                .iter()
+                .copied()
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected
+        );
     }
 
     /// Disjoint sets reveal nothing at all.
@@ -461,7 +473,10 @@ mod tests {
         answer.theirs.sort_unstable();
 
         let seen = ask.learn(&answer, liar.public_key()).unwrap();
-        assert!(seen.is_empty(), "a responder with no contacts forged {seen:?}");
+        assert!(
+            seen.is_empty(),
+            "a responder with no contacts forged {seen:?}"
+        );
     }
 
     /// A responder that answers under a key it did not publish is refused, not believed.
@@ -539,7 +554,10 @@ mod tests {
 
         let ask = prober.ask();
         let answer = holder.answer(&ask.blinded).unwrap();
-        assert_eq!(ask.learn(&answer, holder.public_key()).unwrap(), vec![target]);
+        assert_eq!(
+            ask.learn(&answer, holder.public_key()).unwrap(),
+            vec![target]
+        );
     }
 
     #[test]

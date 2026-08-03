@@ -10,3 +10,6 @@ karst-id.workspace = true
 ed25519-dalek.workspace = true
 blake3.workspace = true
 hex.workspace = true
+
+[lints]
+workspace = true

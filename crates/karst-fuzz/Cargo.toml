@@ -12,3 +12,6 @@ karst-doc.workspace = true
 karst-cap.workspace = true
 karst-attest.workspace = true
 rand.workspace = true
+
+[lints]
+workspace = true

@@ -11,3 +11,6 @@ path = "src/bin/symsim.rs"
 
 [dependencies]
 rand.workspace = true
+
+[lints]
+workspace = true

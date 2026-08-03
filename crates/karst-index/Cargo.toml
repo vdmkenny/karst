@@ -17,3 +17,6 @@ path = "src/bin/karst-search.rs"
 [[bin]]
 name = "karst-indexscale"
 path = "src/bin/karst-indexscale.rs"
+
+[lints]
+workspace = true

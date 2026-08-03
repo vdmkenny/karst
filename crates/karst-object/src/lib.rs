@@ -524,7 +524,8 @@ pub struct Rotation {
 impl Rotation {
     /// The old key attests that `to` succeeds it.
     pub fn forward(old: &Identity, new_key: &[u8; 32], seq: u64) -> Result<Object, ObjectError> {
-        let new_addr = Address::from_key_bytes(new_key).map_err(|_| ObjectError::MalformedAuthorKey)?;
+        let new_addr =
+            Address::from_key_bytes(new_key).map_err(|_| ObjectError::MalformedAuthorKey)?;
         let mut e = Enc::new();
         e.str("forward").addr(&new_addr);
         Ok(Object::create(old, ROTATION_KIND, seq, e.finish(), None))
@@ -532,7 +533,8 @@ impl Rotation {
 
     /// The new key attests that it succeeds `old`.
     pub fn backward(new: &Identity, old_key: &[u8; 32], seq: u64) -> Result<Object, ObjectError> {
-        let old_addr = Address::from_key_bytes(old_key).map_err(|_| ObjectError::MalformedAuthorKey)?;
+        let old_addr =
+            Address::from_key_bytes(old_key).map_err(|_| ObjectError::MalformedAuthorKey)?;
         let mut e = Enc::new();
         e.str("backward").addr(&old_addr);
         Ok(Object::create(new, ROTATION_KIND, seq, e.finish(), None))
@@ -606,7 +608,10 @@ impl Lineage {
     pub fn insert(&mut self, obj: Object) -> Result<Cid, ObjectError> {
         obj.verify()?;
         if let Some((is_forward, from, to)) = Rotation::parse(&obj) {
-            let e = self.rotation_halves.entry((from, to)).or_insert((false, false));
+            let e = self
+                .rotation_halves
+                .entry((from, to))
+                .or_insert((false, false));
             if is_forward {
                 e.0 = true;
             } else {
@@ -952,9 +957,18 @@ mod tests {
             .unwrap();
         lin.insert(Rotation::forward(&old, &attacker.key_bytes(), 0).unwrap())
             .unwrap();
-        assert!(lin.rotations().is_empty(), "forward half alone was accepted");
-        lin.insert(Object::create(&attacker, "page", 1, b"seized".to_vec(), Some(c1)))
-            .unwrap();
+        assert!(
+            lin.rotations().is_empty(),
+            "forward half alone was accepted"
+        );
+        lin.insert(Object::create(
+            &attacker,
+            "page",
+            1,
+            b"seized".to_vec(),
+            Some(c1),
+        ))
+        .unwrap();
         assert!(lin.successors(&c1).is_empty());
         assert_eq!(lin.resolve(&c1), Resolution::Head(c1));
 
@@ -965,9 +979,18 @@ mod tests {
             .unwrap();
         lin2.insert(Rotation::backward(&attacker, &old.key_bytes(), 0).unwrap())
             .unwrap();
-        assert!(lin2.rotations().is_empty(), "backward half alone was accepted");
-        lin2.insert(Object::create(&attacker, "page", 1, b"claimed".to_vec(), Some(d1)))
-            .unwrap();
+        assert!(
+            lin2.rotations().is_empty(),
+            "backward half alone was accepted"
+        );
+        lin2.insert(Object::create(
+            &attacker,
+            "page",
+            1,
+            b"claimed".to_vec(),
+            Some(d1),
+        ))
+        .unwrap();
         assert!(lin2.successors(&d1).is_empty());
     }
 
@@ -985,8 +1008,14 @@ mod tests {
         // A perfectly valid rotation, between two parties who are not Alice.
         rotate(&bob, &carol, &mut lin);
 
-        lin.insert(Object::create(&attacker, "page", 1, b"hijack".to_vec(), Some(c1)))
-            .unwrap();
+        lin.insert(Object::create(
+            &attacker,
+            "page",
+            1,
+            b"hijack".to_vec(),
+            Some(c1),
+        ))
+        .unwrap();
         assert!(lin.successors(&c1).is_empty());
         assert_eq!(
             lin.rejected_edges(&c1)[0].1,
@@ -1037,7 +1066,10 @@ mod tests {
             Resolution::Head(c1),
             "Alice's page is still the head of her own series"
         );
-        assert!(lin.equivocations().is_empty(), "Alice was blamed for Bob's object");
+        assert!(
+            lin.equivocations().is_empty(),
+            "Alice was blamed for Bob's object"
+        );
 
         // The attempt is visible rather than silently discarded.
         assert_eq!(
@@ -1206,5 +1238,4 @@ mod tests {
             );
         }
     }
-
 }

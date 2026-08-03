@@ -114,21 +114,60 @@ pub fn valid_corpus() -> Vec<(Target, Vec<u8>)> {
     // Documents.
     let mut fields = BTreeMap::new();
     fields.insert("alpha".to_string(), Value::Int(-9));
-    fields.insert("beta".to_string(), Value::Money { minor: 4500, currency: "EUR".into() });
+    fields.insert(
+        "beta".to_string(),
+        Value::Money {
+            minor: 4500,
+            currency: "EUR".into(),
+        },
+    );
     fields.insert("gamma".to_string(), Value::Ref(cid));
 
     for n in [
-        Node::Prose { runs: vec![Run::plain("a"), Run::strong("b"), Run::link("c", cid)] },
+        Node::Prose {
+            runs: vec![Run::plain("a"), Run::strong("b"), Run::link("c", cid)],
+        },
         Node::Prose { runs: vec![] },
-        Node::Heading { rank: 3, text: "title".into() },
-        Node::List { ordered: true, items: vec![cid, cid] },
-        Node::List { ordered: false, items: vec![] },
-        Node::Record { schema: "s".into(), fields: fields.clone() },
-        Node::Record { schema: String::new(), fields: BTreeMap::new() },
-        Node::Media { mime: "video/x".into(), source: cid, description: "d".into(), duration_ms: Some(90_000) },
-        Node::Media { mime: "image/x".into(), source: cid, description: String::new(), duration_ms: None },
-        Node::Quote { source: cid, comment: "why".into() },
-        Node::Section { title: "t".into(), children: vec![cid] },
+        Node::Heading {
+            rank: 3,
+            text: "title".into(),
+        },
+        Node::List {
+            ordered: true,
+            items: vec![cid, cid],
+        },
+        Node::List {
+            ordered: false,
+            items: vec![],
+        },
+        Node::Record {
+            schema: "s".into(),
+            fields: fields.clone(),
+        },
+        Node::Record {
+            schema: String::new(),
+            fields: BTreeMap::new(),
+        },
+        Node::Media {
+            mime: "video/x".into(),
+            source: cid,
+            description: "d".into(),
+            duration_ms: Some(90_000),
+        },
+        Node::Media {
+            mime: "image/x".into(),
+            source: cid,
+            description: String::new(),
+            duration_ms: None,
+        },
+        Node::Quote {
+            source: cid,
+            comment: "why".into(),
+        },
+        Node::Section {
+            title: "t".into(),
+            children: vec![cid],
+        },
     ] {
         out.push((Target::DocNode, n.encode()));
     }
@@ -140,7 +179,10 @@ pub fn valid_corpus() -> Vec<(Target, Vec<u8>)> {
         Value::Int(i64::MAX),
         Value::Bool(true),
         Value::Bool(false),
-        Value::Money { minor: -1, currency: "USD".into() },
+        Value::Money {
+            minor: -1,
+            currency: "USD".into(),
+        },
         Value::Instant(u64::MAX),
         Value::Ref(cid),
     ] {
@@ -153,8 +195,16 @@ pub fn valid_corpus() -> Vec<(Target, Vec<u8>)> {
         Run::plain(""),
         Run::strong("bold"),
         Run::link("linked", cid),
-        Run { text: "s".into(), emphasis: Emphasis::Stress, link: None },
-        Run { text: "l".into(), emphasis: Emphasis::Literal, link: Some(karst_doc::Link::Pinned(cid)) },
+        Run {
+            text: "s".into(),
+            emphasis: Emphasis::Stress,
+            link: None,
+        },
+        Run {
+            text: "l".into(),
+            emphasis: Emphasis::Literal,
+            link: Some(karst_doc::Link::Pinned(cid)),
+        },
     ] {
         let mut e = Enc::new();
         r.encode(&mut e);
@@ -180,7 +230,11 @@ pub fn valid_corpus() -> Vec<(Target, Vec<u8>)> {
     let agent = Identity::from_seed([3u8; 32]);
     let root = Capability::issue(&owner, cid, person.address(), vec![]);
     let scoped = root
-        .attenuate(&person, agent.address(), vec![Caveat::MaxUses(1), Caveat::MaxAmount(500)])
+        .attenuate(
+            &person,
+            agent.address(),
+            vec![Caveat::MaxUses(1), Caveat::MaxAmount(500)],
+        )
         .expect("attenuation of a fresh root capability");
 
     for c in [&root, &scoped] {
@@ -192,9 +246,15 @@ pub fn valid_corpus() -> Vec<(Target, Vec<u8>)> {
     // Authorship.
     for a in [
         Agency::Direct,
-        Agency::Assisted { tool: "editor".into() },
-        Agency::Assisted { tool: String::new() },
-        Agency::Autonomous { operator: agent.address() },
+        Agency::Assisted {
+            tool: "editor".into(),
+        },
+        Agency::Assisted {
+            tool: String::new(),
+        },
+        Agency::Autonomous {
+            operator: agent.address(),
+        },
         Agency::from_capability(&scoped, owner.address()).expect("valid capability"),
     ] {
         let mut e = Enc::new();
@@ -332,13 +392,20 @@ mod tests {
             r.non_canonical.len(),
             r.non_canonical.first().map(|(t, b)| (t, b.len()))
         );
-        assert!(r.rejected > 0, "the campaign rejected nothing, which cannot be right");
+        assert!(
+            r.rejected > 0,
+            "the campaign rejected nothing, which cannot be right"
+        );
     }
 
     #[test]
     fn a_second_seed_finds_nothing_either() {
         let r = campaign(40_000, 99);
-        assert!(r.non_canonical.is_empty(), "{} non-canonical", r.non_canonical.len());
+        assert!(
+            r.non_canonical.is_empty(),
+            "{} non-canonical",
+            r.non_canonical.len()
+        );
     }
 
     /// Property 2. A four byte length prefix can name four billion elements, and reading it
@@ -361,7 +428,10 @@ mod tests {
                 e.str("t");
             }
             e.u64(u64::MAX);
-            assert!(Node::from_bytes(&e.finish()).is_err(), "tag {tag} allocated");
+            assert!(
+                Node::from_bytes(&e.finish()).is_err(),
+                "tag {tag} allocated"
+            );
         }
 
         // And a capability chain length.
@@ -380,7 +450,10 @@ mod tests {
             Value::Text("hello".into()),
             Value::Int(-1),
             Value::Bool(false),
-            Value::Money { minor: 1, currency: "GBP".into() },
+            Value::Money {
+                minor: 1,
+                currency: "GBP".into(),
+            },
             Value::Instant(0),
             Value::Ref(cid),
         ] {
@@ -404,7 +477,10 @@ mod tests {
         Value::Int(1).encode(&mut e);
         e.str("a");
         Value::Int(2).encode(&mut e);
-        assert!(Node::from_bytes(&e.finish()).is_err(), "descending keys accepted");
+        assert!(
+            Node::from_bytes(&e.finish()).is_err(),
+            "descending keys accepted"
+        );
 
         // Duplicate keys.
         let mut e = Enc::new();
@@ -413,7 +489,10 @@ mod tests {
         Value::Int(1).encode(&mut e);
         e.str("a");
         Value::Int(2).encode(&mut e);
-        assert!(Node::from_bytes(&e.finish()).is_err(), "duplicate keys accepted");
+        assert!(
+            Node::from_bytes(&e.finish()).is_err(),
+            "duplicate keys accepted"
+        );
     }
 
     #[test]
@@ -421,7 +500,10 @@ mod tests {
         for tag in [7u8, 8, 200, 255] {
             let mut e = Enc::new();
             e.str("karst.node.v1").u8(tag);
-            assert!(Node::from_bytes(&e.finish()).is_err(), "node tag {tag} accepted");
+            assert!(
+                Node::from_bytes(&e.finish()).is_err(),
+                "node tag {tag} accepted"
+            );
         }
         for tag in [6u8, 9, 255] {
             let mut e = Enc::new();
@@ -460,7 +542,10 @@ mod tests {
     #[test]
     fn canonicality_composes_with_signing() {
         let author = Identity::from_seed([9u8; 32]);
-        let node = Node::Heading { rank: 1, text: "notice".into() };
+        let node = Node::Heading {
+            rank: 1,
+            text: "notice".into(),
+        };
         let obj = Object::create(&author, "doc", 0, node.encode(), None);
 
         assert_eq!(Node::from_bytes(&obj.payload).unwrap(), node);

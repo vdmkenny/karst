@@ -32,6 +32,25 @@ edition = "2021"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/unset/karst"
 
+# Lints the CI denies, and the ones it does not.
+#
+# `-D warnings` in CI means every warning is a build failure, which is only tolerable if the
+# set of allowed lints is a deliberate list rather than a blanket. These are the deliberate
+# ones. Anything not named here is an error.
+[workspace.lints.clippy]
+# Enum variants here are deliberately unequal: a Sphinx packet carries a kilobyte and its
+# error does not, and boxing the large arm to equalise them would put a heap allocation on
+# the packet path to satisfy a lint.
+large_enum_variant = "allow"
+result_large_err = "allow"
+# The generic signatures in karst-mix and karst-net are what the crates they wrap expose.
+# Factoring them into aliases hides which concrete types are in play, which matters more in
+# cryptographic code than the line length does.
+type_complexity = "allow"
+# Indexing by loop variable is clearer than an iterator chain where the index is the meaning,
+# as in "the share for byte j of the address".
+needless_range_loop = "allow"
+
 [workspace.dependencies]
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 blake3 = "1"
