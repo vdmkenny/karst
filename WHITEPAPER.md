@@ -477,9 +477,17 @@ argues for dropping the wrong one.
 
 **The cost is roughly 200x bandwidth at that duty cycle**, charged continuously to everyone
 including everyone who never needed it. That cost is **not a defect to be optimised away**. Das,
-Meiser, Mohammadi and Kate prove an anonymity trilemma (IEEE S&P 2018): strong anonymity, low
-bandwidth overhead and low latency, choose two. Any roadmap item promising to cut this without
-weakening anonymity is promising to refute a theorem.
+Meiser, Mohammadi and Kate (IEEE S&P 2018) derive necessary conditions tying a protocol's
+per-round noise rate to the number of rounds it may delay a message: strong anonymity requires
+paying one of those overheads. Any roadmap item promising to cut this without weakening
+anonymity is promising to refute a theorem.
+
+Two things that bound reads as saying and does not. Its latency is **counted in rounds, not
+seconds**, and the paper states that it "abstracts from the time the computations at the node
+take", so it does not price this design's wall-clock delay. And its constraints are **necessary
+and never sufficient**: satisfying the bound means a design is not excluded, not that it is
+anonymous, which the paper says outright. It reaches exactly that conclusion for Loopix, by
+name, under its unsynchronised bound. See `docs/15-fundamental-limits.md`.
 
 The two costs buy different things from different adversaries. Cover traffic buys the passive
 result and delay does not, as the table above shows. Delay buys the *active* result, where a
