@@ -42,13 +42,26 @@ use crate::provider::{Provider, Tag};
 ///
 /// Fixed width, because a request whose length varied with what it asked for would tell an
 /// observer which kind it was.
-pub const REQUEST_BYTES: usize = 1 + 32 + 8 + 64;
+pub const REQUEST_BYTES: usize = 1 + 32 + 8 + 8 + 64;
 
 /// Where the counter sits in a request.
 const REQ_COUNTER: usize = 33;
 /// Where the drain signature sits. Zero-filled for a read, so both requests are one size and
 /// an observer cannot tell a mailbox drain from a feed read by length.
-const REQ_SIG: usize = 41;
+/// A fresh random value per request, echoed in the response.
+///
+/// Everything else in the matching predicate is attacker-supplyable: a UDP source address is
+/// spoofable, a feed tag is public by construction, a mailbox tag is in every `Contact`, and
+/// the cursor starts at zero and advances by one. So an off-path attacker who could guess none
+/// of a secret could still forge a response that matched, consume the outstanding drain, and
+/// have the genuine answer dropped as unsolicited. Because a drain is destructive that is mail
+/// deleted at the provider and never delivered.
+///
+/// This is DNS's transaction id done properly: 64 bits from the system CSPRNG rather than 16
+/// bits and a port. It closes the off-path case and does nothing about an attacker who can
+/// read the request. See #181.
+const REQ_NONCE: usize = 41;
+const REQ_SIG: usize = 49;
 
 /// A collection response: status, the refusal count, the cursor it answers, and a fixed body.
 ///
@@ -62,10 +75,11 @@ const REQ_SIG: usize = 41;
 /// The tag is echoed too, because a client polling several providers for several feeds gets
 /// answers back interleaved on one socket. Without it, a response arriving while a different
 /// provider was being polled had to be discarded, and discarding it lost that item entirely.
-pub const RESPONSE_BYTES: usize = 1 + 8 + 4 + 32 + ENVELOPE_BYTES;
+pub const RESPONSE_BYTES: usize = 1 + 8 + 4 + 32 + 8 + ENVELOPE_BYTES;
 
 /// Offset of the body within a response.
-const RESP_BODY: usize = 1 + 8 + 4 + 32;
+const RESP_NONCE: usize = 1 + 8 + 4 + 32;
+const RESP_BODY: usize = RESP_NONCE + 8;
 
 /// Drain one item from a box, proving the right to do so with the collection key.
 pub const REQ_DRAIN: u8 = 1;
@@ -214,6 +228,7 @@ impl NodeRunner {
                 cred
             };
             resp[13..45].copy_from_slice(&echo);
+            resp[RESP_NONCE..RESP_NONCE + 8].copy_from_slice(&buf[REQ_NONCE..REQ_NONCE + 8]);
             match item {
                 None => {
                     resp[0] = STATUS_EMPTY;
@@ -300,13 +315,15 @@ impl CoverPool {
 /// The runner used to accept any correctly sized datagram and file it under the address and
 /// tag the datagram itself carried, which made a client's bookkeeping writable by anyone who
 /// could send it a packet. Requests are recorded on the way out and matched on the way back.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 struct Outstanding {
     /// Destructive reads outstanding. Counted rather than flagged, because a drain that is
     /// answered and then discarded is mail the provider has already deleted.
     drains: u32,
     /// The cursor of the most recent non-destructive read, if any.
     read_cursor: Option<u32>,
+    /// Nonces sent and not yet answered. A response must echo one of them.
+    nonces: Vec<[u8; 8]>,
     /// Send order, for age-ordered eviction. Never the tag, which an adversary picks.
     seq: u64,
 }
@@ -340,6 +357,8 @@ impl ClientRunner {
     /// A provider that stops answering must not cost this client memory without limit, and a
     /// client polling a handful of replicas is nowhere near this.
     pub const MAX_OUTSTANDING: usize = 4096;
+    /// Unanswered nonces kept per box before the oldest is forgotten.
+    pub const MAX_OUTSTANDING_NONCES: usize = 64;
 
     pub fn new(
         client: Client,
@@ -501,15 +520,20 @@ impl ClientRunner {
         req[1..33].copy_from_slice(&tag);
         req[REQ_COUNTER..REQ_COUNTER + 8].copy_from_slice(&(cursor as u64).to_le_bytes());
         // Signature bytes stay zero. A read needs no proof and must not be shorter for it.
+        let nonce = self.record(at, tag, |o| o.read_cursor = Some(cursor));
+        req[REQ_NONCE..REQ_NONCE + 8].copy_from_slice(&nonce);
         let _ = self.collect_sock.send_to(&req, at);
-        self.record(at, tag, |o| o.read_cursor = Some(cursor));
 
         self.pump();
         self.pending.remove(&(at, tag)).unwrap_or_default()
     }
 
     /// Note a request on the way out, so its answer can be recognised on the way in.
-    fn record(&mut self, at: SocketAddr, tag: Tag, f: impl FnOnce(&mut Outstanding)) {
+    /// Note a request on the way out, returning the nonce its answer must echo.
+    fn record(&mut self, at: SocketAddr, tag: Tag, f: impl FnOnce(&mut Outstanding)) -> [u8; 8] {
+        use rand::RngCore;
+        let mut nonce = [0u8; 8];
+        rand::rngs::OsRng.fill_bytes(&mut nonce);
         let seq = self.next_request;
         self.next_request += 1;
         let o = self
@@ -518,9 +542,15 @@ impl ClientRunner {
             .or_insert(Outstanding {
                 drains: 0,
                 read_cursor: None,
+                nonces: Vec::new(),
                 seq,
             });
         o.seq = seq;
+        o.nonces.push(nonce);
+        // A provider that never answers must not grow this without bound.
+        if o.nonces.len() > Self::MAX_OUTSTANDING_NONCES {
+            o.nonces.remove(0);
+        }
         f(o);
         // A request that is never answered would otherwise be remembered forever. Oldest
         // first, by send order: an unanswered request is one a provider chose not to answer,
@@ -537,6 +567,7 @@ impl ClientRunner {
             self.outstanding.remove(&oldest);
             self.pending.remove(&oldest);
         }
+        nonce
     }
 
     /// Read every response waiting on the socket and file it under the box it answers.
@@ -560,6 +591,17 @@ impl ClientRunner {
             let Some(o) = self.outstanding.get_mut(&(from, tag)) else {
                 continue;
             };
+            // The echoed nonce must be one this client sent. Without it every field in the
+            // matching predicate is attacker-supplyable, so an off-path forgery consumed the
+            // outstanding drain and the genuine answer, carrying an item the provider had
+            // already popped and cannot re-serve, was dropped as unsolicited.
+            let mut echoed = [0u8; 8];
+            echoed.copy_from_slice(&buf[RESP_NONCE..RESP_NONCE + 8]);
+            let Some(at_nonce) = o.nonces.iter().position(|n| *n == echoed) else {
+                continue;
+            };
+            o.nonces.remove(at_nonce);
+
             let answered = u32::from_le_bytes(buf[9..13].try_into().expect("4 bytes"));
 
             if o.drains > 0 {
@@ -576,11 +618,16 @@ impl ClientRunner {
                 // said, and a single spoofed u32::MAX made the feed unreadable for good.
                 continue;
             }
-            if o.drains == 0 && o.read_cursor.is_none() {
+            if o.drains == 0 && o.read_cursor.is_none() && o.nonces.is_empty() {
                 self.outstanding.remove(&(from, tag));
             }
 
-            self.refused_seen = u64::from_le_bytes(buf[1..9].try_into().expect("8 bytes"));
+            // The high-water mark, not the latest value. A refusal count is evidence that
+            // mail was lost, and taking the most recent reading let a poll of any other box
+            // overwrite it with zero, which is the one number feeds rest their
+            // "denial is visible rather than silent" argument on.
+            let seen = u64::from_le_bytes(buf[1..9].try_into().expect("8 bytes"));
+            self.refused_seen = self.refused_seen.max(seen);
             if buf[0] != STATUS_ITEM {
                 continue;
             }
@@ -605,10 +652,11 @@ impl ClientRunner {
         req[1..33].copy_from_slice(&self.client.drain_public());
         req[REQ_COUNTER..REQ_COUNTER + 8].copy_from_slice(&counter.to_le_bytes());
         req[REQ_SIG..REQ_SIG + 64].copy_from_slice(&sig);
-        let _ = self.collect_sock.send_to(&req, self.provider_collect);
-        self.record(self.provider_collect, self.client.mailbox(), |o| {
+        let nonce = self.record(self.provider_collect, self.client.mailbox(), |o| {
             o.drains += 1
         });
+        req[REQ_NONCE..REQ_NONCE + 8].copy_from_slice(&nonce);
+        let _ = self.collect_sock.send_to(&req, self.provider_collect);
 
         self.pump();
         let mine = (self.provider_collect, self.client.mailbox());
@@ -677,13 +725,33 @@ mod tests {
             self.runner.collect_sock.local_addr().unwrap()
         }
 
-        /// A response as the provider builds one.
-        fn respond(&self, from: &UdpSocket, to: SocketAddr, tag: Tag, cursor: u32, body: u8) {
+        /// A response as the provider builds one, echoing a request's nonce.
+        fn respond_to(
+            &self,
+            req: &[u8; REQUEST_BYTES],
+            from: &UdpSocket,
+            to: SocketAddr,
+            tag: Tag,
+            cursor: u32,
+            body: u8,
+        ) {
             let mut resp = vec![0u8; RESPONSE_BYTES];
             resp[0] = STATUS_ITEM;
             resp[9..13].copy_from_slice(&cursor.to_le_bytes());
             resp[13..45].copy_from_slice(&tag);
+            resp[RESP_NONCE..RESP_NONCE + 8].copy_from_slice(&req[REQ_NONCE..REQ_NONCE + 8]);
             resp[RESP_BODY..].fill(body);
+            from.send_to(&resp, to).expect("send");
+        }
+
+        /// A response carrying a nonce nobody asked for, which is the forgery.
+        fn respond_unsolicited(&self, from: &UdpSocket, to: SocketAddr, tag: Tag, cursor: u32) {
+            let mut resp = vec![0u8; RESPONSE_BYTES];
+            resp[0] = STATUS_ITEM;
+            resp[9..13].copy_from_slice(&cursor.to_le_bytes());
+            resp[13..45].copy_from_slice(&tag);
+            resp[RESP_NONCE..RESP_NONCE + 8].copy_from_slice(&[0xab; 8]);
+            resp[RESP_BODY..].fill(1);
             from.send_to(&resp, to).expect("send");
         }
 
@@ -736,12 +804,84 @@ mod tests {
             r.runner.poll_mail();
             let req = r.last_request();
             assert_eq!(req[0], REQ_DRAIN);
-            r.respond(&r.provider, at, tag, 0, round);
+            r.respond_to(&req, &r.provider, at, tag, 0, round);
 
             let got = r.collected(tag);
             assert_eq!(got.len(), 1, "round {round}: the drained item was discarded");
             assert_eq!(got[0][0], round);
         }
+    }
+
+    /// A forgery that matches every field a client can check is still refused.
+    ///
+    /// This is the case `an_unsolicited_response_is_dropped` never reached: that test sends
+    /// from a different socket, so it only exercises the address mismatch. Every other field
+    /// in the predicate is attacker-supplyable. A UDP source address is spoofable, a feed tag
+    /// is public by construction, a mailbox tag is in every `Contact`, and the cursor starts
+    /// at zero and advances by one.
+    ///
+    /// A drain is destructive, so a forgery that consumed the outstanding request meant the
+    /// genuine answer, carrying an item the provider had already popped and cannot re-serve,
+    /// was dropped as unsolicited. One forged datagram per poll made an inbox permanently
+    /// undeliverable while the provider believed it had delivered.
+    #[test]
+    fn a_response_matching_every_public_field_is_still_refused() {
+        let mut r = rig();
+        let tag = r.runner.client.mailbox();
+        let at = r.client_at();
+
+        r.runner.poll_mail();
+        let req = r.last_request();
+
+        // The attacker spoofs the provider's source address and every echoed field. It cannot
+        // see the request, so it cannot know the nonce.
+        let spoof = UdpSocket::bind(r.provider_at).is_err();
+        assert!(spoof, "the provider's address is taken, so this test spoofs by reuse");
+        let mut resp = vec![0u8; RESPONSE_BYTES];
+        resp[0] = STATUS_ITEM;
+        resp[13..45].copy_from_slice(&tag);
+        resp[RESP_NONCE..RESP_NONCE + 8].copy_from_slice(&[0u8; 8]);
+        resp[RESP_BODY..].fill(0xee);
+        r.provider.send_to(&resp, at).expect("send");
+
+        assert!(r.collected(tag).is_empty(), "a forged response was filed");
+
+        // And the genuine answer still lands, so the forgery consumed nothing.
+        r.respond_to(&req, &r.provider, at, tag, 0, 7);
+        let got = r.collected(tag);
+        assert_eq!(got.len(), 1, "the forgery consumed the outstanding drain");
+        assert_eq!(got[0][0], 7);
+    }
+
+    /// A refusal count is evidence of loss, so it is a high-water mark rather than a reading.
+    ///
+    /// Taking the latest value let a poll of any other box overwrite it with zero, with no
+    /// attacker present, and that count is the one number the feed layer rests its
+    /// "denial is visible rather than silent" argument on.
+    #[test]
+    fn a_refusal_count_is_not_overwritten_by_a_later_poll() {
+        let mut r = rig();
+        let tag = r.runner.client.mailbox();
+        let at = r.client_at();
+
+        r.runner.poll_mail();
+        let req = r.last_request();
+        let mut resp = vec![0u8; RESPONSE_BYTES];
+        resp[0] = STATUS_ITEM;
+        resp[1..9].copy_from_slice(&42u64.to_le_bytes());
+        resp[13..45].copy_from_slice(&tag);
+        resp[RESP_NONCE..RESP_NONCE + 8].copy_from_slice(&req[REQ_NONCE..REQ_NONCE + 8]);
+        r.provider.send_to(&resp, at).expect("send");
+        let _ = r.collected(tag);
+        assert_eq!(r.runner.refused_seen(), 42);
+
+        // A later poll of a different box reports zero refusals, honestly.
+        let other = [3u8; 32];
+        r.runner.poll_tag(other);
+        let req2 = r.last_request();
+        r.respond_to(&req2, &r.provider, at, other, 0, 1);
+        let _ = r.collected(other);
+        assert_eq!(r.runner.refused_seen(), 42, "the refusal count was overwritten");
     }
 
     /// A datagram nobody asked for is not filed.
@@ -758,7 +898,7 @@ mod tests {
         for i in 0..500u32 {
             let mut tag = [0u8; 32];
             tag[..4].copy_from_slice(&i.to_le_bytes());
-            r.respond(&attacker, at, tag, 0, 1);
+            r.respond_unsolicited(&attacker, at, tag, 0);
         }
         r.runner.pump();
 
@@ -779,8 +919,8 @@ mod tests {
         let at = r.client_at();
 
         r.runner.poll_tag(tag);
-        let _ = r.last_request();
-        r.respond(&r.provider, at, tag, u32::MAX, 9);
+        let req = r.last_request();
+        r.respond_to(&req, &r.provider, at, tag, u32::MAX, 9);
         for _ in 0..50 {
             r.runner.pump();
             std::thread::sleep(std::time::Duration::from_millis(1));
@@ -795,7 +935,7 @@ mod tests {
             u64::from_le_bytes(req[REQ_COUNTER..REQ_COUNTER + 8].try_into().unwrap()),
             0
         );
-        r.respond(&r.provider, at, tag, 0, 9);
+        r.respond_to(&req, &r.provider, at, tag, 0, 9);
         assert_eq!(r.collected(tag).len(), 1);
     }
 
