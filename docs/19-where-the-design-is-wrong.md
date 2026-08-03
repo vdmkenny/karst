@@ -103,8 +103,16 @@ re-derivation hands each hop the private scalar behind the next element, so one 
 entire route and reads the payload. The right response to a group that does not compose is a group
 that does. See docs/28-blinding.md.
 
-One deviation remains documented rather than hidden: the primitives are BLAKE3-based. It is not a
-reviewed implementation.
+The wide-block payload cipher went the same way. It was a four-round unbalanced Feistel written
+in the repository, in the LIONESS shape, keying the stream cipher by hashing the round key with
+the left half rather than by the paper's `S(L xor K)`. It is `lioness-rs` now. Neither Rust
+LIONESS crate ships known-answer vectors, so the test is a second implementation: Burdges'
+`lioness` and Nym's `lioness-rs` agree byte for byte, which is the evidence a KAT would have
+provided.
+
+One deviation remains documented rather than hidden: LIONESS's four round keys are
+information-theoretically independent in the paper and are subkeys of one per-hop secret here.
+It is not a reviewed implementation.
 
 ### 4.2 Migration groundwork (#41)
 
