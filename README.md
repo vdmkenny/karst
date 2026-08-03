@@ -21,8 +21,13 @@ none of them.
 
 ## Status
 
-Research project. Working code for ten layers, a specification for the rest, and an itemised
-list of everything the design makes worse.
+Research project. **Sixteen of seventeen layers have working code**, L0 Bearer is a
+specification, and there is an itemised list of everything the design makes worse.
+
+Nothing here has been deployed. The cryptography is unreviewed: where a maintained
+implementation of a standard exists it is used rather than rebuilt, and where one does not the
+construction is a published scheme with its deviations enumerated in the module that implements
+it.
 
 > **L4 mixing runs.** `karst-net-demo` stands up seven mixes in four layers on real UDP
 > sockets, one thread each, and two clients exchange messages through them with cover traffic
@@ -35,7 +40,7 @@ list of everything the design makes worse.
 > [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 537 tests
+cargo test          # 539 tests
 cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-index --bin karst-search    # discovery with 200,000 sybils in the room
 cargo run --release -p karst-stack --bin karst-stack-demo  # the whole stack, composed
@@ -49,7 +54,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 |---|---|---|
 | [`karst-path`](crates/karst-path) | L1 Path | Senders compose paths from signed segments. Nothing converges, nothing is allocated. |
 | [`karst-id`](crates/karst-id) | L2 Identity | Address is the hash of a locally generated key. No registrar, nothing to seize. |
-| [`karst-member`](crates/karst-member) | L5 Membership | No roll to enumerate, and introduction by shared contact via private set intersection. |
+| [`karst-member`](crates/karst-member) | L5 Membership | No roll to enumerate. Introduction by shared contact, over a verifiable OPRF, so a responder proves it used its own key. |
 | [`karst-object`](crates/karst-object) | L6 Objects | Canonical encoding, signed immutable objects, offline verification. |
 | [`karst-blob`](crates/karst-blob) | L6/L7 Files | Chunked merkle manifests, automatic dedup, verified seeking, measured swarm delivery. |
 | [`karst-doc`](crates/karst-doc) | L10 Document | A typed content-addressed node graph. Not a markup language. |
@@ -61,14 +66,15 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`karst-mix`](crates/karst-mix) | L4 Mixing | Sphinx packets with per-hop MAC and wide-block payload, plus four adversary simulators. |
 | [`karst-node`](crates/karst-node) | L4 Mixing | A mix that runs: defended clock, delay queue, shuffled release, eviction by remaining hold. |
 | [`karst-wire`](crates/karst-wire) | L3 Wire | One datagram size, Poisson emission drawn without reference to the queue. |
-| [`karst-seal`](crates/karst-seal) | L4/L6 | HPKE base mode. Sealing keys are separate from identity keys, on purpose. |
-| [`karst-net`](crates/karst-net) | L3-L5 | Directory, stratified routes, providers, clients, public feeds. The network, running. |
+| [`karst-seal`](crates/karst-seal) | L4/L6 | HPKE base mode, RFC 9180. Sealing keys are separate from identity keys, on purpose. |
+| [`karst-net`](crates/karst-net) | L3-L6.1 | Directory, stratified routes, providers, computed placement, clients, public feeds. The network, running. |
 | [`karst-stack`](crates/karst-stack) | all | The layers composed: publish a document, a stranger reads it, over real sockets. |
 | [`karst-index`](crates/karst-index) | L15 Discovery | Publishing is announcing. Ranking is the reader's, and every stranger together counts once. |
 | [`karst-symmetry`](crates/karst-symmetry) | L16 Symmetry | Does flattening returns to scale actually prevent capture? Partly. |
-| [`karst-value`](crates/karst-value) | L14 Value | Capacity credentials, earned by relaying and spent unlinkably. No bank. |
+| [`karst-value`](crates/karst-value) | L14 Value | Capacity credentials, earned by relaying and spent unlinkably as RFC 9474 blind signatures. No bank. |
 | [`karst-fuzz`](crates/karst-fuzz) | commitment 4 | Property tests for reject-never-recover across every decoder. |
 | [`karst-thread`](crates/karst-thread) | Applications | Threads assembled from backlinks, boards as views, no host. |
+| [`karst-demo`](crates/karst-demo) | Applications | The layers above the network, end to end, with no sockets in the way. |
 
 ## What the demo actually proves
 
@@ -106,8 +112,42 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`docs/18-documented-attacks.md`](docs/18-documented-attacks.md) | Audited against three deanonymisations that actually happened. Two would work. |
 | [`docs/19-where-the-design-is-wrong.md`](docs/19-where-the-design-is-wrong.md) | Stocktake: what needs a decision, what needs research, what is merely unbuilt. |
 | [`docs/20-three-decisions.md`](docs/20-three-decisions.md) | Three decisions taken, and why all three option lists were incomplete. |
+| [`docs/21-a-running-network.md`](docs/21-a-running-network.md) | Taking L4 off the simulator and onto real sockets, and what broke on the way. |
+| [`docs/22-links.md`](docs/22-links.md) | A URL names a location. What a link should name instead, and what pinning costs. |
+| [`docs/23-discovery.md`](docs/23-discovery.md) | Crawling exists because publishing does not include announcing. L15 makes it. |
+| [`docs/24-composing-the-stack.md`](docs/24-composing-the-stack.md) | Every layer worked and none of them touched. What composition actually required. |
+| [`docs/25-replication.md`](docs/25-replication.md) | One provider is one point of seizure. Computed placement, and why rotation on a counter buys nothing. |
+| [`docs/26-media.md`](docs/26-media.md) | Everything before L7 is small. What changes when it is not. |
+| [`docs/27-path.md`](docs/27-path.md) | BGP believes announcements because they arrived. RPKI's real deployment numbers. |
+| [`docs/28-blinding.md`](docs/28-blinding.md) | A total break of L4 that shipped, passed 500 tests, and was found by an audit. |
+| [`docs/29-capability-costs.md`](docs/29-capability-costs.md) | Authority is not revocable, key loss is terminal, and who supplies the number a check compares against. |
 | [`docs/08-roadmap.md`](docs/08-roadmap.md) | Phases, mapped to milestones. |
 | [`docs/09-references.md`](docs/09-references.md) | Citations, and an explicit list of claims with none. |
+
+## Where the cryptography comes from
+
+Not from here, wherever that is avoidable. A construction written in this repository is one
+nobody else has reviewed, and the distance between correct and catastrophic in a cryptographic
+scheme is routinely invisible on inspection: this project has shipped a total break of its
+packet format, a credential whose unforgeability rested on 61 bits, and a key schedule that
+cited an RFC it did not implement.
+
+| What | From | Standard |
+|---|---|---|
+| Signatures | `ed25519-dalek` | RFC 8032 |
+| Group operations | `curve25519-dalek`, ristretto255 | |
+| Anonymous encryption | `hpke` | RFC 9180, DHKEM(X25519)/HKDF-SHA256/ChaCha20-Poly1305 |
+| Blind signatures | `blind-rsa-signatures` | RFC 9474, RSABSSA-SHA384-PSS-Randomized |
+| Private set intersection | `voprf` | RFC 9497, OPRF(ristretto255, SHA-512), verifiable mode |
+| Wide-block payload cipher | `lioness-rs` | LIONESS (Anderson and Biham, FSE 1996) |
+| Constant-time comparison | `subtle` | |
+| Hashing, MACs, key derivation | `blake3` | |
+
+The Sphinx packet format (Danezis and Goldberg, IEEE S&P 2009) is implemented here because no
+maintained Rust crate exposes it in the shape this stack needs, and its deviations from the
+paper are enumerated in `karst-mix::packet`. LIONESS ships no known-answer vectors in any Rust
+crate, so the test is a second implementation: `lioness-rs` and Burdges' `lioness` are checked
+against each other byte for byte.
 
 ## Design commitments
 

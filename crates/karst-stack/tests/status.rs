@@ -283,3 +283,78 @@ fn the_foundational_layer_count_is_the_one_the_manifests_show() {
         "the paper says {stated_below} are numbered below L6; the manifests say {below}"
     );
 }
+
+/// The README must name every crate and reach every document.
+///
+/// A crate that exists and is not listed is work a reader cannot find; a document that nothing
+/// links to is work nobody reads. A review found three supporting documents unreachable from
+/// either entry point, including the one recording the largest defect in the project's history.
+#[test]
+fn the_readme_names_every_crate_and_links_every_document() {
+    let readme = std::fs::read_to_string(root().join("README.md")).expect("README.md");
+
+    for entry in std::fs::read_dir(root().join("crates")).expect("crates/") {
+        let name = entry.expect("entry").file_name().to_string_lossy().to_string();
+        if !root().join("crates").join(&name).join("Cargo.toml").exists() {
+            continue;
+        }
+        assert!(
+            readme.contains(&format!("crates/{name}")),
+            "{name} exists and the README does not list it"
+        );
+    }
+
+    for entry in std::fs::read_dir(root().join("docs")).expect("docs/") {
+        let name = entry.expect("entry").file_name().to_string_lossy().to_string();
+        if !name.ends_with(".md") {
+            continue;
+        }
+        assert!(
+            readme.contains(&name),
+            "docs/{name} exists and nothing in the README reaches it"
+        );
+    }
+}
+
+/// The README's test count must be the number of tests.
+///
+/// It has drifted three times, twice because a `sed` matched nothing and reported success.
+#[test]
+fn the_readme_test_count_is_not_stale() {
+    let readme = std::fs::read_to_string(root().join("README.md")).expect("README.md");
+    let claimed: usize = readme
+        .split("cargo test          # ")
+        .nth(1)
+        .and_then(|t| t.split_whitespace().next())
+        .and_then(|t| t.parse().ok())
+        .expect("the README states a test count");
+
+    // Counted from the source rather than by running the suite, which cannot run itself.
+    let mut found = 0usize;
+    let mut stack = vec![root().join("crates")];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for e in entries.filter_map(|e| e.ok()) {
+            let p = e.path();
+            if p.is_dir() {
+                if p.file_name().is_some_and(|n| n == "target") {
+                    continue;
+                }
+                stack.push(p);
+            } else if p.extension().is_some_and(|x| x == "rs") {
+                let src = std::fs::read_to_string(&p).unwrap_or_default();
+                found += src.matches("#[test]").count();
+            }
+        }
+    }
+
+    // Some tests are generated or parameterised, so this is a floor rather than an identity:
+    // what it catches is the count being left behind entirely.
+    let drift = claimed.abs_diff(found);
+    assert!(
+        drift * 20 < claimed.max(found),
+        "the README claims {claimed} tests and the source declares {found}"
+    );
+}
