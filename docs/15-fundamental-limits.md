@@ -9,26 +9,59 @@ too strong.
 ## 1. The anonymity trilemma
 
 Das, Meiser, Mohammadi and Kate, *Anonymity Trilemma: Strong Anonymity, Low Bandwidth
-Overhead, Low Latency, Choose Two* (IEEE S&P 2018), prove that an anonymous communication
-protocol can achieve at most two of:
+Overhead, Low Latency, Choose Two* (IEEE S&P 2018), derive necessary conditions relating
+latency overhead and bandwidth overhead for strong anonymity against a global passive
+adversary.
 
-- **strong anonymity**, meaning anonymity up to a negligible chance,
-- **low bandwidth overhead**,
-- **low latency overhead**,
+Four things about that sentence are load-bearing, and an earlier version of this document got
+each of them slightly wrong in the direction of claiming more.
 
-against a global passive adversary. The bounds differ for synchronised and unsynchronised
-user behaviour, and the unsynchronised case is the harder one.
+**The latency is counted in rounds, not seconds.** Latency overhead is "the number of rounds a
+message can be delayed by the protocol before being delivered", and bandwidth overhead is "the
+number of noise messages per user that the protocol can create in every round" (Section III-B,
+p. 112). The paper carries no wall-clock quantity at all and says so: "our model abstracts from
+the time the computations at the node take and also the length of the messages". So the theorem
+does not price KARST's seconds. It prices a round count, and mapping rounds onto seconds is a
+step this design has to make itself and defend on its own.
+
+**The constraints are necessary and never sufficient.** The paper is explicit twice: "all the
+constraints we have derived in Section V and Section VI are necessary for anonymity, but they
+are not sufficient conditions for anonymity" (p. 117), and "There can exist l and p such that
+2*l*p > 1 - neg(eta), but still no protocol can achieve strong anonymity" (p. 118). Satisfying
+the bound is therefore not evidence of anonymity, and treating `2*l*p > 1` as a design target
+is a misreading the paper anticipates by name.
+
+**L4 sits under the unsynchronised bound, Theorem 7, and the paper places it there itself.**
+Section X (p. 120) names Loopix: "Loopix naturally enforces our unsynchronised user
+distribution: the rate at which Loopix clients send messages is the sum of a dummy-message rate
+(beta) and a payload message rate (p'), which are system parameters." It computes
+`(p' + beta) * l = 1` and concludes that "the trilemma does not exclude strong anonymity for
+Loopix". Citing the synchronised result, Theorem 2, for this design is citing the wrong theorem.
+
+**The bound does not scale with the number of users.** In the unsynchronised model
+`f_p(x) = min(1/2, 1 - (1 - p)^x)` carries no population term and Theorem 7 has no side
+condition on N. The synchronised model does carry one. So the trilemma constrains the product
+of round count and per-round rate, and a KARST deployment cannot argue its way past the bound
+by having more users, nor does a small deployment violate it by having few.
+
+One further trap, because it looks like an anonymity-set claim and is not: "Note that eta does
+not measure the size of the anonymity set, but the computational limitation of the adversary"
+(p. 111).
 
 ### What this settles
 
-KARST's roughly 200x bandwidth and seconds of latency read like implementation waste. They
-are not. **Strong anonymity against a whole-network observer requires paying at least one of
-those costs, provably, regardless of how well anyone writes the code.** Any design claiming
-all three is either not achieving strong anonymity or not measuring honestly.
+**Strong anonymity against a whole-network observer requires paying at least one of the two
+overheads, provably, regardless of how well anyone writes the code.** A design claiming low
+latency overhead and low bandwidth overhead together is either not achieving strong anonymity
+or not measuring honestly.
 
 That reframes WHITEPAPER §6 considerably. The bandwidth cost is not a defect to be optimised
 away later; it is the price of the property, and a roadmap item promising to reduce it without
 weakening anonymity is promising to refute a theorem.
+
+What it does **not** settle is that KARST has strong anonymity. The bound runs one way, and
+the paper says so. Passing it means the design is not excluded, which is the same thing the
+paper concludes for Loopix and no more.
 
 ### What it raises
 
