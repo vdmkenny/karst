@@ -513,6 +513,23 @@ in fourteen days**, matching a month of enumeration across 500 PlanetLab nodes. 
 answer, proposal 188, remains Reserve, shelved in 2020 because the attack was not observed in
 use rather than because it was fixed.
 
+**And the mechanism itself has shipped, and users declined it.** Freenet 0.7, released in May
+2008, offers exactly what L5 describes: a darknet mode connecting only to peers whose keys you
+exchanged out of band, with the security property that an observer cannot readily tell you are
+running it at all (Clarke, Sandberg, Toseland and Verendel, *Private Communication Through a
+Network of Trusted Connections: The Dark Freenet*, 2010). It ships alongside an opennet mode that
+connects to strangers, and the project's own documentation reports the outcome: **"Unfortunately
+most people use Hyphanet in opennet mode currently."** The stated reason is that opennet exists
+"to let people try it out before they ask their friends to connect", and most users never make
+the second move.
+
+That is the single most decision-relevant fact available about this layer, and it is not a
+cryptographic result. Offered a secure mode requiring social effort and an insecure one requiring
+none, a comparable population took the insecure one, for eighteen years and counting. §6.3 lists
+closedness as a cost this design imposes; Freenet's record says it is a cost users have already
+refused to pay, and no mechanism here changes that. What KARST does differently is decline to
+offer the escape hatch, which converts an adoption problem into an adoption ceiling.
+
 **And social-graph admission is not a mechanism, it is a hope.** The SybilGuard family assumes
 sybils form a tight region behind a sparse cut. Yang and colleagues measured a live network with
 hundreds of thousands of real sybils and found they integrate like ordinary users, with most

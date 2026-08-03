@@ -59,6 +59,35 @@ relays from being deployed. See WHITEPAPER §6.
 
 ---
 
+## Membership by social introduction, as deployed
+
+**The Dark Freenet.** Ian Clarke, Oskar Sandberg, Matthew Toseland and Vilhelm Verendel,
+*Private Communication Through a Network of Trusted Connections: The Dark Freenet*, 2010.
+<https://www.hyphanet.org/assets/papers/freenet-0.7.5-paper.pdf>
+
+The architecture behind Freenet 0.7's darknet mode, released May 2008: nodes connect only to
+peers whose references were exchanged out of band, chosen by trust rather than by a routing
+algorithm. This is L5's mechanism, shipped to end users eighteen years ago.
+
+**What the users did with it.** The Hyphanet project's own documentation states:
+"Unfortunately most people use Hyphanet in opennet mode currently", and explains that opennet
+exists "to let people try it out before they ask their friends to connect".
+<https://www.hyphanet.org/pages/help.html>
+
+Cited in WHITEPAPER §3 L5. Offered a secure mode requiring social effort and an insecure mode
+requiring none, users took the insecure one. This is the strongest available evidence about
+whether L5's cost is one a population will accept, and it is a primary source about its own
+users rather than a measurement by a third party.
+
+**Measurement.** Stefanie Roos, Benjamin Schiller, Stefan Hacker and Thorsten Strufe,
+*Measuring Freenet in the Wild: Censorship-Resilience under Observation*, PETS 2014, 263-282.
+
+Measures the deployed network at several tens of thousands of users and finds topology control
+suboptimal for routing. **Not** cited for a darknet-versus-opennet split: that figure could not
+be confirmed from the paper, and the project's own statement above is used instead.
+
+---
+
 ## Authorization
 
 **Macaroons.** Birgisson, Politz, Erlingsson, Taly, Vrable, Lentczner. *Macaroons:
