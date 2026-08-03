@@ -589,6 +589,74 @@ inputs, 13,006 decode and every one re-encodes to itself.
 
 ---
 
+### L6.1 Resolution: how a reader gets from an address to bytes
+
+*Fixes error 03. Status: **built** (`karst-net`: `placement`, `feed`, `provider`).*
+
+Content addressing gives integrity and addressability and never gives availability. A `Cid`
+says what a thing is and says nothing about who has it, so a stack that stops at L6 can encode,
+sign and mix, and cannot fetch. This is the subsystem that answers *where do I ask*, and it is
+numbered as a fraction because it is not a lever removed from an incumbent: it is the part every
+content-addressed system has had to build, and the part where several of them recentralised.
+
+**Providers hold, they do not authorise.** A provider is a box that accepts deposits at a tag
+and serves reads from it. It verifies nothing about content, learns nothing about the sender,
+and holds no authority anyone must obtain. Anyone may run one, there is no registry of them, and
+a publisher is not registered with one. What makes a provider findable is not an announcement.
+
+**Placement is computed, not announced.** A reader who must be told where to look depends on an
+announcement, and an announcement is one more thing an adversary can withhold. So placement is a
+function of public information: each provider is scored `H(publisher || beacon || provider)` and
+the top `k` hold the feed. This is rendezvous hashing, highest random weight (Thaler and
+Ravishankar, *Using Name-Based Mappings to Increase Hit Rates*, IEEE/ACM Transactions on
+Networking, 1998), whose Theorem 1 gives the property that matters: when a provider leaves, only
+the publishers it held move. A placement that reshuffled on every membership change would be
+unknowable in practice.
+
+A publisher's feed sits at `feed_tag(publisher, epoch) = H(publisher || epoch)`, computable by
+anyone who knows the publisher's address. So a reader holding an address can derive the tag,
+derive the `k` providers, and read, having spoken to nobody first.
+
+**A public tag is a public tag.** Reading a feed needs no credential, because the tag is
+derivable by anyone; a feed is a broadcast, not a mailbox. Reads are non-destructive for the
+same reason: a stranger who could drain a feed could delete a publisher one packet at a time.
+Private mail uses a different tag, the hash of a drain key's public half, and draining requires
+a signature under that key rather than presentation of a secret.
+
+**Asking is the exposure this layer does not close.** A feed tag is derivable from a publisher's
+address alone, so asking a provider for one tells that provider which publisher a reader
+follows. That is §6.13 arriving by a different road, and it is not solved here.
+
+**Placement is grindable, and the price is known.** A deterministic function of two public
+identities can be ground against: an adversary generates provider identities until one scores
+into the top `k`, at roughly `n` hashes per slot for `n` providers. This is not theoretical.
+Biryukov, Pustogarov and Weinmann (*Trawling for Tor Hidden Services*, IEEE S&P 2013) ground
+relay fingerprints into the responsible-directory position for a chosen onion service in "a few
+minutes on a modern multi-core computer", capturing every responsible directory for Silk Road
+with six precomputed relays. Sridhar and colleagues (*Content Censorship in the InterPlanetary
+File System*, NDSS 2024) price the same attack on IPFS at **$0.0005 per identity and about $4
+in total**.
+
+Rotation does not fix it if the rotating value is predictable. An epoch **counter** is public
+and monotonic, so an adversary grinds an identity that wins for whichever epoch it likes, as far
+ahead as it likes. Rotation buys protection only against an unpredictable beacon, and **nothing
+in this design currently produces one** (#79). Until it does, placement is capturable at the
+prices above, and that is the honest state of this layer.
+
+**Divergence is detectable, not preventable.** A reader that asks `k` providers and receives
+different answers learns that at least one is lying and cannot learn which. Quorum reads
+(Malkhi and Reiter, *Byzantine Quorum Systems*, 1998) bound how many must be honest; fork
+consistency (Mazières and Shasha, PODC 2002) makes a provider that shows two readers different
+histories unable to hide it from both forever. Both detect. Neither restores an object a
+sufficient set of providers refuses to serve.
+
+**What this does not solve.** One publisher's feed on `k` providers is replication, not
+permanence: an object nobody chooses to hold stops existing, and the design has no mechanism
+that makes anyone hold anything (#77). There is no incentive layer wired to placement, so L14
+credentials do not currently buy storage. And the beacon problem above is open.
+
+---
+
 ### L7 Streams
 
 *Fixes errors 01 and 04. Status: **built** in structure (`karst-blob`), carriage and exposure
@@ -948,16 +1016,13 @@ Full treatment in [`docs/10-versioning-and-permanence.md`](docs/10-versioning-an
 
 ### L14 Value
 
-*Fixes errors 02 and 03. Status: **modelled, not implemented** (`karst-value`). The earn/spend
-separation, the ledgers and the double-spend attribution run and are the part worth having. The
-cryptography underneath them is a placeholder and **provides no unforgeability**: a credential's
-"signature" is a 61-bit symmetric tag any verifier can forge and anyone can brute-force from one
-spent credential, threshold issuance returns each issuer's key share rather than a partial
-signature over it, so one honest issuance hands the requester the master secret, and every key
-and blinding factor in the crate derives from a 64-bit seed. Issues #133, #134, #136. **Do not
-read the numbers in this section as claims about a working credential system.** What is
-established is the *shape* of the answer, below; what is not established is that this code
-implements it.*
+*Fixes errors 02 and 03. Status: **built, without threshold** (`karst-value`). A credential is
+an RFC 9474 blind signature: an issuer signs a blinded serial it cannot read, and a verifier
+checks the result against the issuer's public key, so no verifier can mint. Threshold issuance
+within one issuer set is **not composed**, so a set is one key; plurality of sets is what error
+03 demands and is satisfied, since anyone may run a set and there is no registry. Recovering
+threshold within a set needs Coconut over a pairing curve or threshold RSA (#133). The ledgers
+and the double-spend attribution are models rather than deployment artifacts.*
 
 **Lever removed.** Payment processors, and the de-banking that runs through them.
 
@@ -1453,6 +1518,7 @@ See [`docs/08-roadmap.md`](docs/08-roadmap.md) for phases and open issues.
 |---|---|---|
 | L2 Identity | built, tested | `karst-id` |
 | L6 Objects | built, tested | `karst-object`, `karst-blob` |
+| L6.1 Resolution | built; placement grindable until a beacon exists (#79) | `karst-net` |
 | L7 Streams | structure built, live append open | `karst-blob` |
 | L9 Authority | built, tested | `karst-cap` |
 | L10 Document | built, tested | `karst-doc` |
@@ -1468,7 +1534,7 @@ See [`docs/08-roadmap.md`](docs/08-roadmap.md) for phases and open issues.
 | L3 Wire | built, tested | `karst-wire` |
 | L5 Membership | built; PSI unsound for mutual output (#140) | `karst-member` |
 | L8 Witness | built, tested | `karst-witness` |
-| L14 Value | modelled; cryptography is a placeholder (#133, #134, #136) | `karst-value` |
+| L14 Value | built; threshold within a set not composed (#133) | `karst-value` |
 | L16 Symmetry | simulated | `karst-symmetry` |
 | L0 Bearer | sketched | none |
 
@@ -1526,6 +1592,7 @@ The rest of the dependency graph, from the crate manifests rather than from inte
 |---|---|---|---|
 | L2 Identity | `karst-id` | nothing | keys, addresses, signatures, rotation |
 | L6 Objects | `karst-object`, `karst-blob` | L2 | content addressing, canonical encoding, signed objects, manifests |
+| L6.1 Resolution | `karst-net` | L2, L3, L4, L6 | providers, computed placement, feeds |
 | L1 Path | `karst-path` | L2, L6 | operator-signed segments, sender-composed paths |
 | L3 Wire | `karst-wire` | L4 | pacing, no stable handshake or length distribution |
 | L4 Mixing | `karst-mix`, `karst-node`, `karst-net`, `karst-seal` | L2, L6, L3 | Sphinx packets, mix nodes, providers, sealed payloads |
