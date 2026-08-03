@@ -872,10 +872,12 @@ dependencies = [
  "karst-doc",
  "karst-id",
  "karst-index",
+ "karst-member",
  "karst-mix",
  "karst-net",
  "karst-node",
  "karst-object",
+ "karst-value",
  "karst-witness",
  "rand 0.8.7",
 ]
