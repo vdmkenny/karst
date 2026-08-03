@@ -141,7 +141,7 @@ message, which is the price of not concentrating exposure.
 
 L2 identities are Ed25519. Converting one to X25519 is possible and is the tempting shortcut.
 Joint security of a signature scheme and a KEM under one key is a property that must be proved
-rather than assumed (Degabriele, Lehmann, Paterson, Smart, Strefler, CT-RSA 2011), and sharing
+rather than assumed (Degabriele, Lehmann, Paterson, Smart, Strefler, CT-RSA 2012), and sharing
 a key **welds the two suites together**, so retiring one forces retiring the other. That is
 precisely what the algorithm evolution work at L2 exists to avoid.
 
@@ -311,7 +311,7 @@ probabilistic one; it does not eliminate it.** The residue is handled by loop co
 - Malhotra, Cohen, Brakke, Goldberg. *Attacking the Network Time Protocol.* NDSS 2016.
 - Vasserman, Jansen, Tyra, Hopper, Kim. *Membership-Concealing Overlay Networks.* CCS 2009.
 - Degabriele, Lehmann, Paterson, Smart, Strefler. *On the Joint Security of Encryption and
-  Signature Schemes.* CT-RSA 2011.
+  Signature in EMV.* CT-RSA 2012.
 - Barnes, Bhargavan, Lipp, Wood. *Hybrid Public Key Encryption.* RFC 9180.
 - Wan, Johnson, Wails, Wagh, Mittal. *Guard Placement Attacks on Path Selection Algorithms for
   Tor.* PoPETs 2019(4):272-291.

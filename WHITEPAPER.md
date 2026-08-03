@@ -338,7 +338,7 @@ a separate mechanism (`karst-seal`, HPKE base mode per RFC 9180 with DHKEM(X2551
 ChaCha20-Poly1305), on its own keys rather than the L2 identity keys, because joint security of a
 signature and an encryption scheme under one key is a property that must be proved rather than
 assumed (Degabriele, Lehmann, Paterson, Smart, Strefler, *On the Joint Security of Encryption and
-Signature Schemes*, CT-RSA 2011) and because welding them together means retiring one forces
+Signature in EMV*, CT-RSA 2012) and because welding them together means retiring one forces
 retiring the other.
 
 **Adversary.** B, the global passive adversary. This layer exists to defeat the attack
@@ -1514,8 +1514,8 @@ The build order is a different graph, and it is short:
 
 Two layers are foundational rather than sequential. **L2 Identity** supplies the keys and
 addresses every other layer names things with; **L6 Objects** supplies content addressing,
-canonical encoding, and the signed-object envelope every other layer puts its structures in. Nine
-of the remaining layers depend on L6 directly, including four numbered below it. That is not an
+canonical encoding, and the signed-object envelope every other layer puts its structures in. Ten
+of the remaining layers depend on L6 directly, including two numbered below it. That is not an
 accident to be corrected by renumbering: an addressing and encoding facility is used by
 everything, in the same way that neither TCP nor HTTP is meaningfully "above" the notion of a
 byte string.

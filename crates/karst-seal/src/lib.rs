@@ -30,7 +30,7 @@
 //! tempting shortcut, and it means one key secures both a signature scheme and a KEM. Joint
 //! security of a signature and an encryption scheme under a shared key is a property that has
 //! to be proved rather than assumed (Degabriele, Lehmann, Paterson, Smart, Strefler, *On the
-//! Joint Security of Encryption and Signature Schemes*, CT-RSA 2011), and it also welds the
+//! Joint Security of Encryption and Signature in EMV*, CT-RSA 2012), and it also welds the
 //! two suites together: retiring one forces retiring the other, which is exactly what the
 //! algorithm evolution work at L2 exists to avoid. Sealing keys are their own keys.
 //!
