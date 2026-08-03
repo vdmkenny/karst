@@ -40,7 +40,7 @@ it.
 > [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 550 tests
+cargo test          # 551 tests
 cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-index --bin karst-search    # discovery with 200,000 sybils in the room
 cargo run --release -p karst-stack --bin karst-stack-demo  # the whole stack, composed
@@ -68,7 +68,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`karst-wire`](crates/karst-wire) | L3 Wire | One datagram size, Poisson emission drawn without reference to the queue. |
 | [`karst-seal`](crates/karst-seal) | L4/L6 | HPKE base mode, RFC 9180. Sealing keys are separate from identity keys, on purpose. |
 | [`karst-net`](crates/karst-net) | L3-L6.1 | Directory, stratified routes, providers, computed placement, clients, public feeds. The network, running. |
-| [`karst-stack`](crates/karst-stack) | all | The layers composed: publish a document, a stranger reads it, over real sockets. |
+| [`karst-stack`](crates/karst-stack) | all | The layers composed over real sockets: publish, replicate, read, detect a withholding replica, find a shared contact without naming one, and pay a relay unlinkably. |
 | [`karst-index`](crates/karst-index) | L15 Discovery | Publishing is announcing. Ranking is the reader's, and every stranger together counts once. |
 | [`karst-symmetry`](crates/karst-symmetry) | L16 Symmetry | Does flattening returns to scale actually prevent capture? Partly. |
 | [`karst-value`](crates/karst-value) | L14 Value | Capacity credentials, earned by relaying and spent unlinkably as RFC 9474 blind signatures. No bank. |

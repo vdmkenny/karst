@@ -610,8 +610,18 @@ impl ClientRunner {
                 o.drains -= 1;
             } else if o.read_cursor == Some(answered) {
                 o.read_cursor = None;
-                let here = self.feed_cursors.entry((from, tag)).or_insert(0);
-                *here = answered as usize + 1;
+                // Advance only over an item that was actually served.
+                //
+                // An empty response means "nothing at that index **yet**", which on a feed
+                // still being written is the ordinary case: a reader polls faster than a
+                // publisher deposits. Advancing over it steps past the object that arrives a
+                // moment later, and the reader never sees it. The check used to sit before
+                // this line and was moved after it, which silently converted a feed being
+                // read live into a feed being read past.
+                if buf[0] == STATUS_ITEM {
+                    let here = self.feed_cursors.entry((from, tag)).or_insert(0);
+                    *here = answered as usize + 1;
+                }
             } else {
                 // A cursor other than the one asked for is an answer to a question this
                 // client did not put. Accepting it moved the cursor to wherever the datagram
@@ -810,6 +820,60 @@ mod tests {
             assert_eq!(got.len(), 1, "round {round}: the drained item was discarded");
             assert_eq!(got[0][0], round);
         }
+    }
+
+    /// Reading a feed that is still being written must not step past what arrives next.
+    ///
+    /// An empty response means "nothing at that index **yet**". On a live feed that is the
+    /// ordinary case, because a reader polls faster than a publisher deposits. Advancing the
+    /// cursor over it skips the object that lands a moment later, permanently.
+    ///
+    /// This is a regression test in the literal sense: the status check sat before the cursor
+    /// advance, a refactor moved it after, every unit test still passed, and the composed
+    /// stack demo silently delivered zero of five objects. Nothing in the suite read a feed
+    /// that was still filling, which is the only state a real feed is ever in.
+    #[test]
+    fn an_empty_answer_does_not_advance_past_an_object_that_has_not_arrived() {
+        let mut r = rig();
+        let tag = [11u8; 32];
+        let at = r.client_at();
+
+        // The reader is ahead of the publisher: index 0 is not there yet.
+        r.runner.poll_tag(tag);
+        let req = r.last_request();
+        assert_eq!(
+            u64::from_le_bytes(req[REQ_COUNTER..REQ_COUNTER + 8].try_into().unwrap()),
+            0
+        );
+        let mut empty = vec![0u8; RESPONSE_BYTES];
+        empty[0] = STATUS_EMPTY;
+        empty[13..45].copy_from_slice(&tag);
+        empty[RESP_NONCE..RESP_NONCE + 8].copy_from_slice(&req[REQ_NONCE..REQ_NONCE + 8]);
+        r.provider.send_to(&empty, at).expect("send");
+        let _ = r.collected(tag);
+
+        // The publisher deposits. The next poll must still ask for index 0.
+        r.runner.poll_tag(tag);
+        let req2 = r.last_request();
+        assert_eq!(
+            u64::from_le_bytes(req2[REQ_COUNTER..REQ_COUNTER + 8].try_into().unwrap()),
+            0,
+            "an empty answer advanced the cursor past an object not yet published"
+        );
+
+        r.respond_to(&req2, &r.provider, at, tag, 0, 42);
+        let got = r.collected(tag);
+        assert_eq!(got.len(), 1, "the object was skipped");
+        assert_eq!(got[0][0], 42);
+
+        // And a served item does advance, so the guard is not simply pinning the cursor.
+        r.runner.poll_tag(tag);
+        let req3 = r.last_request();
+        assert_eq!(
+            u64::from_le_bytes(req3[REQ_COUNTER..REQ_COUNTER + 8].try_into().unwrap()),
+            1,
+            "the cursor never advances, so nothing after the first object is readable"
+        );
     }
 
     /// A forgery that matches every field a client can check is still refused.

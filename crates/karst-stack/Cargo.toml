@@ -18,4 +18,6 @@ karst-mix.workspace = true
 karst-node.workspace = true
 karst-net.workspace = true
 karst-witness.workspace = true
+karst-member.workspace = true
+karst-value.workspace = true
 rand = "0.8"

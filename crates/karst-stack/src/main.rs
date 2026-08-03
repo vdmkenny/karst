@@ -78,7 +78,7 @@ fn write_document(prior: karst_object::Cid) -> (Doc, karst_object::Cid) {
 
 fn main() -> std::io::Result<()> {
     println!("\n\x1b[1mKARST: the stack, composed\x1b[0m");
-    note("L2 identity, L3 wire, L4 mixing, L6 objects, L10 documents, L15 discovery.");
+    note("L2 identity, L3 wire, L4 mixing, L5 membership, L6 objects, L8 witness, L10 documents, L14 value, L15 discovery.");
 
     rule("A network");
 
@@ -461,6 +461,100 @@ fn main() -> std::io::Result<()> {
     note("Bob did not need to trust any provider to notice. He compared what several showed");
     note("him, and one of them stopped agreeing. What he cannot detect is all of them showing");
     note("him the same incomplete view, which needs comparison with other readers.");
+
+    rule("They find they know somebody in common, without saying who they know");
+
+    // L5. Each side holds contacts; neither sends a contact list. The responder evaluates the
+    // initiator's blinded contacts under a key it published, and proves it did.
+    let shared = karst_id::Identity::from_seed([200u8; 32]).address();
+    let alice_contacts = [shared, karst_id::Identity::from_seed([201u8; 32]).address()];
+    let bob_contacts = [
+        shared,
+        karst_id::Identity::from_seed([202u8; 32]).address(),
+        karst_id::Identity::from_seed([203u8; 32]).address(),
+    ];
+    let alice_member = karst_member::Party::new(&alice_contacts);
+    let bob_member = karst_member::Party::new(&bob_contacts);
+
+    let ask = alice_member.ask();
+    println!(
+        "  alice sends {} blinded values, holding {}",
+        ask.blinded.len(),
+        alice_member.held()
+    );
+    let answer = bob_member.answer(&ask.blinded).expect("well formed");
+    match ask.learn(&answer, bob_member.public_key()) {
+        Ok(found) => {
+            for a in &found {
+                println!("  \x1b[32mshared contact: {}\x1b[0m", a.short());
+            }
+            note("Bob learned none of alice's other contacts and alice learned none of bob's.");
+        }
+        Err(e) => println!("  \x1b[31m{e}\x1b[0m"),
+    }
+
+    // The same exchange with a responder who holds nothing and tries to claim everything.
+    let liar = karst_member::Party::new(&[]);
+    let ask2 = alice_member.ask();
+    let mut forged = liar.answer(&ask2.blinded).expect("well formed");
+    forged.theirs = forged
+        .evaluated
+        .iter()
+        .map(|e| {
+            let mut t = [0u8; 64];
+            let b = e.serialize();
+            t[..b.len().min(64)].copy_from_slice(&b[..b.len().min(64)]);
+            t
+        })
+        .collect();
+    forged.theirs.sort_unstable();
+    let claimed = ask2.learn(&forged, liar.public_key()).unwrap_or_default();
+    println!(
+        "  a responder holding nothing claims {} shared contact(s)",
+        claimed.len()
+    );
+    note("The proof binds every evaluation to the key bob published, and the function binds");
+    note("each contact into its own output, so a claim about a contact needs the contact.");
+
+    rule("Alice pays a relay for carrying her traffic, and nobody can follow the money");
+
+    // L14. The relay is credited for service; the party it served signs a warrant saying so.
+    let relay_key = karst_id::Identity::from_seed([210u8; 32]);
+    let relay = relay_key.address();
+    let mut earn = karst_value::EarnLedger::new();
+    earn.credit(*relay.as_bytes(), 5);
+
+    let warrant = karst_value::EarnedWarrant::attest(&alice_id, *relay.as_bytes(), 2, 1);
+    match earn.draw(&warrant) {
+        Ok(()) => println!("  alice attests 2 units of service; the relay's balance is now {}", earn.balance(relay.as_bytes())),
+        Err(e) => println!("  \x1b[31m{e:?}\x1b[0m"),
+    }
+    // A warrant nobody signed draws nothing.
+    let mut forged_warrant = warrant.clone();
+    forged_warrant.units = 99;
+    println!(
+        "  a forged warrant for 99 units draws: {:?}",
+        earn.draw(&forged_warrant)
+    );
+
+    let issuer = karst_value::IssuerSet::new(1, 1).expect("issuer");
+    let pk = issuer.public();
+    let mut wallet = karst_value::Wallet::new();
+    let req = wallet.request(&pk, warrant.clone()).expect("request");
+    let sig = issuer.sign(&req).expect("sign");
+    let cred = wallet.assemble(&pk, &sig).expect("credential");
+
+    let mut spend = karst_value::SpendLedger::new();
+    println!("  the issuer saw:   {}", hex8(&req.blinded.to_bytes()));
+    println!("  the verifier saw: {}", hex8(&cred.serial));
+    match spend.accept(&pk, &cred) {
+        Ok(rec) => println!("  \x1b[32mspent {} unit, serial {}\x1b[0m", rec.units, hex8(&rec.serial)),
+        Err(e) => println!("  \x1b[31m{e:?}\x1b[0m"),
+    }
+    println!("  spending it again: {:?}", spend.accept(&pk, &cred));
+    note("The issuer signed a value it could not read. The verifier checked a public key and");
+    note("could not have minted one. No field is common to the two transcripts, and no bank");
+    note("was asked anything.");
 
     rule("What was never involved");
 
