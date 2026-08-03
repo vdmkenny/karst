@@ -121,6 +121,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`docs/27-path.md`](docs/27-path.md) | BGP believes announcements because they arrived. RPKI's real deployment numbers. |
 | [`docs/28-blinding.md`](docs/28-blinding.md) | A total break of L4 that shipped, passed 500 tests, and was found by an audit. |
 | [`docs/29-capability-costs.md`](docs/29-capability-costs.md) | Authority is not revocable, key loss is terminal, and who supplies the number a check compares against. |
+| [`docs/30-research-and-its-citations.md`](docs/30-research-and-its-citations.md) | Six open questions researched, and the 22 wrong citations an independent check found in the answers. |
 | [`docs/08-roadmap.md`](docs/08-roadmap.md) | Phases, mapped to milestones. |
 | [`docs/09-references.md`](docs/09-references.md) | Citations, and an explicit list of claims with none. |
 

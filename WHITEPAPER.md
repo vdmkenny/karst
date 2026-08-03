@@ -182,27 +182,76 @@ be caught in review instead of in an audit.
 
 ### L0 Bearer
 
-*Fixes error 03. Status: sketched.*
+*Fixes error 03. Status: **specified, unbuilt**. This is the only layer with no code, and §8
+states what that costs: every other layer runs over UDP on somebody else's network.*
 
 **Lever removed.** Licensed fibre and licensed spectrum. Honestly: still theirs. See §6.2.
 
-**Bug fixed.** The stack assumes one always-on medium at low latency, so removing that
-medium removes the network. Egypt withdrew essentially the whole country's routes within
-hours in 2011; Iran ran a near-total shutdown for roughly a week in 2019.
+**Bug fixed.** The stack assumes one always-on medium at low latency, so removing that medium
+removes the network. Egypt withdrew essentially the whole country's routes within hours in
+2011; Iran ran a near-total shutdown for roughly a week in 2019.
 
-**Mechanism.** Several bearers concurrently with identical semantics across all of them:
-fibre where it exists, unlicensed mesh radio where it does not, low orbit satellite where
-it reaches, and physically carried storage as a first class link rather than a joke.
-Delay tolerance is the base case rather than the failure case, so a hop with an eight hour
-round trip is slow rather than broken.
+**Mechanism: a frame service, not a network.** L0 delivers exactly one 1024-byte frame to one
+adjacent endpoint per bearer-declared interval. No ordering, no reliability, no
+acknowledgement, no handshake, no connection state. Every bearer presents that identical
+interface, from a ten millisecond UDP socket to a courier carrying a day's frames on a disk,
+and **the only thing that differs between them is one number**, the emission interval.
 
-A stack that only works at twenty millisecond round trip is a stack that dies in the first
-shutdown. Designing for the degraded case first is what makes graceful degradation
-possible: full connectivity, then regional mesh, then sneakernet, with the same names and
-the same keys working at every tier.
+Delay tolerance is therefore not a mode. It is what happens when that number is large, which
+is why a hop with an eight hour round trip is slow rather than broken.
 
-**Open.** Bearer switching without leaking which bearer you are on. Battery cost of mesh
-participation. Whether physically carried storage can be made routine rather than heroic.
+The frame is 1024 bytes because that is `PACKET_BYTES` at L4. A bearer whose medium cannot
+carry that atomically fragments and reassembles *below* L0 and never exposes a fragment count
+upward, because a variable fragment count is a length signal and L4 spends its entire
+bandwidth budget removing length signals.
+
+**The one invariant L0 owes upward.** At every interval a frame leaves, cover or payload, and
+no timing, power, spreading factor, coding rate, retry, channel choice or acknowledgement
+varies with what is in it. If the scheduler above has nothing ready, the driver emits locally
+generated cover rather than skipping the slot: **a skipped slot is an event, and events are
+what statistical disclosure consumes.** That single rule is what L4's constant-rate cover
+reduces to at the physical layer, and it is testable without radio hardware.
+
+Bearer-layer identifiers rotate on the interval schedule and never on activity, because
+rotating on activity makes the rotation itself the event.
+
+**What this takes from delay-tolerant networking, and what it refuses.** Store-carry-forward
+and the contact-plan idea are taken. The Bundle Protocol is refused as a wire format, and the
+reason is specific rather than aesthetic: RFC 9172 §3.8 states that **"A BCB MUST NOT target
+the primary block"**, and RFC 9171 §4.3.1 puts destination EID, source node ID, report-to EID,
+creation timestamp and lifetime in that primary block. So a sender, a recipient and a time
+travel in cleartext past every intermediate custodian, which hands exactly the tuple L4 exists
+to remove to exactly the parties it exists to remove it from.
+
+The `ipn` naming scheme is refused separately. RFC 9758 designates IANA as the Default
+Allocator of node numbers, with Allocator Identifier zero. That is error 01 and error 03 in a
+single field.
+
+Custody transfer is refused because a custody signal is an end-to-end acknowledgement whose
+timing is determined by delivery, which is the correlation channel this stack spends its
+bandwidth budget closing. L4's loop cover already detects drops, and detects them without
+emitting anything an observer can time against a delivery.
+
+**Composition with L1, which is a change to a built layer.** A segment today is a signed claim
+of willingness to carry. It becomes a signed claim of willingness to carry *during a window at
+an interval*, and `Path::assemble` gains two refusals: a path whose later segments expire
+before a frame can reach them is not constructible, and a sender may not compose a path whose
+slowest bearer cannot carry the rate it intends to emit at.
+
+That second rule is where congestion control lives, and it is a **sender-side composition
+constraint rather than a feedback loop**, because feedback is a channel and this design does
+not get to have one. An oversubscribed relay drops, L4's loop cover detects it, and the sender
+recomposes. Attribution rather than prevention, which is the shape this design keeps arriving
+at.
+
+**Open.** The anonymity set on a mixed-rate path is the population of the slowest bearer, not
+the population of the network, and mixing a 100 frame per second bearer with a one frame per
+45 minute bearer on one path is therefore not a bandwidth question but an anonymity one.
+Bearer switching without leaking which bearer you are on. Battery cost of mesh participation.
+Whether physically carried storage can be made routine rather than heroic. And the
+trilemma: a delay-tolerant bearer sits on the far side of the bound in §6, so the honest
+statement is that L0 buys reachability under shutdown and does not buy the same anonymity the
+fast path has.
 
 ---
 
@@ -1553,7 +1602,7 @@ See [`docs/08-roadmap.md`](docs/08-roadmap.md) for phases and open issues.
 | L8 Witness | built, tested | `karst-witness` |
 | L14 Value | built; threshold within a set not composed (#133) | `karst-value` |
 | L16 Symmetry | simulated | `karst-symmetry` |
-| L0 Bearer | sketched | none |
+| L0 Bearer | specified, unbuilt | none |
 
 **L0 Bearer is the one layer with no code, and it is the one holding the rest to today's
 internet.** Every other layer runs, and runs over UDP on somebody else's network. A stack whose
