@@ -59,6 +59,12 @@ pub struct FeedStats {
     pub undecodable: u64,
     /// Valid objects signed by somebody other than the publisher of this feed.
     pub wrong_author: u64,
+    /// Fragments refused for disagreeing with a publication already being collected.
+    ///
+    /// A feed box is world-writable and its message ids are readable out of it, so this counts
+    /// deliberate interference rather than corruption. It is surfaced because a reader who
+    /// silently collects less than a publisher wrote cannot tell that from a quiet publisher.
+    pub conflicting: u64,
 }
 
 /// One publisher's feed, as a subscriber sees it.
@@ -112,7 +118,10 @@ impl FeedReader {
     /// the publisher whose feed this is. Anyone may deposit here, so the last check is what
     /// makes a flood useless for anything but denial.
     pub fn accept(&mut self, _client: &mut Client, envelope: &[u8]) -> Option<Object> {
-        let bytes = self.open(envelope)?;
+        let bytes = self.open(envelope);
+        // Interference is counted whether or not this envelope completed anything.
+        self.stats.conflicting = self.inbox.conflicting();
+        let bytes = bytes?;
         let Ok(obj) = Object::decode(&bytes) else {
             self.stats.undecodable += 1;
             return None;

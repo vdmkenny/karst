@@ -143,6 +143,10 @@ pub struct Reassembler {
     /// Monotonic arrival counter. Nothing here reads a clock, because a clock is one more
     /// thing an adversary might influence and ordering is all this needs.
     clock: u64,
+    /// Fragments refused because they disagreed with an entry already open.
+    conflicting: u64,
+    /// Partial messages dropped to stay inside `capacity`.
+    evicted: u64,
 }
 
 #[derive(Debug)]
@@ -173,6 +177,8 @@ impl Reassembler {
             partial: Default::default(),
             capacity: Self::DEFAULT_CAPACITY,
             clock: 0,
+            conflicting: 0,
+            evicted: 0,
         }
     }
 
@@ -181,7 +187,23 @@ impl Reassembler {
             partial: Default::default(),
             capacity,
             clock: 0,
+            conflicting: 0,
+            evicted: 0,
         }
+    }
+
+    /// Fragments refused for disagreeing with a message already open.
+    ///
+    /// Non-zero on a public feed means somebody is depositing into a publisher's box under an
+    /// id they read out of it. The publication survives; the fact that it was attacked is what
+    /// this number is for.
+    pub fn conflicting(&self) -> u64 {
+        self.conflicting
+    }
+
+    /// Partial messages dropped to stay inside the capacity bound.
+    pub fn evicted(&self) -> u64 {
+        self.evicted
     }
 
     pub fn tracking(&self) -> usize {
@@ -201,6 +223,7 @@ impl Reassembler {
                 .map(|(k, _)| *k)
                 .expect("non-empty");
             self.partial.remove(&oldest);
+            self.evicted += 1;
         }
 
         self.clock += 1;
@@ -211,9 +234,20 @@ impl Reassembler {
             arrived,
         });
         if e.total != f.total {
-            // Two fragments under one id disagreeing about the message is either corruption
-            // or an attempt to confuse reassembly. Neither is worth keeping.
-            self.partial.remove(&f.msg_id);
+            // Refuse the fragment, keep the message.
+            //
+            // This used to delete the whole partial entry, which is safe reasoning for a
+            // sealed mailbox, where the id is unguessable and a disagreement really is
+            // corruption. It is a remote destruction primitive for a public feed: the id sits
+            // in cleartext in an open envelope, reading a box needs no credential, and
+            // depositing needs only the tag, so one packet carrying a matching id and a
+            // different total destroyed any publication in flight, for every reader still
+            // collecting it, silently on both sides.
+            //
+            // An adversary who causes loss should cause a loss that is visible. Refusing the
+            // fragment and counting it does that; deleting accumulated state on receipt of a
+            // hostile input does the opposite.
+            self.conflicting += 1;
             return Err(FrameError::Inconsistent);
         }
         // First writer wins. A later fragment must not overwrite an earlier one, or anybody
@@ -235,6 +269,77 @@ impl Reassembler {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One packet must not destroy a publication that is still being collected.
+    ///
+    /// A feed box is world-writable, reading it needs no credential, and the message id sits
+    /// in cleartext at a fixed offset in an open envelope. So an adversary reads the id out of
+    /// the first fragment of a multi-fragment publication and deposits one fragment carrying
+    /// that id and a different total.
+    ///
+    /// That used to purge the partial entry: every reader still collecting lost the
+    /// publication for good, because the remaining genuine fragments then opened a fresh entry
+    /// that could never fill. Silent on both sides.
+    #[test]
+    fn a_conflicting_fragment_does_not_destroy_the_message() {
+        let id = [9u8; 16];
+        let mut r = Reassembler::new();
+
+        assert_eq!(
+            r.accept(Fragment { msg_id: id, index: 0, total: 3, data: vec![1; 8] }),
+            Ok(None)
+        );
+
+        // The attack: same id, different total.
+        assert_eq!(
+            r.accept(Fragment { msg_id: id, index: 0, total: 2, data: vec![0xff; 8] }),
+            Err(FrameError::Inconsistent)
+        );
+        assert_eq!(r.conflicting(), 1, "interference must be countable");
+
+        // The publication still completes, from the genuine fragments alone.
+        assert_eq!(
+            r.accept(Fragment { msg_id: id, index: 1, total: 3, data: vec![2; 8] }),
+            Ok(None)
+        );
+        let done = r
+            .accept(Fragment { msg_id: id, index: 2, total: 3, data: vec![3; 8] })
+            .expect("no error")
+            .expect("the message completed");
+        assert_eq!(done, [vec![1; 8], vec![2; 8], vec![3; 8]].concat());
+    }
+
+    /// Repeated interference is bounded and counted rather than accumulating state.
+    #[test]
+    fn sustained_interference_is_counted_and_costs_nothing() {
+        let id = [4u8; 16];
+        let mut r = Reassembler::new();
+        r.accept(Fragment { msg_id: id, index: 0, total: 2, data: vec![1; 8] }).unwrap();
+
+        for _ in 0..500 {
+            let _ = r.accept(Fragment { msg_id: id, index: 0, total: 7, data: vec![0; 8] });
+        }
+        assert_eq!(r.conflicting(), 500);
+        assert_eq!(r.tracking(), 1, "interference opened new state");
+
+        assert!(r
+            .accept(Fragment { msg_id: id, index: 1, total: 2, data: vec![2; 8] })
+            .unwrap()
+            .is_some());
+    }
+
+    /// Eviction under capacity pressure is countable, so silent loss is not a mode.
+    #[test]
+    fn eviction_is_visible() {
+        let mut r = Reassembler::with_capacity(4);
+        for i in 0..10u8 {
+            let mut id = [0u8; 16];
+            id[0] = i;
+            r.accept(Fragment { msg_id: id, index: 0, total: 2, data: vec![i; 8] }).unwrap();
+        }
+        assert_eq!(r.tracking(), 4);
+        assert_eq!(r.evicted(), 6);
+    }
 
     fn round_trip(msg: &[u8]) -> Vec<u8> {
         let frags = split([1u8; 16], msg).unwrap();
