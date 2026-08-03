@@ -107,9 +107,18 @@ mod tests {
         }
     }
 
-    /// **The self-challenge.** KARST's shipping configuration pays both costs, and the
-    /// trilemma only requires one. This asserts the overpayment exists rather than hiding it,
-    /// so the question of whether to reclaim it stays open and visible.
+    /// The shipping configuration pays both costs, and the trilemma requires one.
+    ///
+    /// That is not an overpayment, and `docs/15-fundamental-limits.md` settles why: the two
+    /// costs buy two properties from two different adversaries. The trilemma governs the
+    /// bandwidth cost against a passive adversary; the n-1 attack governs the latency cost
+    /// against an active one, where a batch mix is isolated 51.7% of the time and a Poisson
+    /// mix 0.7%. This asserts the shape of the tradeoff, not a defect.
+    ///
+    /// One thing it does **not** show, and used to be read as showing: that cover traffic is
+    /// sufficient in general. It is measured at one packet per client per tick, which is
+    /// twenty-four packets in flight per client. See `sim::passive_frontier` for where that
+    /// stops holding.
     #[test]
     fn the_shipping_configuration_pays_both_costs() {
         let cfg = SimConfig::karst(7);
