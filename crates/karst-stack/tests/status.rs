@@ -6,7 +6,7 @@
 //!
 //! Drift is the default for a hand-maintained summary of anything. This makes it fail.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 
 fn root() -> PathBuf {
@@ -211,4 +211,75 @@ fn the_dependency_table_matches_the_manifests() {
             }
         }
     }
+}
+
+/// The prose count in 8.1 must match the graph it describes.
+///
+/// A number written into a sentence is the part of a document that drifts first, and this one
+/// is load bearing: it is the evidence for the claim that the layer numbering is conceptual.
+#[test]
+fn the_foundational_layer_count_is_the_one_the_manifests_show() {
+    let text = whitepaper();
+    let at = text.find("of the remaining layers depend on L6 directly").expect("the claim");
+    let before = &text[..at];
+    let stated_total = before.split_whitespace().last().unwrap();
+    let after = &text[at..];
+    let stated_below = after
+        .split("including ")
+        .nth(1)
+        .and_then(|t| t.split_whitespace().next())
+        .expect("the second number");
+
+    // Which layer each crate implements, for the crates the paper calls layers.
+    let layer_of: BTreeMap<&str, u32> = [
+        ("karst-path", 1),
+        ("karst-mix", 4),
+        ("karst-net", 4),
+        ("karst-witness", 8),
+        ("karst-cap", 9),
+        ("karst-doc", 10),
+        ("karst-afford", 11),
+        ("karst-agency", 12),
+        ("karst-attest", 13),
+        ("karst-value", 14),
+        ("karst-index", 15),
+    ]
+    .into_iter()
+    .collect();
+
+    let mut layers: BTreeSet<u32> = BTreeSet::new();
+    for (c, n) in &layer_of {
+        let manifest =
+            std::fs::read_to_string(root().join("crates").join(c).join("Cargo.toml")).unwrap();
+        if manifest.lines().any(|l| l.starts_with("karst-object")) {
+            layers.insert(*n);
+        }
+    }
+    let below = layers.iter().filter(|n| **n < 6).count();
+
+    let word = |n: usize| match n {
+        1 => "One",
+        2 => "Two",
+        3 => "Three",
+        4 => "four",
+        9 => "Nine",
+        10 => "Ten",
+        _ => "?",
+    };
+    assert_eq!(
+        stated_total,
+        word(layers.len()),
+        "the paper says {stated_total} layers depend on L6; the manifests say {}",
+        layers.len()
+    );
+    assert_eq!(
+        stated_below,
+        match below {
+            1 => "one",
+            2 => "two",
+            3 => "three",
+            _ => "?",
+        },
+        "the paper says {stated_below} are numbered below L6; the manifests say {below}"
+    );
 }

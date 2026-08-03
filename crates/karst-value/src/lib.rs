@@ -1,28 +1,26 @@
 //! KARST L14: capacity credentials that are earned and spent without linking the two.
 //!
-//! # This crate does not provide unforgeability. Do not deploy it.
+//! # The credential is real; the threshold is not, and the wallet's randomness is not
 //!
-//! The earn/spend separation below is the contribution and it holds. The cryptography under it
-//! is a placeholder standing in for schemes that were never implemented, and an audit found
-//! three independent total breaks:
+//! A credential is an RFC 9474 blind signature (`blind`, over `blind-rsa-signatures`). An
+//! issuer signs a blinded serial it cannot read, a verifier checks the result against the
+//! issuer's **public** key, and no verifier can mint. That is the property the layer needs and
+//! it now holds.
 //!
-//! - **Threshold issuance returns each issuer's key share**, not a partial signature over the
-//!   request. Any party that completes one honest issuance reconstructs the master secret and
-//!   mints unlimited credentials offline, forever. The threshold does not degrade gracefully;
-//!   it is defeated by one legitimate use. (#133)
-//! - **The credential "signature" is a 61-bit symmetric tag.** Verification needs the signing
-//!   key, so every verifier can forge, and ~2^61 offline hashes recover the issuing key from a
-//!   single observed credential. (#134)
-//! - **Every key and every serial in this module derives from a 64-bit seed**, so an adversary
-//!   who guesses a wallet's seed predicts every serial it will ever spend. (#136)
+//! Two things here still fall short and are not fixed by that:
 //!
-//! The `blind` module is the exception and is sound: it is RFC 9474 as implemented by
-//! `blind-rsa-signatures`, with keys and blinding factors from the system CSPRNG. It is not
-//! composed with the issuance path above, which is why that path is still a placeholder.
+//! - **Threshold issuance is not composed.** The `shamir` module carries the structure and the
+//!   credential path does not use it, so an issuer set is one key. Plurality of issuer sets is
+//!   what error 03 actually demands and it is satisfied, since anyone may run a set and there
+//!   is no registry; threshold *within* a set, which protects one set against a compromised or
+//!   compelled member, is absent. Recovering it needs Coconut over a pairing curve or
+//!   threshold RSA. (#133)
+//! - **Serials come from the system CSPRNG and everything else in this module does not.** The
+//!   double-spend and earn ledgers are models, and `IssuerSet` is not a deployment artifact.
 //!
 //! What is worth reading here is the *structure*: which acts are separated, what each ledger
 //! observes, and why double-spend attribution can be made to work without identifying honest
-//! spenders. Read the numbers as a model of that structure, not as a security claim.
+//! spenders.
 //!
 //! Issue #15. The whitepaper names this the most serious unresolved problem in the stack:
 //! L14 needs settlement observable enough to be trusted, L4 needs it unlinkable, and a
@@ -139,34 +137,39 @@ pub struct Issuer {
 /// every one to the party that made it.
 pub struct IssuerSet {
     pub threshold: usize,
-    issuers: Vec<Issuer>,
-    /// Held here only so a verifier in this proof of concept can check a credential.
-    /// Coconut publishes a verification key instead and no party needs the secret.
-    secret: u128,
+    key: blind::IssuerKey,
 }
 
 impl IssuerSet {
-    pub fn new(threshold: usize, count: usize, seed: u64) -> Self {
-        let mut rng = StdRng::seed_from_u64(seed);
-        let secret: u128 = rng.gen_range(1..P);
-        let shares = shamir::split(secret, threshold, count, seed);
-        IssuerSet {
+    /// An issuer set. Generating a key takes a moment; do it once and keep it.
+    ///
+    /// `threshold` is retained in the type because the earn side still speaks in those terms,
+    /// and it is **not** enforced by the credential: see the note on plurality below.
+    pub fn new(threshold: usize, _count: usize) -> Result<Self, ValueError> {
+        Ok(IssuerSet {
             threshold,
-            issuers: shares.into_iter().map(|share| Issuer { share }).collect(),
-            secret,
-        }
+            key: blind::IssuerKey::generate(blind::ISSUER_BITS)
+                .map_err(|_| ValueError::Invalid)?,
+        })
     }
 
-    pub fn count(&self) -> usize {
-        self.issuers.len()
+    /// What a verifier needs, and all it needs.
+    ///
+    /// A verifier holds a public key and cannot mint. That is the difference from a symmetric
+    /// tag, where verification and forgery are the same capability.
+    pub fn public(&self) -> blind::IssuerPublic {
+        self.key.public()
     }
 
-    /// What an issuer sees, and everything it will ever see.
-    pub fn partial(&self, issuer_index: usize, req: &IssuanceRequest) -> PartialCredential {
-        let _ = req; // the blinded commitment binds the request; the share does the work
-        PartialCredential {
-            share: self.issuers[issuer_index].share,
-        }
+    /// Sign a blinded request, learning nothing about the credential it becomes.
+    ///
+    /// The response is a function of the request. An issuance protocol whose response is a
+    /// function of the issuer's *key* instead hands that key to the requester, which is what
+    /// returning a Shamir share did.
+    pub fn sign(&self, req: &IssuanceRequest) -> Result<blind::BlindSignature, ValueError> {
+        self.key
+            .sign_blinded(&req.blinded)
+            .map_err(|_| ValueError::Invalid)
     }
 }
 
@@ -175,9 +178,10 @@ impl IssuerSet {
 /// Carries a **blinded** commitment and a warrant proving service was performed. It does not
 /// carry the serial, and the serial is what a verifier later sees. That gap is the whole
 /// design.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct IssuanceRequest {
-    pub blinded: [u8; 32],
+    /// An RFC 9474 blind message. Carries no information about the serial inside it.
+    pub blinded: blind::BlindedMessage,
     pub warrant: EarnedWarrant,
 }
 
@@ -192,23 +196,18 @@ pub struct EarnedWarrant {
     pub epoch: u64,
 }
 
-/// One issuer's contribution.
-#[derive(Clone, Copy, Debug)]
-pub struct PartialCredential {
-    share: Share,
-}
-
 // ---------------------------------------------------------------- credential
 
 /// A spendable unit of capacity.
 ///
 /// Fixed size, fixed value, and carrying nothing that appears in the issuance transcript.
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct Credential {
     /// Chosen by the holder, never shown to an issuer, revealed only when spent so that
     /// double spending can be caught.
     pub serial: [u8; 32],
-    witness: u128,
+    /// The issuer's signature over the serial, produced without the issuer seeing it.
+    signature: blind::Signature,
 }
 
 impl core::fmt::Debug for Credential {
@@ -223,75 +222,59 @@ fn hex_short(b: &[u8]) -> String {
     b[..5].iter().map(|x| format!("{x:02x}")).collect()
 }
 
-fn witness_for(secret: u128, serial: &[u8; 32]) -> u128 {
-    let mut h = blake3::Hasher::new();
-    h.update(b"karst.credential.v0");
-    h.update(&secret.to_le_bytes());
-    h.update(serial);
-    let mut out = [0u8; 16];
-    h.finalize_xof().fill(&mut out);
-    u128::from_le_bytes(out) % P
-}
-
 /// A holder's wallet: serials it has chosen and the blinding it used.
 pub struct Wallet {
-    rng: StdRng,
-    pending: Vec<([u8; 32], [u8; 32])>,
+    pending: Vec<([u8; 32], blind::Blinding)>,
+}
+
+impl Default for Wallet {
+    fn default() -> Self {
+        Wallet::new()
+    }
 }
 
 impl Wallet {
-    pub fn new(seed: u64) -> Self {
+    /// A wallet draws serials and blinding factors from the system CSPRNG.
+    ///
+    /// There is no seeded constructor. A wallet whose serials are a deterministic stream from
+    /// a guessable seed is a wallet whose every future spend is predictable.
+    pub fn new() -> Self {
         Wallet {
-            rng: StdRng::seed_from_u64(seed),
             pending: Vec::new(),
         }
     }
 
     /// Choose a serial, blind it, and ask for issuance against earned service.
     ///
-    /// The returned request contains `blake3(serial || blinding)`. Recovering the serial from
-    /// it requires the blinding, which never leaves the wallet.
-    pub fn request(&mut self, warrant: EarnedWarrant) -> IssuanceRequest {
-        let serial: [u8; 32] = self.rng.gen();
-        let blinding: [u8; 32] = self.rng.gen();
-
-        let mut h = blake3::Hasher::new();
-        h.update(b"karst.blind.v0");
-        h.update(&serial);
-        h.update(&blinding);
-        let blinded = *h.finalize().as_bytes();
-
+    /// The issuer sees an RFC 9474 blind message. Recovering the serial from it is not a
+    /// matter of not having the blinding factor: every serial is consistent with every blind
+    /// message, so the issuer's view carries no information about which one it signed.
+    pub fn request(
+        &mut self,
+        pk: &blind::IssuerPublic,
+        warrant: EarnedWarrant,
+    ) -> Result<IssuanceRequest, ValueError> {
+        let mut serial = [0u8; 32];
+        rand::thread_rng().fill(&mut serial);
+        let (blinded, blinding) = blind::blind(pk, &serial).map_err(|_| ValueError::Invalid)?;
         self.pending.push((serial, blinding));
-        IssuanceRequest { blinded, warrant }
+        Ok(IssuanceRequest { blinded, warrant })
     }
 
-    /// Combine partials into a credential. Requires at least the issuer set's threshold.
+    /// Unblind the issuer's signature into a spendable credential.
+    ///
+    /// The issuer's work is checked here, against its public key, before the credential is
+    /// carried away. A holder who found out at spending time would be identified at exactly
+    /// the moment anonymity matters, so a malicious issuer fails at issuance instead.
     pub fn assemble(
         &mut self,
-        set: &IssuerSet,
-        partials: &[PartialCredential],
+        pk: &blind::IssuerPublic,
+        sig: &blind::BlindSignature,
     ) -> Result<Credential, ValueError> {
-        if partials.len() < set.threshold {
-            return Err(ValueError::BelowThreshold {
-                got: partials.len(),
-                need: set.threshold,
-            });
-        }
-        let mut seen = BTreeSet::new();
-        for p in partials {
-            if !seen.insert(p.share.index) {
-                return Err(ValueError::DuplicateIssuer(p.share.index));
-            }
-        }
-
-        let shares: Vec<Share> = partials.iter().map(|p| p.share).collect();
-        let secret = shamir::combine(&shares).ok_or(ValueError::Invalid)?;
-
-        let (serial, _blinding) = self.pending.pop().ok_or(ValueError::Invalid)?;
-        Ok(Credential {
-            serial,
-            witness: witness_for(secret, &serial),
-        })
+        let (serial, blinding) = self.pending.pop().ok_or(ValueError::Invalid)?;
+        let signature =
+            blind::unblind(pk, &serial, &blinding, sig).map_err(|_| ValueError::Invalid)?;
+        Ok(Credential { serial, signature })
     }
 }
 
@@ -327,12 +310,15 @@ impl SpendLedger {
         SpendLedger::default()
     }
 
+    /// Accept a credential, against the issuer's **public** key.
+    ///
+    /// A verifier that needed the issuing secret to check a credential could also mint one.
     pub fn accept(
         &mut self,
-        set: &IssuerSet,
+        pk: &blind::IssuerPublic,
         cred: &Credential,
     ) -> Result<SpendRecord, ValueError> {
-        if witness_for(set.secret, &cred.serial) != cred.witness {
+        if pk.verify(&cred.serial, &cred.signature).is_err() {
             return Err(ValueError::Invalid);
         }
         if !self.spent.insert(cred.serial) {
@@ -404,158 +390,109 @@ mod tests {
         }
     }
 
-    fn issue(set: &IssuerSet, w: &mut Wallet, which: &[usize]) -> Result<Credential, ValueError> {
-        let req = w.request(warrant(1, 1));
-        let partials: Vec<PartialCredential> =
-            which.iter().map(|i| set.partial(*i, &req)).collect();
-        w.assemble(set, &partials)
+    /// One issuer set, generated once. RSA key generation is slow.
+    fn set() -> &'static IssuerSet {
+        use std::sync::OnceLock;
+        static S: OnceLock<IssuerSet> = OnceLock::new();
+        S.get_or_init(|| IssuerSet::new(1, 1).expect("issuer set"))
     }
 
-    /// Sub-threshold partials must not produce a usable credential, not merely an error.
+    fn issue(set: &IssuerSet, w: &mut Wallet) -> Result<Credential, ValueError> {
+        let pk = set.public();
+        let req = w.request(&pk, warrant(1, 1))?;
+        let sig = set.sign(&req)?;
+        w.assemble(&pk, &sig)
+    }
+
+    /// A verifier holds a public key and cannot mint with it.
     ///
-    /// The previous version asserted on the error's own `got` and `need` counters, which are
-    /// computed from the length of the slice passed in. That holds however the cryptography
-    /// behaves: a `combine` that reconstructed the secret from two of three partials would
-    /// still have produced `BelowThreshold` from the arithmetic, because the count check runs
-    /// first and never reaches the material.
+    /// The credential used to be a 61-bit symmetric tag recomputed from the issuing secret, so
+    /// every verifier held everything needed to forge, and the key itself fell to ~2^61 offline
+    /// hashes against one observed credential. Verification against a public key is the whole
+    /// difference between a credential and a shared password.
     #[test]
-    fn sub_threshold_partials_do_not_reconstruct_a_usable_credential() {
-        let set = IssuerSet::new(3, 5, 1);
-        let mut w = Wallet::new(9);
-        let good = issue(&set, &mut w, &[0, 1, 2]).expect("a threshold subset must mint");
+    fn a_verifier_can_check_a_credential_and_cannot_mint_one() {
+        let set = set();
+        let mut w = Wallet::new();
+        let cred = issue(set, &mut w).expect("issuance");
 
-        // The count check, kept because it is the caller-facing behaviour.
-        let mut w2 = Wallet::new(9);
-        assert_eq!(
-            issue(&set, &mut w2, &[0, 1]),
-            Err(ValueError::BelowThreshold { got: 2, need: 3 })
-        );
+        let pk = set.public();
+        let mut ledger = SpendLedger::new();
+        assert!(ledger.accept(&pk, &cred).is_ok());
 
-        // And the property underneath it, which the count check never reaches: fewer than a
-        // threshold of shares do not reconstruct the secret.
-        let secret = 0x0123_4567_89ab_cdefu128;
-        let shares = shamir::split(secret, 3, 5, 1);
-        assert_eq!(
-            shamir::combine(&shares[..3]),
-            Some(secret),
-            "a threshold must recombine, or the negative below is vacuous"
-        );
-        assert_ne!(
-            shamir::combine(&shares[..2]),
-            Some(secret),
-            "two shares reconstructed what three are supposed to"
-        );
-        let _ = good;
+        // Everything a verifier holds is public, and a different issuer's key does not accept
+        // this credential, so holding one verifier's state mints nothing.
+        let other = IssuerSet::new(1, 1).unwrap();
+        let mut l2 = SpendLedger::new();
+        assert_eq!(l2.accept(&other.public(), &cred), Err(ValueError::Invalid));
     }
 
+    /// The issuance transcript and the spend transcript share no field.
     #[test]
-    fn any_threshold_subset_produces_a_valid_credential() {
-        let set = IssuerSet::new(3, 5, 1);
+    fn issuance_and_spending_share_nothing() {
+        let set = set();
+        let pk = set.public();
+        let mut w = Wallet::new();
+        let req = w.request(&pk, warrant(1, 1)).unwrap();
+        let seen_by_issuer = req.blinded.to_bytes();
 
-        // A fresh ledger per combination. Reusing one would reject the second credential as
-        // a double spend, since a wallet seeded identically chooses the same serial, and
-        // that rejection is correct behaviour rather than a failure of the subset.
-        for combo in [[0, 1, 2], [1, 3, 4], [0, 2, 4]] {
-            let mut w = Wallet::new(9);
-            let c = issue(&set, &mut w, &combo).unwrap();
-            let mut led = SpendLedger::new();
-            assert!(led.accept(&set, &c).is_ok(), "combo {combo:?} rejected");
-        }
+        let sig = set.sign(&req).unwrap();
+        let cred = w.assemble(&pk, &sig).unwrap();
+
+        assert!(
+            !seen_by_issuer
+                .windows(32)
+                .any(|win| win == cred.serial),
+            "the serial appeared in what the issuer saw"
+        );
     }
 
     #[test]
     fn distinct_wallets_produce_distinct_credentials() {
-        let set = IssuerSet::new(3, 5, 1);
+        let set = set();
+        let pk = set.public();
         let mut led = SpendLedger::new();
-        for seed in 0..5u64 {
-            let mut w = Wallet::new(seed);
-            let c = issue(&set, &mut w, &[0, 1, 2]).unwrap();
-            assert!(led.accept(&set, &c).is_ok(), "seed {seed} collided");
+        for i in 0..3u32 {
+            let mut w = Wallet::new();
+            let c = issue(set, &mut w).unwrap();
+            assert!(led.accept(&pk, &c).is_ok(), "credential {i} collided");
         }
-        assert_eq!(led.spent_count(), 5);
+        assert_eq!(led.spent_count(), 3);
     }
 
-    #[test]
-    fn one_issuer_contributing_twice_does_not_reach_the_threshold() {
-        let set = IssuerSet::new(3, 5, 1);
-        let mut w = Wallet::new(9);
-        let req = w.request(warrant(1, 1));
-        let partials = vec![
-            set.partial(0, &req),
-            set.partial(0, &req),
-            set.partial(1, &req),
-        ];
-        assert_eq!(
-            w.assemble(&set, &partials),
-            Err(ValueError::DuplicateIssuer(1))
-        );
-    }
-
-    /// **The property this whole design exists for.** The issuers' view and the verifier's
-    /// view have no field in common, so no amount of collusion between them links a spend to
-    /// an acquisition.
-    /// The commitment issuers see must be unpredictable from the serial a verifier sees.
+    /// Two wallets asking for the same thing present different values to the issuer.
     ///
-    /// The previous version asserted the two were unequal, which holds for any two distinct
-    /// values however they are derived, and then ruled out exactly one guess at the derivation
-    /// out of a space of 2^256. Neither says the commitment is unlinkable. What does is that
-    /// the **same serial** produces a **different commitment** every time, which can only
-    /// happen if the blinding is fresh rather than a function of the serial.
-    /// What the issuance and spend transcripts share, tested for what a test can establish.
-    ///
-    /// The previous version asserted the commitment and the serial were unequal, which holds
-    /// for any two distinct values however they are derived, then ruled out exactly one guess
-    /// at the derivation from a space of 2^256.
-    ///
-    /// The property that matters is **computational unlinkability**, and no unit test
-    /// establishes it: it rests on the blind signature construction, not on anything
-    /// observable here. Writing a test that appeared to prove it would be worse than writing
-    /// none. What is testable is that the commitment is not a function of the warrant, so two
-    /// wallets requesting the same thing do not present the same commitment to an issuer.
-    ///
-    /// Note also that `Wallet::new` is seeded for reproducibility, so two wallets on one seed
-    /// agree on everything by construction. A deployment drawing that seed predictably would
-    /// lose unlinkability without any of this noticing.
+    /// This is the testable shadow of unlinkability, not unlinkability itself. That property
+    /// rests on the blind signature construction and on nothing observable from here, and a
+    /// test that appeared to establish it would be worse than none.
     #[test]
     fn the_commitment_is_not_a_function_of_the_warrant() {
-        let set = IssuerSet::new(2, 3, 1);
-        let same_warrant = warrant(1, 1);
+        let set = set();
+        let pk = set.public();
+        let same = warrant(1, 1);
 
         let mut blinded = std::collections::BTreeSet::new();
-        let mut serials = std::collections::BTreeSet::new();
-        for seed in 0..32u64 {
-            let mut w = Wallet::new(seed);
-            let req = w.request(same_warrant.clone());
-            let cred = w
-                .assemble(&set, &[set.partial(0, &req), set.partial(1, &req)])
-                .unwrap();
-            let mut led = SpendLedger::new();
-            let rec = led.accept(&set, &cred).unwrap();
-
-            assert_ne!(req.blinded, rec.serial);
-            blinded.insert(req.blinded);
-            serials.insert(rec.serial);
+        for _ in 0..8 {
+            let mut w = Wallet::new();
+            let req = w.request(&pk, same.clone()).unwrap();
+            assert!(
+                blinded.insert(req.blinded.to_bytes()),
+                "two requests for the same warrant produced the same commitment"
+            );
         }
-
-        // Thirty-two identical warrants, thirty-two distinct commitments and serials. A
-        // commitment derived from the warrant alone would collapse to one value.
-        assert_eq!(blinded.len(), 32, "the commitment repeats across wallets");
-        assert_eq!(serials.len(), 32, "the serial repeats across wallets");
-
-        // And no commitment is any serial, so the two transcripts share no value at all.
-        assert!(blinded.is_disjoint(&serials));
     }
 
     #[test]
     fn every_credential_is_the_same_size_so_amount_leaks_nothing() {
-        let set = IssuerSet::new(2, 3, 1);
+        let set = set();
+        let pk = set.public();
         let mut led = SpendLedger::new();
         let mut sizes = BTreeSet::new();
 
         for seed in 0..8u64 {
-            let mut w = Wallet::new(seed);
-            let c = issue(&set, &mut w, &[0, 1]).unwrap();
-            let rec = led.accept(&set, &c).unwrap();
+            let mut w = Wallet::new();
+            let c = issue(set, &mut w).unwrap();
+            let rec = led.accept(&pk, &c).unwrap();
             sizes.insert(rec.units);
             assert_eq!(std::mem::size_of_val(&c.serial), 32);
         }
@@ -565,52 +502,55 @@ mod tests {
 
     #[test]
     fn a_serial_cannot_be_spent_twice_at_one_verifier() {
-        let set = IssuerSet::new(2, 3, 1);
-        let mut w = Wallet::new(9);
-        let c = issue(&set, &mut w, &[0, 1]).unwrap();
+        let set = set();
+        let pk = set.public();
+        let mut w = Wallet::new();
+        let c = issue(set, &mut w).unwrap();
 
         let mut led = SpendLedger::new();
-        assert!(led.accept(&set, &c).is_ok());
-        assert_eq!(led.accept(&set, &c), Err(ValueError::AlreadySpent));
+        assert!(led.accept(&pk, &c).is_ok());
+        assert_eq!(led.accept(&pk, &c), Err(ValueError::AlreadySpent));
         assert_eq!(led.spent_count(), 1);
     }
 
     /// The limit, tested so it cannot be quietly forgotten.
     #[test]
     fn two_disconnected_verifiers_both_accept_the_same_credential() {
-        let set = IssuerSet::new(2, 3, 1);
-        let mut w = Wallet::new(9);
-        let c = issue(&set, &mut w, &[0, 1]).unwrap();
+        let set = set();
+        let pk = set.public();
+        let mut w = Wallet::new();
+        let c = issue(set, &mut w).unwrap();
 
         let mut a = SpendLedger::new();
         let mut b = SpendLedger::new();
-        assert!(a.accept(&set, &c).is_ok());
+        assert!(a.accept(&pk, &c).is_ok());
         assert!(
-            b.accept(&set, &c).is_ok(),
+            b.accept(&pk, &c).is_ok(),
             "offline verification cannot see another verifier's ledger"
         );
     }
 
     #[test]
     fn a_forged_credential_does_not_verify() {
-        let set = IssuerSet::new(2, 3, 1);
-        let mut w = Wallet::new(9);
-        let mut c = issue(&set, &mut w, &[0, 1]).unwrap();
+        let set = set();
+        let pk = set.public();
+        let mut w = Wallet::new();
+        let mut c = issue(set, &mut w).unwrap();
         c.serial[0] ^= 0xff;
 
         let mut led = SpendLedger::new();
-        assert_eq!(led.accept(&set, &c), Err(ValueError::Invalid));
+        assert_eq!(led.accept(&pk, &c), Err(ValueError::Invalid));
     }
 
     #[test]
     fn a_credential_from_another_issuer_set_does_not_verify() {
-        let mine = IssuerSet::new(2, 3, 1);
-        let theirs = IssuerSet::new(2, 3, 2);
-        let mut w = Wallet::new(9);
-        let c = issue(&theirs, &mut w, &[0, 1]).unwrap();
+        let mine = set();
+        let theirs = IssuerSet::new(1, 1).unwrap();
+        let mut w = Wallet::new();
+        let c = issue(&theirs, &mut w).unwrap();
 
         let mut led = SpendLedger::new();
-        assert_eq!(led.accept(&mine, &c), Err(ValueError::Invalid));
+        assert_eq!(led.accept(&mine.public(), &c), Err(ValueError::Invalid));
     }
 
     #[test]
@@ -636,21 +576,24 @@ mod tests {
     /// The loop that removes the bank: capacity is earned by providing capacity.
     #[test]
     fn service_converts_to_credentials_and_credentials_convert_to_service() {
-        let set = IssuerSet::new(2, 3, 1);
+        let set = set();
+        let pk = set.public();
         let mut earn = EarnLedger::new();
         let mut spend = SpendLedger::new();
         let relay = [3u8; 32];
 
         earn.credit(relay, 3);
 
-        let mut w = Wallet::new(11);
+        let mut w = Wallet::new();
         let mut minted = 0;
         for _ in 0..3 {
-            let req = w.request(EarnedWarrant { relay, units: 1, epoch: 1 });
+            let req = w
+                .request(&pk, EarnedWarrant { relay, units: 1, epoch: 1 })
+                .unwrap();
             earn.draw(&req.warrant).unwrap();
-            let partials = vec![set.partial(0, &req), set.partial(1, &req)];
-            let c = w.assemble(&set, &partials).unwrap();
-            spend.accept(&set, &c).unwrap();
+            let sig = set.sign(&req).unwrap();
+            let c = w.assemble(&pk, &sig).unwrap();
+            spend.accept(&pk, &c).unwrap();
             minted += 1;
         }
 
