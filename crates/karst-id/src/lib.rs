@@ -48,14 +48,29 @@ impl std::error::Error for IdError {}
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Address([u8; ADDR_LEN]);
 
+/// Decode a verifying key, refusing the ones that are not really keys.
+///
+/// `VerifyingKey::from_bytes` decompresses the point and stops there, so it accepts the
+/// small-order elements. `ed25519-dalek`'s own documentation says a weak key "can be used to
+/// generate a signature that's valid for almost every message", which makes accepting one at
+/// the identity layer a way to mint an address whose signatures mean nothing.
+///
+/// Refused at the door, so no such key is ever inside an `Address` or a `Peer`.
+fn decode_key(bytes: &[u8; 32]) -> Result<VerifyingKey, IdError> {
+    let vk = VerifyingKey::from_bytes(bytes).map_err(|_| IdError::MalformedKey)?;
+    if vk.is_weak() {
+        return Err(IdError::MalformedKey);
+    }
+    Ok(vk)
+}
+
 impl Address {
     pub fn from_key(vk: &VerifyingKey) -> Self {
         Address(*blake3::hash(vk.as_bytes()).as_bytes())
     }
 
     pub fn from_key_bytes(bytes: &[u8; 32]) -> Result<Self, IdError> {
-        let vk = VerifyingKey::from_bytes(bytes).map_err(|_| IdError::MalformedKey)?;
-        Ok(Address::from_key(&vk))
+        Ok(Address::from_key(&decode_key(bytes)?))
     }
 
     pub fn as_bytes(&self) -> &[u8; ADDR_LEN] {
@@ -143,7 +158,7 @@ pub struct Peer {
 
 impl Peer {
     pub fn from_key_bytes(bytes: &[u8; 32]) -> Result<Self, IdError> {
-        let vk = VerifyingKey::from_bytes(bytes).map_err(|_| IdError::MalformedKey)?;
+        let vk = decode_key(bytes)?;
         Ok(Peer {
             address: Address::from_key(&vk),
             vk,
@@ -158,8 +173,21 @@ impl Peer {
         self.vk.to_bytes()
     }
 
+    /// Verify a signature, strictly.
+    ///
+    /// `verify_strict` rather than `verify`. The difference is not a matter of taste: the
+    /// permissive equation is cofactorless and accepts small-order components, so a signature
+    /// can verify under more than one key and a weak key produces signatures valid for almost
+    /// any message. Chalkias, Garillot and Nikolaenko (*Taming the Many EdDSAs*, SSR 2020)
+    /// catalogue the resulting divergence between implementations; ZIP-215 is the same
+    /// question answered for a deployed system.
+    ///
+    /// This layer is what every other layer names things with, so a signature that means two
+    /// things here means two things everywhere.
     pub fn verify(&self, msg: &[u8], sig: &Signature) -> Result<(), IdError> {
-        self.vk.verify(msg, sig).map_err(|_| IdError::BadSignature)
+        self.vk
+            .verify_strict(msg, sig)
+            .map_err(|_| IdError::BadSignature)
     }
 }
 
@@ -171,6 +199,87 @@ impl fmt::Debug for Peer {
 
 #[cfg(test)]
 mod tests {
+    use ed25519_dalek::Signer;
+
+    /// A small-order key is not an identity, and is refused before it becomes one.
+    ///
+    /// `VerifyingKey::from_bytes` decompresses and stops, so it accepts these. dalek's own
+    /// documentation on `is_weak` says such a key "can be used to generate a signature that's
+    /// valid for almost every message", which at the identity layer means an address whose
+    /// signatures carry no information.
+    #[test]
+    fn a_weak_key_cannot_become_an_identity() {
+        // The eight small-order points on edwards25519, from RFC 8032 and the dalek tests.
+        let weak: [[u8; 32]; 7] = [
+            [0u8; 32],
+            {
+                let mut b = [0u8; 32];
+                b[0] = 1;
+                b
+            },
+            hex32("0000000000000000000000000000000000000000000000000000000000000080"),
+            hex32("0100000000000000000000000000000000000000000000000000000000000080"),
+            hex32("26e8958fc2b227b045c3f489f2ef98f0d5dfac05d3c63339b13802886d53fc05"),
+            hex32("c7176a703d4dd84fba3c0b760d10670f2a2053fa2c39ccc64ec7fd7792ac037a"),
+            hex32("ecffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff7f"),
+        ];
+        let mut refused = 0;
+        for k in weak {
+            if ed25519_dalek::VerifyingKey::from_bytes(&k).is_ok() {
+                assert_eq!(
+                    Peer::from_key_bytes(&k).err(),
+                    Some(IdError::MalformedKey),
+                    "a decodable weak key was accepted as a peer"
+                );
+                assert!(Address::from_key_bytes(&k).is_err());
+                refused += 1;
+            }
+        }
+        assert!(refused > 0, "no weak key decoded, so this test proved nothing");
+    }
+
+    /// An honest key is still accepted, so the check above is not simply refusing everything.
+    #[test]
+    fn an_ordinary_key_still_verifies() {
+        let id = Identity::from_seed([5u8; 32]);
+        let peer = Peer::from_key_bytes(&id.key_bytes()).expect("an ordinary key");
+        let sig = id.sign(b"hello");
+        assert!(peer.verify(b"hello", &sig).is_ok());
+        assert!(peer.verify(b"goodbye", &sig).is_err());
+    }
+
+    /// A tampered signature is refused.
+    ///
+    /// This does **not** exercise the difference between `verify` and `verify_strict`: a
+    /// substituted R fails the recomputation check under either equation, so the test passes
+    /// with strictness removed. Distinguishing the two needs a signature that satisfies the
+    /// cofactorless equation while carrying a small-order component, which means a known
+    /// answer vector from Chalkias, Garillot and Nikolaenko rather than one constructed here.
+    ///
+    /// What is directly tested is the half that matters most at this layer and that is
+    /// mutation-verified: a weak key never becomes an identity, so the keys `verify_strict`
+    /// exists to catch cannot enter in the first place.
+    #[test]
+    fn a_tampered_signature_is_refused() {
+        let id = Identity::from_seed([6u8; 32]);
+        let peer = Peer::from_key_bytes(&id.key_bytes()).unwrap();
+        let sig = id.sign(b"m");
+
+        let mut raw = sig.to_bytes();
+        raw[..32].copy_from_slice(&hex32(
+            "0100000000000000000000000000000000000000000000000000000000000080",
+        ));
+        assert!(peer.verify(b"m", &Signature::from_bytes(&raw)).is_err());
+    }
+
+    fn hex32(s: &str) -> [u8; 32] {
+        let mut out = [0u8; 32];
+        for (i, b) in out.iter_mut().enumerate() {
+            *b = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).unwrap();
+        }
+        out
+    }
+
     use super::*;
 
     #[test]
