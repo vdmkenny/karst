@@ -149,7 +149,6 @@ impl MixNode {
         let now_ms = self.clock.advance(reading_ms);
         self.seen.rotate(now_ms / self.epoch_ms);
 
-
         match packet.peel(&self.key, &mut self.seen) {
             Err(MixError::BadMac) => {
                 self.stats.rejected_mac += 1;
@@ -265,10 +264,8 @@ impl MixNode {
             self.stats.evicted += 1;
         }
         self.ticket += 1;
-        self.queue.insert(
-            (release_at, self.ticket),
-            Pending { release_at, what },
-        );
+        self.queue
+            .insert((release_at, self.ticket), Pending { release_at, what });
         Ok(())
     }
 
@@ -433,7 +430,10 @@ mod adversarial {
         let p = pkt(&n, 1, 1);
         n.accept(p.clone(), 5_000_000).unwrap();
         // Clock yanked back an hour.
-        assert_eq!(n.accept(p, 1_400_000), Err(NodeError::Mix(MixError::Replay)));
+        assert_eq!(
+            n.accept(p, 1_400_000),
+            Err(NodeError::Mix(MixError::Replay))
+        );
     }
 
     /// A clock jumped forward must not age out the replay window either.
@@ -565,7 +565,11 @@ mod adversarial {
                 "honest packet {i} refused while a squatter held the queue"
             );
         }
-        assert_eq!(n.stats().evicted, 32, "the squatter should have been displaced");
+        assert_eq!(
+            n.stats().evicted,
+            32,
+            "the squatter should have been displaced"
+        );
 
         // And all of what is left is the honest traffic, leaving on its own schedule.
         let out = n.due(40);
@@ -666,7 +670,8 @@ mod adversarial {
     fn a_clock_yanked_forward_does_not_flush_the_queue() {
         let mut n = node();
         for i in 0..32u8 {
-            n.accept(pkt(&n, MixNode::MAX_DELAY_MS, i + 1), 1000).unwrap();
+            n.accept(pkt(&n, MixNode::MAX_DELAY_MS, i + 1), 1000)
+                .unwrap();
         }
         assert_eq!(n.queued(), 32);
         // A year into the future, in one reading.

@@ -74,10 +74,7 @@ pub mod shamir;
 
 use std::collections::{BTreeMap, BTreeSet};
 
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-
-use shamir::{Share, P};
+use rand::Rng;
 
 /// Every credential is worth exactly one unit.
 ///
@@ -124,17 +121,17 @@ impl std::error::Error for ValueError {}
 
 // ---------------------------------------------------------------- issuance
 
-/// One issuer's share of the issuing key. No issuer holds the whole thing.
-#[derive(Clone, Copy, Debug)]
-pub struct Issuer {
-    share: Share,
-}
-
-/// A threshold issuer set. `threshold` of `issuers.len()` must cooperate to issue, and fewer
-/// than `threshold` colluding issuers learn nothing about the key.
+/// An issuer set.
 ///
-/// This is what stops L14 becoming error 03. A single issuer sees every request and can link
-/// every one to the party that made it.
+/// `threshold` is retained because the earn side still speaks in those terms; it is **not**
+/// enforced by the credential, because threshold issuance is not composed with the blind
+/// signature that replaced the placeholder (#133). The `Issuer` type that held one Shamir
+/// share of a reconstructable key is gone with it: that arrangement returned the share itself
+/// to whoever asked, so one honest issuance handed over the master secret.
+///
+/// What error 03 demands is **plurality of issuer sets**, and that holds: anyone may run one,
+/// many coexist, and there is no registry. Threshold *within* a set is a different property
+/// and it is absent.
 pub struct IssuerSet {
     pub threshold: usize,
     key: blind::IssuerKey,
@@ -148,8 +145,7 @@ impl IssuerSet {
     pub fn new(threshold: usize, _count: usize) -> Result<Self, ValueError> {
         Ok(IssuerSet {
             threshold,
-            key: blind::IssuerKey::generate(blind::ISSUER_BITS)
-                .map_err(|_| ValueError::Invalid)?,
+            key: blind::IssuerKey::generate(blind::ISSUER_BITS).map_err(|_| ValueError::Invalid)?,
         })
     }
 
@@ -252,7 +248,13 @@ impl EarnedWarrant {
     pub fn verify(&self) -> Result<(), ValueError> {
         let peer = karst_id::Peer::from_key_bytes(&self.served).map_err(|_| ValueError::Invalid)?;
         peer.verify(
-            &Self::signing_bytes(&self.relay, self.units, self.epoch, &self.served, &self.nonce),
+            &Self::signing_bytes(
+                &self.relay,
+                self.units,
+                self.epoch,
+                &self.served,
+                &self.nonce,
+            ),
             &karst_id::Signature::from_bytes(&self.signature),
         )
         .map_err(|_| ValueError::Invalid)
@@ -428,8 +430,7 @@ impl EarnLedger {
     }
 
     pub fn balance(&self, relay: &[u8; 32]) -> u64 {
-        self.earned.get(relay).copied().unwrap_or(0)
-            - self.drawn.get(relay).copied().unwrap_or(0)
+        self.earned.get(relay).copied().unwrap_or(0) - self.drawn.get(relay).copied().unwrap_or(0)
     }
 
     /// Refuse warrants from before this epoch.
@@ -525,7 +526,9 @@ mod tests {
             earn.draw(&EarnedWarrant::attest(&served(), relay, 1, 6)),
             Err(ValueError::Invalid)
         );
-        assert!(earn.draw(&EarnedWarrant::attest(&served(), relay, 1, 7)).is_ok());
+        assert!(earn
+            .draw(&EarnedWarrant::attest(&served(), relay, 1, 7))
+            .is_ok());
     }
 
     /// The party attesting that a relay carried its traffic.
@@ -592,9 +595,7 @@ mod tests {
         let cred = w.assemble(&pk, &sig).unwrap();
 
         assert!(
-            !seen_by_issuer
-                .windows(32)
-                .any(|win| win == cred.serial),
+            !seen_by_issuer.windows(32).any(|win| win == cred.serial),
             "the serial appeared in what the issuer saw"
         );
     }
@@ -641,7 +642,7 @@ mod tests {
         let mut led = SpendLedger::new();
         let mut sizes = BTreeSet::new();
 
-        for seed in 0..8u64 {
+        for _ in 0..8u64 {
             let mut w = Wallet::new();
             let c = issue(set, &mut w).unwrap();
             let rec = led.accept(&pk, &c).unwrap();
@@ -712,16 +713,24 @@ mod tests {
 
         assert_eq!(
             earn.draw(&EarnedWarrant::attest(&served(), relay, 5, 1)),
-            Err(ValueError::Unearned { requested: 5, earned: 0 })
+            Err(ValueError::Unearned {
+                requested: 5,
+                earned: 0
+            })
         );
 
         earn.credit(relay, 10);
-        assert!(earn.draw(&EarnedWarrant::attest(&served(), relay, 6, 1)).is_ok());
+        assert!(earn
+            .draw(&EarnedWarrant::attest(&served(), relay, 6, 1))
+            .is_ok());
         assert_eq!(earn.balance(&relay), 4);
 
         assert_eq!(
             earn.draw(&EarnedWarrant::attest(&served(), relay, 5, 1)),
-            Err(ValueError::Unearned { requested: 5, earned: 4 })
+            Err(ValueError::Unearned {
+                requested: 5,
+                earned: 4
+            })
         );
     }
 

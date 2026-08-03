@@ -86,10 +86,18 @@ impl Checkpoint {
 
     pub fn publish(&self, publisher: &Identity) -> Object {
         let mut e = Enc::new();
-        e.u64(self.sequence).cid(&self.digest).opt_cid(self.prev.as_ref());
+        e.u64(self.sequence)
+            .cid(&self.digest)
+            .opt_cid(self.prev.as_ref());
         // The lineage link is carried at L6 as well, so an object holding a checkpoint
         // supersedes the object holding the one before it.
-        Object::create(publisher, CHECKPOINT_KIND, self.sequence, e.finish(), self.prev)
+        Object::create(
+            publisher,
+            CHECKPOINT_KIND,
+            self.sequence,
+            e.finish(),
+            self.prev,
+        )
     }
 
     pub fn from_object(obj: &Object) -> Result<Checkpoint, ObjectError> {
@@ -692,7 +700,7 @@ mod tests {
         let pubr = ident(1);
         let ch = chain(&pubr, &[1, 2, 3, 4]);
         let newer = ch[3].0;
-        let older = ch[1].0;
+        let _older = ch[1].0;
 
         let mut cos = Cosigned::new(&ch[1].1).unwrap();
         let chosen: Vec<Address> = (200..203u32).map(|i| ident(i).address()).collect();
@@ -860,7 +868,9 @@ mod tests {
         let chosen: Vec<Address> = (700..702u32).map(|i| ident(i).address()).collect();
         for i in 700..702u32 {
             let mut w = Witness::new(ident(i));
-            let sig = w.cosign(&obj).expect("a fresh witness has nothing to refuse");
+            let sig = w
+                .cosign(&obj)
+                .expect("a fresh witness has nothing to refuse");
             cos.attach(w.key(), sig);
         }
         let policy = WitnessPolicy::new(chosen, 2);
@@ -966,5 +976,4 @@ mod tests {
         }
         .is_valid());
     }
-
 }

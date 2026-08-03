@@ -8,3 +8,6 @@ description = "KARST L9 Authority: attenuable capability chains, verifiable offl
 [dependencies]
 karst-id.workspace = true
 karst-object.workspace = true
+
+[lints]
+workspace = true

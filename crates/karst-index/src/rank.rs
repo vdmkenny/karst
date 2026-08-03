@@ -252,10 +252,7 @@ impl Ranker {
                         // A claim speaks about the target rather than about the query, so it
                         // counts at the relevance of whatever it is talking about.
                         untrusted_relevance = untrusted_relevance.max(
-                            c.terms
-                                .iter()
-                                .filter(|t| q.iter().any(|x| x == *t))
-                                .count() as f64
+                            c.terms.iter().filter(|t| q.iter().any(|x| x == *t)).count() as f64
                                 / q.len().max(1) as f64,
                         );
                     }
@@ -303,13 +300,7 @@ mod tests {
         ident(n).address()
     }
 
-    fn ann(
-        target: Cid,
-        who: u32,
-        kind: &str,
-        terms: &[String],
-        at: u64,
-    ) -> Verified<Announcement> {
+    fn ann(target: Cid, who: u32, kind: &str, terms: &[String], at: u64) -> Verified<Announcement> {
         let id = ident(who);
         let obj = Announcement::new(target, id.address(), kind, terms, at)
             .unwrap()
@@ -317,13 +308,7 @@ mod tests {
         Announcement::from_object(&obj).unwrap()
     }
 
-    fn clm(
-        target: Cid,
-        who: u32,
-        verdict: Verdict,
-        terms: &[String],
-        at: u64,
-    ) -> Verified<Claim> {
+    fn clm(target: Cid, who: u32, verdict: Verdict, terms: &[String], at: u64) -> Verified<Claim> {
         let id = ident(who);
         let obj = Claim::new(target, id.address(), verdict, terms, at)
             .unwrap()
@@ -345,7 +330,6 @@ mod tests {
             .publish(&id, at);
         Announcement::from_object(&obj).unwrap()
     }
-
 
     fn terms(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -390,8 +374,15 @@ mod tests {
         // Two defences compose. The catalogue refused to hold more than its untrusted bound,
         // and the ranker saturates whatever did get in. Either alone would be enough here;
         // both matter because the bound protects memory and the saturation protects rank.
-        assert_eq!(results[1].untrusted_sources, Catalogue::DEFAULT_UNTRUSTED_CAPACITY);
-        assert!(results[1].score <= 0.5, "saturation failed: {}", results[1].score);
+        assert_eq!(
+            results[1].untrusted_sources,
+            Catalogue::DEFAULT_UNTRUSTED_CAPACITY
+        );
+        assert!(
+            results[1].score <= 0.5,
+            "saturation failed: {}",
+            results[1].score
+        );
     }
 
     /// Manufacturing an identity must gain exactly nothing.
@@ -524,7 +515,10 @@ mod tests {
 
         let moderator = 50u32;
         t.set(addr(moderator), 1.0);
-        cat.claim(clm(liar, moderator, Verdict::Dispute, &terms(&["recipes"]), 1), &t);
+        cat.claim(
+            clm(liar, moderator, Verdict::Dispute, &terms(&["recipes"]), 1),
+            &t,
+        );
         let after = Ranker::new(t).search(&cat, &terms(&["recipes"]));
         assert_eq!(after[0].target, honest);
         assert_eq!(after[1].target, liar);
@@ -611,7 +605,13 @@ mod tests {
 
         // Now the flood.
         for i in 0..5_000u32 {
-            announce_as(&mut cat, Cid::of(&i.to_le_bytes()), 9000 + i, &["topic"], &t);
+            announce_as(
+                &mut cat,
+                Cid::of(&i.to_le_bytes()),
+                9000 + i,
+                &["topic"],
+                &t,
+            );
         }
 
         let r = Ranker::new(t).search(&cat, &terms(&["topic"]));
@@ -678,10 +678,7 @@ mod tests {
         for i in 0..n {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
-            cat.announce(
-                ann_raw(Cid::of(&b), b, "doc", &terms(&["the"]), 0),
-                &trust,
-            );
+            cat.announce(ann_raw(Cid::of(&b), b, "doc", &terms(&["the"]), 0), &trust);
         }
         let (hits, cost) = Ranker::new(Trust::new()).search_counted(&cat, &terms(&["the"]));
         assert_eq!(hits.len(), n as usize);
@@ -704,10 +701,7 @@ mod tests {
         for i in 0..500u32 {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
-            cat.announce(
-                ann_raw(Cid::of(&b), b, "doc", &terms(&["t"]), 0),
-                &trust,
-            );
+            cat.announce(ann_raw(Cid::of(&b), b, "doc", &terms(&["t"]), 0), &trust);
         }
         let r = Ranker::new(Trust::new());
         let (hits, cost) = r.search_top(&cat, &terms(&["t"]), 10);
@@ -772,5 +766,4 @@ mod tests {
             assert!(w[0].score >= w[1].score, "the order is not sorted");
         }
     }
-
 }

@@ -335,7 +335,7 @@ mod tests {
         let mut s = Sentinel::new(Baseline::Fixed(0.05), 0.001, 1_000);
         assert!(!s.absorb(b""));
         assert!(!s.absorb(b"hello"));
-        assert!(!s.absorb(&vec![0u8; 24]));
+        assert!(!s.absorb(&[0u8; 24]));
         // Right length, wrong magic.
         assert!(!s.absorb(&[b'X'; 24]));
         assert_eq!(s.samples(), 0);
@@ -360,7 +360,11 @@ mod tests {
         mesh.run(1_200, &mut rng);
         let loop_item = mesh.provider.collect(&alice.mailbox()).items.remove(0);
 
-        mesh.inject(alice.send(&mesh.dir, &bob.contact(), b"real", &mut rng).unwrap());
+        mesh.inject(
+            alice
+                .send(&mesh.dir, &bob.contact(), b"real", &mut rng)
+                .unwrap(),
+        );
         mesh.run(1_200, &mut rng);
         let mail_item = mesh.provider.collect(&bob.mailbox()).items.remove(0);
 

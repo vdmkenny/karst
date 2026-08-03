@@ -1,0 +1,77 @@
+name: CI
+
+# Two jobs on purpose. `test` is the unit suite; `demos` runs the composed binaries and
+# checks their exit codes.
+#
+# The split exists because of a specific failure. A refactor moved one status check past one
+# cursor advance, every one of 551 unit tests passed, and the composed stack delivered zero of
+# five objects. The tests own one crate each and the defect lived in the ordering between two,
+# so nothing that tests a crate in isolation could have found it.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets
+
+      - name: Tests
+        run: cargo test --workspace
+
+      # The README states a test count and it has gone stale three times, twice because a
+      # `sed` matched nothing and reported success. A test checks it; this prints it.
+      - name: Test count
+        run: |
+          n=$(cargo test --workspace 2>&1 | awk -F'[ ;]' '/^test result/ {s+=$4} END {print s}')
+          echo "suite: $n tests"
+
+  demos:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      # Every one of these exits non-zero when its own claims stop holding. They bind real UDP
+      # sockets on loopback and run threads, which is the point: they exercise the ordering
+      # between crates that unit tests cannot reach.
+      - name: The stack, composed
+        run: cargo run --release -q -p karst-stack --bin karst-stack-demo
+
+      - name: A network on real sockets
+        run: cargo run --release -q -p karst-net --bin karst-net-demo
+
+      - name: The layers above the network
+        run: cargo run --release -q -p karst-demo
+
+      - name: Discovery under sybil pressure
+        run: cargo run --release -q -p karst-index --bin karst-search
+
+      - name: Anonymity against passive and active adversaries
+        run: cargo run --release -q -p karst-mix --bin karst-mixsim
+
+      - name: Does flattening returns prevent capture
+        run: cargo run --release -q -p karst-symmetry --bin karst-symsim
+
+      - name: What the mixnet cannot carry
+        run: cargo run --release -q -p karst-net --bin karst-bulkcost

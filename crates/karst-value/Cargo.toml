@@ -13,3 +13,6 @@ rand.workspace = true
 rsa.workspace = true
 num-bigint-dig.workspace = true
 blind-rsa-signatures = "0.17"
+
+[lints]
+workspace = true

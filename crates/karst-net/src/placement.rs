@@ -393,7 +393,10 @@ mod tests {
         let target = addr(77);
         let beacon = Beacon::new(100, [9u8; 32]);
         let established: Vec<Candidate> = (0..64u16)
-            .map(|id| Candidate { id, joined_epoch: 10 })
+            .map(|id| Candidate {
+                id,
+                joined_epoch: 10,
+            })
             .collect();
 
         // An adversary who grinds a winning id but only just arrived.

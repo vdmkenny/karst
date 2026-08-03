@@ -196,7 +196,11 @@ mod tests {
     fn emission_timing_is_identical_whether_saturated_or_silent() {
         let silent = schedule_of(Pacer::seeded(20.0, 99), None, 20_000);
         let busy = schedule_of(Pacer::seeded(20.0, 99), Some(5), 20_000);
-        assert!(silent.len() > 300, "vacuous: only {} emissions", silent.len());
+        assert!(
+            silent.len() > 300,
+            "vacuous: only {} emissions",
+            silent.len()
+        );
         assert_eq!(
             silent, busy,
             "the queue changed when packets left, so the link is an oracle"
@@ -212,7 +216,11 @@ mod tests {
         }
         let s = p.stats();
         assert_eq!(s.real, 0);
-        assert!(s.cover > 150, "expected roughly 200 emissions, got {}", s.cover);
+        assert!(
+            s.cover > 150,
+            "expected roughly 200 emissions, got {}",
+            s.cover
+        );
     }
 
     /// Offering beyond the schedule produces latency, not packets.
@@ -259,7 +267,8 @@ mod tests {
         // Exponential: standard deviation equals the mean.
         assert!(
             (var.sqrt() / mean - 1.0).abs() < 0.25,
-            "gap sd/mean is {}, not exponential", var.sqrt() / mean
+            "gap sd/mean is {}, not exponential",
+            var.sqrt() / mean
         );
     }
 
@@ -274,7 +283,8 @@ mod tests {
         let out = p.tick(86_400_000 * 365, cover_packet);
         assert!(
             out.len() <= (Clock::MAX_ADVANCE_MS as f64 * 20.0 / 1000.0) as usize + 20,
-            "a single hostile reading emitted {} packets at once", out.len()
+            "a single hostile reading emitted {} packets at once",
+            out.len()
         );
     }
 

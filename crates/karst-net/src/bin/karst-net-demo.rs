@@ -9,10 +9,10 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use karst_id::Identity;
+use karst_mix::loops::Baseline;
 use karst_mix::packet::MixKey;
 use karst_net::client::Client;
 use karst_net::directory::{Directory, NodeInfo};
-use karst_mix::loops::Baseline;
 use karst_net::runner::{ClientRunner, NodeRunner};
 use karst_net::sentinel::Sentinel;
 use karst_node::MixNode;
@@ -77,8 +77,15 @@ fn main() -> std::io::Result<()> {
     }
     for (r, i) in runners.iter_mut().zip(infos.iter()) {
         r.set_directory(dir.clone());
-        let role = if i.id == provider_id { "provider" } else { "mix" };
-        println!("  node {:>2}  layer {}  {:<22} {}", i.id, i.layer, i.addr, role);
+        let role = if i.id == provider_id {
+            "provider"
+        } else {
+            "mix"
+        };
+        println!(
+            "  node {:>2}  layer {}  {:<22} {}",
+            i.id, i.layer, i.addr, role
+        );
     }
     note(&format!(
         "{} nodes, {} mixing layers, mean per-hop delay 25ms",
@@ -174,8 +181,11 @@ fn main() -> std::io::Result<()> {
 
     rule("Bob replies");
 
-    bob.send(&alice_contact, b"Received. Nothing in between knew either of us.")
-        .unwrap();
+    bob.send(
+        &alice_contact,
+        b"Received. Nothing in between knew either of us.",
+    )
+    .unwrap();
     let deadline = Instant::now() + Duration::from_secs(12);
     while Instant::now() < deadline && alice.received.is_empty() {
         alice.step();
@@ -190,7 +200,7 @@ fn main() -> std::io::Result<()> {
 
     rule("Alice keeps sending loops to herself, and the network is healthy");
 
-    let mut spin = |a: &mut ClientRunner, b: &mut ClientRunner, ms: u64, loops: u64| {
+    let spin = |a: &mut ClientRunner, b: &mut ClientRunner, ms: u64, loops: u64| {
         let t = Instant::now();
         let mut sent = 0;
         while t.elapsed() < Duration::from_millis(ms) {
@@ -213,7 +223,11 @@ fn main() -> std::io::Result<()> {
         );
         match s.alarm() {
             None => println!("  \x1b[32mno alarm\x1b[0m"),
-            Some(a) => println!("  \x1b[31malarm: {:.1}% loss, p={:.2e}\x1b[0m", a.observed_rate * 100.0, a.p_value),
+            Some(a) => println!(
+                "  \x1b[31malarm: {:.1}% loss, p={:.2e}\x1b[0m",
+                a.observed_rate * 100.0,
+                a.p_value
+            ),
         }
     }
     note("Loops are ordinary mail addressed to a mailbox alice owns. No node can tell one from");
@@ -252,7 +266,10 @@ fn main() -> std::io::Result<()> {
     let counts = counts.lock().unwrap();
     let mut rows: Vec<_> = counts.iter().collect();
     rows.sort_by_key(|(id, _, _)| *id);
-    println!("  {:>4}  {:>9} {:>9} {:>9} {:>7}", "node", "accepted", "forwarded", "cover", "held");
+    println!(
+        "  {:>4}  {:>9} {:>9} {:>9} {:>7}",
+        "node", "accepted", "forwarded", "cover", "held"
+    );
     for (id, s, held) in rows {
         println!(
             "  {:>4}  {:>9} {:>9} {:>9} {:>7}",

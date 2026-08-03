@@ -9,3 +9,6 @@ description = "Anonymous authenticated encryption to a public key"
 rand.workspace = true
 x25519-dalek = { version = "2", features = ["static_secrets"] }
 hpke = { version = "0.14", default-features = false, features = ["x25519", "chacha", "alloc", "getrandom"] }
+
+[lints]
+workspace = true

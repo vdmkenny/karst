@@ -14,7 +14,7 @@
 use core::fmt;
 
 pub use ed25519_dalek::{Signature, VerifyingKey};
-use ed25519_dalek::{Signer, SigningKey, Verifier};
+use ed25519_dalek::{Signer, SigningKey};
 use rand::rngs::OsRng;
 
 /// Length of an address in bytes.
@@ -199,7 +199,6 @@ impl fmt::Debug for Peer {
 
 #[cfg(test)]
 mod tests {
-    use ed25519_dalek::Signer;
 
     /// A small-order key is not an identity, and is refused before it becomes one.
     ///
@@ -235,7 +234,10 @@ mod tests {
                 refused += 1;
             }
         }
-        assert!(refused > 0, "no weak key decoded, so this test proved nothing");
+        assert!(
+            refused > 0,
+            "no weak key decoded, so this test proved nothing"
+        );
     }
 
     /// An honest key is still accepted, so the check above is not simply refusing everything.

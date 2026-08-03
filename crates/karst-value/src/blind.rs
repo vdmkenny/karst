@@ -53,9 +53,10 @@
 //! The `shamir` module carries the threshold structure and the two are not composed.
 
 use blind_rsa_signatures::{
-    BlindSignature as RawBlindSignature, BlindingResult, DefaultRng, KeyPairSha384PSSRandomized as Suite,
-    MessageRandomizer, PublicKeySha384PSSRandomized as SuitePublic,
-    SecretKeySha384PSSRandomized as SuiteSecret, Signature as RawSignature,
+    BlindSignature as RawBlindSignature, BlindingResult, DefaultRng,
+    KeyPairSha384PSSRandomized as Suite, MessageRandomizer,
+    PublicKeySha384PSSRandomized as SuitePublic, SecretKeySha384PSSRandomized as SuiteSecret,
+    Signature as RawSignature,
 };
 
 /// Modulus size for a credential issuer.
@@ -114,8 +115,7 @@ impl IssuerKey {
     /// There is no seeded constructor, deliberately. A seeded issuer key has as much entropy
     /// as its seed, and the wish for reproducible tests is exactly how that gets introduced.
     pub fn generate(bits: usize) -> Result<IssuerKey, BlindError> {
-        let kp =
-            Suite::generate(&mut DefaultRng, bits).map_err(|_| BlindError::KeyGeneration)?;
+        let kp = Suite::generate(&mut DefaultRng, bits).map_err(|_| BlindError::KeyGeneration)?;
         Ok(IssuerKey {
             secret: kp.sk,
             public: kp.pk,
@@ -250,7 +250,10 @@ pub fn unblind(
         .inner
         .finalize(&sig.inner, &blinding.result, msg)
         .map_err(|_| BlindError::BadSignature)?;
-    let randomizer = blinding.result.msg_randomizer.ok_or(BlindError::Malformed)?;
+    let randomizer = blinding
+        .result
+        .msg_randomizer
+        .ok_or(BlindError::Malformed)?;
     Ok(Signature { inner, randomizer })
 }
 
@@ -283,7 +286,10 @@ mod tests {
     fn a_signature_does_not_transfer_to_another_message() {
         let k = issuer();
         let s = credential(k, b"serial-1");
-        assert_eq!(k.public().verify(b"serial-2", &s), Err(BlindError::NotValid));
+        assert_eq!(
+            k.public().verify(b"serial-2", &s),
+            Err(BlindError::NotValid)
+        );
     }
 
     /// The issuer sees a different value every time, so issuance carries no repetition to key
@@ -340,7 +346,10 @@ mod tests {
         let a = issuer();
         let b = IssuerKey::generate(2048).unwrap();
         let s = credential(a, b"serial-7");
-        assert_eq!(b.public().verify(b"serial-7", &s), Err(BlindError::NotValid));
+        assert_eq!(
+            b.public().verify(b"serial-7", &s),
+            Err(BlindError::NotValid)
+        );
     }
 
     #[test]

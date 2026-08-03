@@ -84,7 +84,7 @@ fn path_steps(mut idx: usize, mut width: usize) -> Vec<(bool, usize, usize)> {
     while width > 1 {
         let sibling = idx ^ 1;
         if sibling < width {
-            steps.push((idx % 2 == 0, sibling, width));
+            steps.push((idx.is_multiple_of(2), sibling, width));
         }
         idx /= 2;
         width = width.div_ceil(2);
@@ -431,7 +431,8 @@ mod tests {
     #[test]
     fn round_trips_through_chunking() {
         let data = data_of(10_000, 1);
-        let (m, bodies) = Manifest::build_with_chunk_size("f.bin", "application/octet-stream", &data, 1024);
+        let (m, bodies) =
+            Manifest::build_with_chunk_size("f.bin", "application/octet-stream", &data, 1024);
         let mut store = BlobStore::new();
         store.put_all(&bodies);
         assert_eq!(store.assemble(&m).unwrap(), data);

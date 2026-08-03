@@ -18,3 +18,6 @@ karst-cap.workspace = true
 karst-attest.workspace = true
 karst-afford.workspace = true
 karst-thread.workspace = true
+
+[lints]
+workspace = true

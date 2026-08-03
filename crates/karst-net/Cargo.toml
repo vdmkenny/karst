@@ -24,3 +24,6 @@ path = "src/bin/karst-net-demo.rs"
 [[bin]]
 name = "karst-bulkcost"
 path = "src/bin/karst-bulkcost.rs"
+
+[lints]
+workspace = true

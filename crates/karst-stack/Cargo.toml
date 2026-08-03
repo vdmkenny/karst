@@ -21,3 +21,6 @@ karst-witness.workspace = true
 karst-member.workspace = true
 karst-value.workspace = true
 rand = "0.8"
+
+[lints]
+workspace = true

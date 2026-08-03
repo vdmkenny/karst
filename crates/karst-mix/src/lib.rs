@@ -47,14 +47,15 @@ pub mod sim;
 pub use active::{
     batch_under_skew, drain_cost, n_minus_one, ActiveConfig, ActiveResult, Discipline, SkewResult,
 };
-pub use packet::{Hop, MixError, MixKey, Packet, Peeled, SeenTags, PACKET_BYTES, MAX_HOPS};
+pub use packet::{Hop, MixError, MixKey, Packet, Peeled, SeenTags, MAX_HOPS, PACKET_BYTES};
 pub use sim::{run, SimConfig, SimResult};
 
 /// Traffic classes, per `docs/05-anonymity.md` section 4.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum Class {
     /// The default. Full Poisson delay, resists a global passive adversary, latency in
     /// seconds.
+    #[default]
     Deferred,
     /// Opt in. Forwarded promptly, approximately Tor's guarantee, does **not** resist a
     /// global passive adversary.
@@ -62,15 +63,6 @@ pub enum Class {
     /// Selecting this is observable and puts the user in a smaller anonymity set. A
     /// client must say so at the point of choice rather than in documentation.
     Prompt,
-}
-
-impl Default for Class {
-    fn default() -> Self {
-        // Anonymity is the default path, not a mode. If the anonymous option is a special
-        // slow mode, only those who badly need it turn it on, and turning it on marks
-        // them.
-        Class::Deferred
-    }
 }
 
 impl Class {

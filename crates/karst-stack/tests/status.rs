@@ -33,7 +33,13 @@ fn every_crate_the_paper_names_exists_and_every_crate_is_named() {
         .split('`')
         .filter(|t| t.starts_with("karst-") && !t.contains(' '))
         // `karst-mix::intersection` names a module in a crate, not a crate.
-        .map(|t| t.split("::").next().unwrap().trim_end_matches('/').to_string())
+        .map(|t| {
+            t.split("::")
+                .next()
+                .unwrap()
+                .trim_end_matches('/')
+                .to_string()
+        })
         .collect();
 
     let mut on_disk: BTreeSet<String> = std::fs::read_dir(root().join("crates"))
@@ -86,7 +92,10 @@ fn every_crate_the_paper_names_exists_and_every_crate_is_named() {
         .map(|e| e.file_name().to_string_lossy().to_string())
         .collect();
     for c in crates_only.difference(&tooling) {
-        assert!(named.contains(c), "{c} exists and the paper does not mention it");
+        assert!(
+            named.contains(c),
+            "{c} exists and the paper does not mention it"
+        );
     }
 }
 
@@ -129,7 +138,9 @@ fn the_summary_table_does_not_contradict_the_layer_it_summarises() {
 #[test]
 fn the_agency_table_agrees_with_karst_attest() {
     let text = whitepaper();
-    let at = text.find("| Class | Meaning | Verifiable |").expect("agency table");
+    let at = text
+        .find("| Class | Meaning | Verifiable |")
+        .expect("agency table");
     let table = &text[at..text[at..].find("\n\n").map_or(text.len(), |e| at + e)];
 
     for line in table.lines().filter(|l| l.starts_with("| `")) {
@@ -220,7 +231,9 @@ fn the_dependency_table_matches_the_manifests() {
 #[test]
 fn the_foundational_layer_count_is_the_one_the_manifests_show() {
     let text = whitepaper();
-    let at = text.find("of the remaining layers depend on L6 directly").expect("the claim");
+    let at = text
+        .find("of the remaining layers depend on L6 directly")
+        .expect("the claim");
     let before = &text[..at];
     let stated_total = before.split_whitespace().last().unwrap();
     let after = &text[at..];
@@ -294,8 +307,17 @@ fn the_readme_names_every_crate_and_links_every_document() {
     let readme = std::fs::read_to_string(root().join("README.md")).expect("README.md");
 
     for entry in std::fs::read_dir(root().join("crates")).expect("crates/") {
-        let name = entry.expect("entry").file_name().to_string_lossy().to_string();
-        if !root().join("crates").join(&name).join("Cargo.toml").exists() {
+        let name = entry
+            .expect("entry")
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+        if !root()
+            .join("crates")
+            .join(&name)
+            .join("Cargo.toml")
+            .exists()
+        {
             continue;
         }
         assert!(
@@ -305,7 +327,11 @@ fn the_readme_names_every_crate_and_links_every_document() {
     }
 
     for entry in std::fs::read_dir(root().join("docs")).expect("docs/") {
-        let name = entry.expect("entry").file_name().to_string_lossy().to_string();
+        let name = entry
+            .expect("entry")
+            .file_name()
+            .to_string_lossy()
+            .to_string();
         if !name.ends_with(".md") {
             continue;
         }

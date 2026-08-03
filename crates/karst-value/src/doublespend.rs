@@ -275,8 +275,7 @@ mod tests {
         }
 
         // Every half is distinct, so a verifier cannot infer a pair from a repeat.
-        let uniq: std::collections::BTreeSet<[u8; 32]> =
-            opening.halves.iter().copied().collect();
+        let uniq: std::collections::BTreeSet<[u8; 32]> = opening.halves.iter().copied().collect();
         assert_eq!(uniq.len(), SHARES, "halves repeat within one opening");
 
         // And two openings under the *same* challenge still reveal nothing, which is the case
@@ -398,7 +397,10 @@ mod adversarial {
         let c = Challenge::from_seed(b"same");
 
         // Identical challenges: no differing positions at all, so nothing to compare.
-        assert_eq!(consistency(&s.open(&c), &s.open(&c)), Consistency::NoOverlap);
+        assert_eq!(
+            consistency(&s.open(&c), &s.open(&c)),
+            Consistency::NoOverlap
+        );
 
         // Different challenges on the same credential: fully consistent.
         let a = s.open(&Challenge::from_seed(b"one"));

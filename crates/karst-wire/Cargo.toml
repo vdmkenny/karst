@@ -8,3 +8,6 @@ description = "L3 Wire: fixed-size datagrams emitted on a schedule that does not
 [dependencies]
 karst-mix.workspace = true
 rand.workspace = true
+
+[lints]
+workspace = true

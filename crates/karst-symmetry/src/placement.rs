@@ -72,8 +72,8 @@ impl Placement {
 
     pub fn evaluate(&self) -> PlacementResult {
         let hoods = self.honest.len().max(self.adversary.len());
-        let total_relays: usize = self.honest.iter().sum::<usize>()
-            + self.adversary.iter().sum::<usize>();
+        let total_relays: usize =
+            self.honest.iter().sum::<usize>() + self.adversary.iter().sum::<usize>();
         if total_relays == 0 {
             return PlacementResult {
                 resource_share: 0.0,
@@ -127,7 +127,7 @@ pub fn place_adversarially(honest: &[usize], budget: usize) -> Vec<usize> {
 
     let mut adv = vec![0usize; honest.len()];
     // Concentrate in the emptiest neighbourhoods, where per-relay weight is highest.
-    let targets = order.len().min(4).max(1);
+    let targets = order.len().clamp(1, 4);
     let per = budget / targets;
     let mut left = budget;
     for &i in order.iter().take(targets) {
@@ -143,7 +143,9 @@ pub fn place_adversarially(honest: &[usize], budget: usize) -> Vec<usize> {
 /// A skewed but realistic relay population: a few crowded networks, a long tail of empty
 /// ones. This shape is what makes diversity-aware rules attractive and exploitable.
 pub fn realistic_population() -> Vec<usize> {
-    vec![3000, 2200, 1500, 900, 500, 300, 120, 60, 30, 12, 6, 3, 2, 1, 1, 1]
+    vec![
+        3000, 2200, 1500, 900, 500, 300, 120, 60, 30, 12, 6, 3, 2, 1, 1, 1,
+    ]
 }
 
 #[cfg(test)]

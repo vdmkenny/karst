@@ -8,3 +8,6 @@ description = "L1 Path: senders compose paths from signed segments, with no glob
 [dependencies]
 karst-id.workspace = true
 karst-object.workspace = true
+
+[lints]
+workspace = true

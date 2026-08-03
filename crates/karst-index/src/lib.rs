@@ -603,7 +603,9 @@ impl Catalogue {
             }
             superseded = Some(prev.terms.clone());
         }
-        if superseded.is_none() && trust.weight_of(&a.author).is_none() && !self.admit_untrusted(key)
+        if superseded.is_none()
+            && trust.weight_of(&a.author).is_none()
+            && !self.admit_untrusted(key)
         {
             return;
         }
@@ -705,13 +707,7 @@ mod tests {
     }
 
     /// Publish and verify. Nothing reaches a catalogue any other way.
-    fn ann(
-        target: Cid,
-        who: u32,
-        kind: &str,
-        terms: &[String],
-        at: u64,
-    ) -> Verified<Announcement> {
+    fn ann(target: Cid, who: u32, kind: &str, terms: &[String], at: u64) -> Verified<Announcement> {
         let id = ident(who);
         let obj = Announcement::new(target, id.address(), kind, terms, at)
             .unwrap()
@@ -719,13 +715,7 @@ mod tests {
         Announcement::from_object(&obj).unwrap()
     }
 
-    fn clm(
-        target: Cid,
-        who: u32,
-        verdict: Verdict,
-        terms: &[String],
-        at: u64,
-    ) -> Verified<Claim> {
+    fn clm(target: Cid, who: u32, verdict: Verdict, terms: &[String], at: u64) -> Verified<Claim> {
         let id = ident(who);
         let obj = Claim::new(target, id.address(), verdict, terms, at)
             .unwrap()
@@ -747,7 +737,6 @@ mod tests {
             .publish(&id, at);
         Announcement::from_object(&obj).unwrap()
     }
-
 
     fn terms(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
@@ -817,10 +806,7 @@ mod tests {
         let mut c = Catalogue::new();
         let target = Cid::of(b"x");
         for i in 0..1_000 {
-            c.announce(
-                ann(target, 1, "doc", &terms(&["spam"]), i),
-                &Trust::new(),
-            );
+            c.announce(ann(target, 1, "doc", &terms(&["spam"]), i), &Trust::new());
         }
         assert_eq!(c.len(), 1);
     }
@@ -866,10 +852,7 @@ mod tests {
         for i in 0..20_000u32 {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
-            c.announce(
-                ann_raw(Cid::of(&b), b, "doc", &terms(&["x"]), 0),
-                &t,
-            );
+            c.announce(ann_raw(Cid::of(&b), b, "doc", &terms(&["x"]), 0), &t);
         }
         assert_eq!(c.untrusted_held(), 64);
     }
@@ -887,19 +870,13 @@ mod tests {
 
         let mut c = Catalogue::new().with_untrusted_capacity(32);
         let mine = Cid::of(b"the thing i wanted");
-        c.announce(
-            ann(mine, trusted, "doc", &terms(&["topic"]), 0),
-            &t,
-        );
+        c.announce(ann(mine, trusted, "doc", &terms(&["topic"]), 0), &t);
 
         for i in 0..50_000u32 {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
             b[31] = 1;
-            c.announce(
-                ann_raw(Cid::of(&b), b, "doc", &terms(&["topic"]), 0),
-                &t,
-            );
+            c.announce(ann_raw(Cid::of(&b), b, "doc", &terms(&["topic"]), 0), &t);
         }
 
         assert!(
@@ -916,10 +893,7 @@ mod tests {
         let t = Trust::new();
         let target = Cid::of(b"x");
         for i in 0..1_000 {
-            c.announce(
-                ann(target, 1, "doc", &terms(&["x"]), i),
-                &t,
-            );
+            c.announce(ann(target, 1, "doc", &terms(&["x"]), i), &t);
         }
         assert_eq!(c.untrusted_held(), 1);
     }
@@ -952,7 +926,8 @@ mod tests {
         }
 
         assert!(
-            cat.announcement_of(&addr(bobs_favourite), &bobs_thing).is_none(),
+            cat.announcement_of(&addr(bobs_favourite), &bobs_thing)
+                .is_none(),
             "vacuous: nothing was evicted"
         );
     }
@@ -980,10 +955,7 @@ mod tests {
         for i in 0..20_000u32 {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
-            c.announce(
-                ann_raw(Cid::of(&b), b, "doc", &[format!("term{i}")], 0),
-                &t,
-            );
+            c.announce(ann_raw(Cid::of(&b), b, "doc", &[format!("term{i}")], 0), &t);
         }
         assert_eq!(c.untrusted_held(), 64);
         assert!(
@@ -1004,10 +976,7 @@ mod tests {
         for i in 0..20_000u32 {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
-            c.announce(
-                ann_raw(Cid::of(&b), b, "doc", &terms(&["x"]), 0),
-                &t,
-            );
+            c.announce(ann_raw(Cid::of(&b), b, "doc", &terms(&["x"]), 0), &t);
         }
         assert_eq!(
             c.candidates(&terms(&["x"])).len(),
@@ -1025,23 +994,14 @@ mod tests {
         let mut c = Catalogue::new().with_untrusted_capacity(2);
         let target = Cid::of(b"shared");
 
-        c.announce(
-            ann(target, keeper, "doc", &terms(&["shared"]), 0),
-            &t,
-        );
+        c.announce(ann(target, keeper, "doc", &terms(&["shared"]), 0), &t);
         // An untrusted statement about the same target, using the same term, then evicted.
-        c.announce(
-            ann(target, 1, "doc", &terms(&["shared"]), 0),
-            &t,
-        );
+        c.announce(ann(target, 1, "doc", &terms(&["shared"]), 0), &t);
         for i in 0..50u32 {
             let mut b = [0u8; 32];
             b[..4].copy_from_slice(&i.to_le_bytes());
             b[31] = 3;
-            c.announce(
-                ann_raw(Cid::of(&b), b, "doc", &terms(&["other"]), 0),
-                &t,
-            );
+            c.announce(ann_raw(Cid::of(&b), b, "doc", &terms(&["other"]), 0), &t);
         }
         assert!(
             c.candidates(&terms(&["shared"])).contains(&target),
@@ -1062,9 +1022,15 @@ mod tests {
         let forger = ident(2);
 
         // The forger writes the victim's address into the payload and signs with their own key.
-        let forged = Announcement::new(Cid::of(b"malware"), victim.address(), "doc", &terms(&["safe"]), 0)
-            .unwrap()
-            .publish(&forger, 0);
+        let forged = Announcement::new(
+            Cid::of(b"malware"),
+            victim.address(),
+            "doc",
+            &terms(&["safe"]),
+            0,
+        )
+        .unwrap()
+        .publish(&forger, 0);
 
         let recovered = Announcement::from_object(&forged).unwrap();
         assert_eq!(
@@ -1081,7 +1047,10 @@ mod tests {
         cat.announce(recovered, &t);
         let hits = crate::Ranker::new(t).search(&cat, &terms(&["safe"]));
         assert_eq!(hits.len(), 1);
-        assert_eq!(hits[0].trusted_support, 0, "a forgery was counted as trusted");
+        assert_eq!(
+            hits[0].trusted_support, 0,
+            "a forgery was counted as trusted"
+        );
     }
 
     /// A tampered object must not decode at all.
@@ -1098,9 +1067,15 @@ mod tests {
             IndexError::Unsigned
         );
         // And a claim object is not an announcement.
-        let c = Claim::new(Cid::of(b"x"), id.address(), Verdict::Dispute, &terms(&["a"]), 0)
-            .unwrap()
-            .publish(&id, 0);
+        let c = Claim::new(
+            Cid::of(b"x"),
+            id.address(),
+            Verdict::Dispute,
+            &terms(&["a"]),
+            0,
+        )
+        .unwrap()
+        .publish(&id, 0);
         assert_eq!(
             Announcement::from_object(&c).unwrap_err(),
             IndexError::Malformed
@@ -1139,10 +1114,15 @@ mod tests {
         // means they were evicted rather than never stored.
         let ground_before = ground
             .iter()
-            .filter(|cid| c.announcement_of(&addr(900_000), cid).is_some()
-                || c.candidates(&terms(&["x"])).contains(cid))
+            .filter(|cid| {
+                c.announcement_of(&addr(900_000), cid).is_some()
+                    || c.candidates(&terms(&["x"])).contains(cid)
+            })
             .count();
-        assert!(ground_before > 0, "vacuous: no ground entry was ever admitted");
+        assert!(
+            ground_before > 0,
+            "vacuous: no ground entry was ever admitted"
+        );
 
         // Honest sources arrive afterwards.
         let mut honest_keys = Vec::new();
@@ -1187,7 +1167,10 @@ mod tests {
         let capacity = 64;
         let mut c = Catalogue::new().with_untrusted_capacity(capacity);
         for i in 0..10_000u32 {
-            c.announce(ann(Cid::of(&i.to_le_bytes()), 5, "doc", &terms(&["x"]), 0), &t);
+            c.announce(
+                ann(Cid::of(&i.to_le_bytes()), 5, "doc", &terms(&["x"]), 0),
+                &t,
+            );
         }
         let held = c.untrusted_held();
         assert!(
@@ -1216,5 +1199,4 @@ mod tests {
             c.terms_indexed()
         );
     }
-
 }

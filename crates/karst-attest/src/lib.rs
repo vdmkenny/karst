@@ -155,10 +155,7 @@ impl Agency {
     }
 
     pub fn is_machine(&self) -> bool {
-        matches!(
-            self,
-            Agency::Delegated { .. } | Agency::Autonomous { .. }
-        )
+        matches!(self, Agency::Delegated { .. } | Agency::Autonomous { .. })
     }
 
     /// Whether this claim can be checked, as opposed to merely asserted.
@@ -228,7 +225,10 @@ impl Agency {
                 None => "agent (malformed chain)".into(),
             },
             Agency::Autonomous { operator } => {
-                format!("autonomous agent, claims operator {} (unverified)", operator.short())
+                format!(
+                    "autonomous agent, claims operator {} (unverified)",
+                    operator.short()
+                )
             }
         }
     }
@@ -355,7 +355,8 @@ mod tests {
         // The exact attack from the report: claim the victim authorised you. There is now
         // no way to express it without a capability the victim actually signed, and the
         // attacker cannot produce one.
-        let forged_root = Capability::issue(&attacker, Cid::of(b"resource"), attacker.address(), vec![]);
+        let forged_root =
+            Capability::issue(&attacker, Cid::of(b"resource"), attacker.address(), vec![]);
         let forged = Agency::Delegated {
             resource_owner: victim.address(),
             capability: forged_root,
@@ -406,10 +407,15 @@ mod tests {
     fn autonomous_no_longer_claims_to_be_verifiable() {
         let bot = Identity::generate();
         let victim = Identity::generate();
-        let a = Agency::Autonomous { operator: victim.address() };
+        let a = Agency::Autonomous {
+            operator: victim.address(),
+        };
 
         assert!(a.is_machine());
-        assert!(!a.is_verifiable(), "nothing proves the operator relationship");
+        assert!(
+            !a.is_verifiable(),
+            "nothing proves the operator relationship"
+        );
         // And it does not launder responsibility onto the named operator.
         assert_eq!(a.accountable(bot.address()), bot.address());
         assert!(a.describe().contains("unverified"));
@@ -421,7 +427,9 @@ mod tests {
         let q = Identity::generate().address();
         for a in [
             Agency::Direct,
-            Agency::Assisted { tool: "an editor".into() },
+            Agency::Assisted {
+                tool: "an editor".into(),
+            },
             deleg,
             Agency::Autonomous { operator: q },
         ] {

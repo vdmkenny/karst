@@ -126,9 +126,7 @@ fn tighten(base: &[Caveat], extra: &[Caveat]) -> Vec<Caveat> {
 
 /// Every caveat in `parent` must be implied by something in `child`.
 fn narrows(child: &[Caveat], parent: &[Caveat]) -> bool {
-    parent
-        .iter()
-        .all(|p| child.iter().any(|c| c.implies(p)))
+    parent.iter().all(|p| child.iter().any(|c| c.implies(p)))
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -221,10 +219,7 @@ impl Grant {
     }
 
     fn decode(d: &mut Dec<'_>) -> Result<Grant, DecodeError> {
-        let issuer_key: [u8; 32] = d
-            .bytes()?
-            .try_into()
-            .map_err(|_| DecodeError::Truncated)?;
+        let issuer_key: [u8; 32] = d.bytes()?.try_into().map_err(|_| DecodeError::Truncated)?;
         let audience = d.addr()?;
         let n = d.u64()? as usize;
         if n > 64 {
@@ -234,10 +229,7 @@ impl Grant {
         for _ in 0..n {
             caveats.push(Caveat::decode(d)?);
         }
-        let signature: [u8; 64] = d
-            .bytes()?
-            .try_into()
-            .map_err(|_| DecodeError::Truncated)?;
+        let signature: [u8; 64] = d.bytes()?.try_into().map_err(|_| DecodeError::Truncated)?;
         Ok(Grant {
             issuer_key,
             audience,
@@ -256,23 +248,12 @@ pub struct Capability {
 
 impl Capability {
     /// The resource owner issues root authority to someone.
-    pub fn issue(
-        owner: &Identity,
-        resource: Cid,
-        audience: Address,
-        caveats: Vec<Caveat>,
-    ) -> Self {
+    pub fn issue(owner: &Identity, resource: Cid, audience: Address, caveats: Vec<Caveat>) -> Self {
         let mut caveats = caveats;
         caveats.sort_by_key(|c| c.tag());
         let zero = [0u8; 64];
-        let msg = Grant::signing_bytes(
-            &resource,
-            0,
-            &zero,
-            &owner.key_bytes(),
-            &audience,
-            &caveats,
-        );
+        let msg =
+            Grant::signing_bytes(&resource, 0, &zero, &owner.key_bytes(), &audience, &caveats);
         let sig = owner.sign(&msg);
         Capability {
             resource,
@@ -495,8 +476,7 @@ impl SignedInvocation {
     /// Returns the verified presenter's address, which is what a receipt should attribute
     /// the action to, rather than whoever the capability merely names.
     pub fn verify_possession(&self, cap: &Capability) -> Result<Address, CapError> {
-        let peer =
-            Peer::from_key_bytes(&self.invoker_key).map_err(|_| CapError::MalformedKey)?;
+        let peer = Peer::from_key_bytes(&self.invoker_key).map_err(|_| CapError::MalformedKey)?;
 
         let audience = cap.holder().ok_or(CapError::EmptyChain)?;
         if peer.address() != audience {
@@ -681,9 +661,18 @@ mod tests {
 
         let eff = scoped.verify(clinic.address()).unwrap();
         // The effective set must hold the tighter value of every kind, not the parent's.
-        assert!(eff.contains(&Caveat::MaxAmount(500)), "kept the looser amount");
-        assert!(eff.contains(&Caveat::ExpiresAt(100)), "kept the looser expiry");
-        assert!(eff.contains(&Caveat::MaxUses(1)), "kept the looser use count");
+        assert!(
+            eff.contains(&Caveat::MaxAmount(500)),
+            "kept the looser amount"
+        );
+        assert!(
+            eff.contains(&Caveat::ExpiresAt(100)),
+            "kept the looser expiry"
+        );
+        assert!(
+            eff.contains(&Caveat::MaxUses(1)),
+            "kept the looser use count"
+        );
         assert!(!eff.contains(&Caveat::MaxAmount(5_000)));
         assert_eq!(scoped.holder(), Some(agent.address()));
     }
@@ -795,8 +784,7 @@ mod tests {
             ],
         ];
         for (i, caveats) in forgeries.iter().enumerate() {
-            let forged =
-                scoped.forge_widened(&agent, accomplice.address(), caveats.clone());
+            let forged = scoped.forge_widened(&agent, accomplice.address(), caveats.clone());
             assert_eq!(
                 forged.verify(clinic.address()),
                 Err(CapError::WidenedAuthority),
@@ -1050,10 +1038,7 @@ mod tests {
         // Swapping the arguments out from under a valid signature also fails.
         let mut tampered = signed.clone();
         tampered.request.args_digest = Cid::of(b"different args");
-        assert_eq!(
-            tampered.verify_possession(&a),
-            Err(CapError::BadSignature)
-        );
+        assert_eq!(tampered.verify_possession(&a), Err(CapError::BadSignature));
     }
 
     #[test]
@@ -1077,7 +1062,10 @@ mod tests {
         d.end().unwrap();
 
         assert_eq!(back.id(), scoped.id());
-        assert_eq!(back.verify(clinic.address()).unwrap(), scoped.verify(clinic.address()).unwrap());
+        assert_eq!(
+            back.verify(clinic.address()).unwrap(),
+            scoped.verify(clinic.address()).unwrap()
+        );
     }
 
     #[test]

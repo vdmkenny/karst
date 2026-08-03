@@ -329,13 +329,13 @@ mod tests {
 
     fn payload(tag: u8, body: u8) -> Vec<u8> {
         let mut v = vec![tag; MAILBOX_BYTES];
-        v.extend(std::iter::repeat(body).take(ENVELOPE_BYTES));
+        v.extend(std::iter::repeat_n(body, ENVELOPE_BYTES));
         v
     }
 
     fn tagged(tag: &[u8; MAILBOX_BYTES], body: u8) -> Vec<u8> {
         let mut v = tag.to_vec();
-        v.extend(std::iter::repeat(body).take(ENVELOPE_BYTES));
+        v.extend(std::iter::repeat_n(body, ENVELOPE_BYTES));
         v
     }
 
@@ -354,7 +354,11 @@ mod tests {
             assert!(p.take_one(&tag).0.is_some());
         }
         assert_eq!(p.held(), 0);
-        assert_eq!(p.boxes(), 0, "an emptied box with nothing to report was kept");
+        assert_eq!(
+            p.boxes(),
+            0,
+            "an emptied box with nothing to report was kept"
+        );
     }
 
     /// Refusal counts survive an emptied box, up to a bound, and forgetting is visible.
@@ -402,7 +406,10 @@ mod tests {
 
         // The honest drain works.
         let s1 = sign(1);
-        assert_eq!(p.drain_once(&tag, &pk, 1, &s1).unwrap().0, Some(vec![1u8; ENVELOPE_BYTES]));
+        assert_eq!(
+            p.drain_once(&tag, &pk, 1, &s1).unwrap().0,
+            Some(vec![1u8; ENVELOPE_BYTES])
+        );
 
         // The identical request, captured off the wire and replayed, does not.
         assert_eq!(p.drain_once(&tag, &pk, 1, &s1), Err(DrainError::Replayed));
@@ -441,7 +448,10 @@ mod tests {
 
         // New mail arrives at the same tag. The old request must still be dead.
         p.deposit(&tagged(&tag, 2)).unwrap();
-        assert_eq!(p.drain_once(&tag, &pk, 7, &sign(7)), Err(DrainError::Replayed));
+        assert_eq!(
+            p.drain_once(&tag, &pk, 7, &sign(7)),
+            Err(DrainError::Replayed)
+        );
         assert_eq!(p.held(), 1, "a replayed request stole newly arrived mail");
     }
 
@@ -529,7 +539,13 @@ mod tests {
     #[test]
     fn wrong_sized_payloads_are_refused() {
         let mut p = Provider::new();
-        for n in [0usize, 31, MAILBOX_BYTES, MAILBOX_BYTES + ENVELOPE_BYTES - 1, 4096] {
+        for n in [
+            0usize,
+            31,
+            MAILBOX_BYTES,
+            MAILBOX_BYTES + ENVELOPE_BYTES - 1,
+            4096,
+        ] {
             assert_eq!(p.deposit(&vec![0u8; n]), Err(DepositError::WrongSize));
         }
         assert_eq!(p.held(), 0);
@@ -586,5 +602,4 @@ mod tests {
         let _ = p.take_one(&[1u8; 32]);
         assert_eq!(p.peek(&[1u8; 32], 0), p.peek(&[123u8; 32], 0));
     }
-
 }

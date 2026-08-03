@@ -8,3 +8,6 @@ description = "KARST L10 Document: a typed content-addressed node graph. Not a m
 [dependencies]
 karst-id.workspace = true
 karst-object.workspace = true
+
+[lints]
+workspace = true

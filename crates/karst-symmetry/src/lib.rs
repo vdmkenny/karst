@@ -556,7 +556,6 @@ mod tests {
         assert_eq!(f.path_observation, linear.path_observation);
     }
 
-
     #[test]
     fn results_are_deterministic() {
         let a = run(&SymConfig::one_giant(Returns::Flat, 42));

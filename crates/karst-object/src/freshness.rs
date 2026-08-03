@@ -254,11 +254,17 @@ mod tests {
 
         assert_eq!(
             m.accept(ts(&pubr, 90, 50, 3, s)),
-            Err(Staleness::Rollback { seen: 5, offered: 3 })
+            Err(Staleness::Rollback {
+                seen: 5,
+                offered: 3
+            })
         );
         assert_eq!(
             m.accept(ts(&pubr, 100, 50, 5, s)),
-            Err(Staleness::Rollback { seen: 5, offered: 5 }),
+            Err(Staleness::Rollback {
+                seen: 5,
+                offered: 5
+            }),
             "the same sequence again is also a replay"
         );
     }
@@ -330,7 +336,8 @@ mod adversarial {
         let mut m = FreshnessMonitor::new(pubr.address());
 
         // The publisher has moved on to v2 and says so.
-        m.accept(ts(&pubr, 100, 50, 2, snap(b"advisories v2"))).unwrap();
+        m.accept(ts(&pubr, 100, 50, 2, snap(b"advisories v2")))
+            .unwrap();
 
         // The client still holds v1, because the adversary blocked the fetch.
         let status = m.status(120, Some(snap(b"advisories v1")));

@@ -72,7 +72,10 @@ mod tests {
     fn latency_alone_buys_anonymity_slowly() {
         let pts = sweep(false, &[1.0, 8.0, 32.0, 128.0], 7);
 
-        assert!(pts.iter().all(|p| p.bandwidth_overhead < 2.0), "this corner is cheap on bandwidth");
+        assert!(
+            pts.iter().all(|p| p.bandwidth_overhead < 2.0),
+            "this corner is cheap on bandwidth"
+        );
         // Monotone: more delay, more anonymity.
         for w in pts.windows(2) {
             assert!(
@@ -114,7 +117,10 @@ mod tests {
 
         assert!(r.bandwidth_overhead() > 100.0, "high bandwidth overhead");
         assert!(cfg.mean_delay >= 8.0, "and high latency");
-        assert!(r.advantage() < 1.05, "for anonymity that one of them alone achieves");
+        assert!(
+            r.advantage() < 1.05,
+            "for anonymity that one of them alone achieves"
+        );
 
         // Cover traffic at minimal delay reaches the same anonymity for far less latency.
         let mut cheap = SimConfig::karst(7);

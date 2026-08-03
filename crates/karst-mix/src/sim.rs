@@ -280,8 +280,7 @@ pub fn run(cfg: &SimConfig) -> SimResult {
     };
 
     // Volume leakage: coefficient of variation across clients.
-    let mean_em =
-        emissions_per_client.iter().sum::<usize>() as f64 / cfg.clients.max(1) as f64;
+    let mean_em = emissions_per_client.iter().sum::<usize>() as f64 / cfg.clients.max(1) as f64;
     let var = emissions_per_client
         .iter()
         .map(|e| {
