@@ -463,14 +463,14 @@ avoids. See §6.11.
 
 ### L5 Membership
 
-*Fixes error 03. Status: **built, and one property short of sound** (`karst-member`), and
-claiming much less than the layer was originally specified to claim. The private set
-intersection is Meadows 1986, which specifies **one-sided** output: only the initiator learns the
-intersection, and it computes its comparison set locally and never sends it. This crate gives
-both sides output in one exchange, which requires transmitting that comparison set to the party
-it is meant to constrain, so a responder with no shared contact can make the initiator believe
-every contact is shared. The introduction credential is forgeable from nothing. Issue #140, and
-the fix is per-element proof of discrete-log equality rather than a patch.*
+*Fixes error 03. Status: **built** (`karst-member`), and claiming much less than the layer was
+originally specified to claim. The private set intersection is a verifiable oblivious
+pseudorandom function, RFC 9497, ciphersuite OPRF(ristretto255, SHA-512). A responder evaluates
+an initiator's blinded contacts under a key it has published and returns a proof binding every
+evaluation to that key, so answering under a second key is refused rather than believed. It runs
+in two directions rather than one, because Meadows specifies one-sided output and collapsing two
+instances into a single exchange requires transmitting the initiator's comparison set to the
+party it exists to constrain.*
 
 **Lever removed.** The list of everyone reachable, and the national block list built from
 it.
@@ -1532,7 +1532,7 @@ See [`docs/08-roadmap.md`](docs/08-roadmap.md) for phases and open issues.
 | L15 Discovery | built, tested | `karst-index` |
 | L1 Path | built, tested | `karst-path` |
 | L3 Wire | built, tested | `karst-wire` |
-| L5 Membership | built; PSI unsound for mutual output (#140) | `karst-member` |
+| L5 Membership | built, tested | `karst-member` |
 | L8 Witness | built, tested | `karst-witness` |
 | L14 Value | built; threshold within a set not composed (#133) | `karst-value` |
 | L16 Symmetry | simulated | `karst-symmetry` |

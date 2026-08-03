@@ -1,18 +1,5 @@
 //! L5 Membership.
 //!
-//! # The mutual-output variant here is unsound
-//!
-//! The protocol is Meadows (IEEE S&P 1986), which specifies **one-sided** output: only the
-//! initiator learns the intersection, and it computes its comparison set locally and never
-//! transmits it. That secrecy is the load-bearing assumption behind the security argument
-//! below.
-//!
-//! This crate collapses two instances into one exchange so both parties get output, and doing
-//! that requires sending the comparison set to the party it is meant to constrain. A responder
-//! holding no shared contact at all can therefore make the initiator believe every contact is
-//! shared, which forges the introduction credential from nothing. (#140)
-//!
-//! The fix is per-element proof of discrete-log equality, not a patch to the composition.
 //!
 //! # What this does not do, first, because the literature is unambiguous
 //!
@@ -79,23 +66,34 @@
 //! is a phone against a billion-row registry, which is the **unbalanced** case. Two peers
 //! comparing address books is the balanced case, and the cost difference is enormous.
 //!
-//! # This is secure against a curious counterparty, not a lying one
+//! # A responder proves it used its own key
 //!
-//! Diffie-Hellman PSI is a **semi-honest** protocol. It assumes both sides follow it and hides
-//! their inputs from each other; it does not assume either side is trying to produce a false
-//! answer.
+//! The protocol is a **verifiable** oblivious pseudorandom function, RFC 9497, ciphersuite
+//! OPRF(ristretto255, SHA-512), from the `voprf` crate. An initiator blinds its contacts, a
+//! responder evaluates them under a key it has published, and returns the evaluations with a
+//! proof that binds every one of them to that key. The responder also sends its own contacts
+//! under the same key, and the initiator intersects.
 //!
-//! A lying responder cannot invent a shared contact out of nothing, because every value it
-//! returns has to land in a set the initiator computed from the responder's own offer. What it
-//! can do is **misattribute**: return, at the position of one of the initiator's contacts, the
-//! reblinded form of a different contact it genuinely does share. The initiator then concludes
-//! that contact *i* is shared when in fact contact *k* is. The count is honest and the names
-//! are not.
+//! Two properties follow, and the second is the one that took a rewrite to get.
 //!
-//! Fixing this needs the responder to prove it applied one exponent to every element, which is
-//! a proof of discrete-log equality per element and costs more than everything else here
-//! combined. It is not implemented, and an introduction protocol built on this should treat the
-//! *fact* of a shared contact as reliable and the *identity* of it as the counterparty's claim.
+//! **A responder cannot answer under a key it did not publish.** The proof is checked before
+//! any evaluation is believed, so an evaluation under a second key is refused rather than
+//! silently producing a wrong answer.
+//!
+//! **A responder holding nothing cannot make everything look shared.** RFC 9497 binds the
+//! input into the output, so producing the tag for a contact requires knowing that contact,
+//! and a responder only ever sees it blinded. The forgery is unavailable rather than merely
+//! detectable.
+//!
+//! The earlier version gave both sides output in a **single exchange**, which is not what
+//! Meadows specifies: the paper's protocol is one-sided, and the initiator computes its
+//! comparison set locally and never transmits it. Collapsing two instances into one required
+//! transmitting that set to the party it exists to constrain, so a responder with no shared
+//! contact could return it and be believed about every contact the initiator held. That is
+//! the introduction credential forged from nothing.
+//!
+//! So this runs in **two directions rather than one**, each an independent instance with its
+//! own key and proof. It costs a second round, and it is the reason an answer can be believed.
 //!
 //! # The abuse that PSI cannot prevent
 //!
@@ -105,12 +103,14 @@
 //! membership oracle for anyone willing to run it repeatedly, and the only real defences are
 //! rate limiting and refusing to run it with strangers, neither of which is cryptography.
 
-use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
-use curve25519_dalek::scalar::Scalar;
 use karst_id::Address;
+use voprf::{Ristretto255, VoprfClient, VoprfServer};
 
-/// A blinded contact, as it appears on the wire.
-pub type Blinded = [u8; 32];
+/// The RFC 9497 ciphersuite this uses: OPRF(ristretto255, SHA-512), verifiable mode.
+type Suite = Ristretto255;
+
+/// A PRF output. Two parties compute the same one for the same contact under one party's key.
+pub type Tag = [u8; 64];
 
 /// The number of entries every exchange is padded to.
 ///
@@ -119,167 +119,254 @@ pub type Blinded = [u8; 32];
 /// in the bucket and buys that one fact.
 pub const BUCKET: usize = 256;
 
-fn point_of(a: &Address) -> RistrettoPoint {
-    let mut h = blake3::Hasher::new();
-    h.update(b"karst.member.v1.contact");
-    h.update(a.as_bytes());
-    let mut wide = [0u8; 64];
-    h.finalize_xof().fill(&mut wide);
-    RistrettoPoint::from_uniform_bytes(&wide)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PsiError {
+    /// The answer did not carry a valid proof under the responder's published key, so the
+    /// responder did not use the key it committed to.
+    Unproven,
+    /// The answer was not shaped like an answer to the question asked.
+    Malformed,
 }
 
-/// Points that are not any contact, used to pad a set to a fixed size.
+impl core::fmt::Display for PsiError {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            PsiError::Unproven => write!(f, "the responder did not prove it used its own key"),
+            PsiError::Malformed => write!(f, "malformed answer"),
+        }
+    }
+}
+
+impl std::error::Error for PsiError {}
+
+/// Filler inputs, so a set is padded to the bucket without the padding being recognisable.
 ///
-/// Derived from a per-exchange secret so that padding is not recognisable across exchanges. A
-/// fixed pad would be a constant every observer learns once and then subtracts.
-fn filler(secret: &[u8; 32], i: usize) -> RistrettoPoint {
+/// Derived from a per-exchange secret. A fixed pad would be a constant every observer learns
+/// once and then subtracts.
+fn filler(secret: &[u8; 32], i: usize) -> Vec<u8> {
     let mut h = blake3::Hasher::new();
-    h.update(b"karst.member.v1.filler");
+    h.update(b"karst.member.v2.filler");
     h.update(secret);
     h.update(&(i as u64).to_le_bytes());
-    let mut wide = [0u8; 64];
-    h.finalize_xof().fill(&mut wide);
-    RistrettoPoint::from_uniform_bytes(&wide)
+    h.finalize().as_bytes().to_vec()
+}
+
+/// What a contact is called when it goes into the function.
+fn input_of(a: &Address) -> Vec<u8> {
+    let mut v = b"karst.member.v2.contact".to_vec();
+    v.extend_from_slice(a.as_bytes());
+    v
 }
 
 /// One side of an intersection.
 ///
-/// Diffie-Hellman private set intersection. Each side raises the other's blinded points to its
-/// own secret, so an element both hold reaches the same value by two different routes, and an
-/// element only one holds never does. Neither learns anything about the other's unshared
-/// elements beyond how many there were, which the bucket hides.
+/// A party is both a responder, holding an OPRF key others evaluate under, and an initiator,
+/// asking under someone else's. The two roles use the same contact list and are otherwise
+/// independent.
 pub struct Party {
-    secret: Scalar,
+    server: VoprfServer<Suite>,
     pad: [u8; 32],
-    /// Own contacts, padded and ordered exactly as `offer` sends them.
-    ordered: Vec<Option<Address>>,
+    contacts: Vec<Address>,
 }
 
-fn build(secret: Scalar, pad: [u8; 32], contacts: &[Address]) -> Party {
-    // Ordered by blinded value, so the position of a contact in the offer is a function of the
-    // contact and the secret rather than of insertion order. Sending them in the order the
-    // owner happens to store them would say which contacts are oldest.
-    let mut rows: Vec<(Blinded, Option<Address>)> = contacts
-        .iter()
-        .map(|a| ((point_of(a) * secret).compress().to_bytes(), Some(*a)))
-        .collect();
-    for i in rows.len()..BUCKET {
-        rows.push(((filler(&pad, i) * secret).compress().to_bytes(), None));
-    }
-    rows.sort_by_key(|(b, _)| *b);
-    Party {
-        secret,
-        pad,
-        ordered: rows.into_iter().map(|(_, a)| a).collect(),
-    }
+/// What an initiator sends: one blinded element per bucket slot.
+pub struct Ask {
+    pub blinded: Vec<voprf::BlindedElement<Suite>>,
+    states: Vec<VoprfClient<Suite>>,
+    /// The inputs, in bucket order. Filler slots hold no address.
+    inputs: Vec<(Vec<u8>, Option<Address>)>,
+}
+
+/// What a responder sends back.
+///
+/// The proof is the whole difference from the earlier protocol. It binds every evaluation to
+/// the key the responder published, so the responder cannot answer with one key and describe
+/// its own set under another.
+pub struct Answer {
+    pub evaluated: Vec<voprf::EvaluationElement<Suite>>,
+    pub proof: voprf::Proof<Suite>,
+    /// The responder's own contacts under its own key, shuffled and padded.
+    pub theirs: Vec<Tag>,
 }
 
 impl Party {
     pub fn new(contacts: &[Address]) -> Self {
         use rand::RngCore;
-        let mut sb = [0u8; 64];
         let mut pad = [0u8; 32];
-        rand::rngs::OsRng.fill_bytes(&mut sb);
         rand::rngs::OsRng.fill_bytes(&mut pad);
-        build(Scalar::from_bytes_mod_order_wide(&sb), pad, contacts)
+        Party {
+            server: VoprfServer::<Suite>::new(&mut rand::rngs::OsRng)
+                .expect("ristretto255 key generation"),
+            pad,
+            contacts: contacts.to_vec(),
+        }
     }
 
     /// Deterministic construction, for tests that need a fixed transcript.
     pub fn from_seed(contacts: &[Address], seed: [u8; 32]) -> Self {
         let mut h = blake3::Hasher::new();
-        h.update(b"karst.member.v1.party");
+        h.update(b"karst.member.v2.party");
         h.update(&seed);
         let mut wide = [0u8; 64];
         h.finalize_xof().fill(&mut wide);
         let mut pad = [0u8; 32];
         pad.copy_from_slice(&wide[..32]);
-        build(Scalar::from_bytes_mod_order_wide(&wide), pad, contacts)
+        Party {
+            server: VoprfServer::<Suite>::new_from_seed(&wide, b"karst.member.v2")
+                .expect("ristretto255 key derivation"),
+            pad,
+            contacts: contacts.to_vec(),
+        }
     }
 
     /// How many contacts this party actually holds. Never sent.
     pub fn held(&self) -> usize {
-        self.ordered.iter().filter(|a| a.is_some()).count()
+        self.contacts.len()
     }
 
-    /// Blinded contacts, padded to the bucket.
-    ///
-    /// Always exactly `BUCKET` entries, so an observer counting them learns the bucket rather
-    /// than the party. Real contacts and filler are indistinguishable: both are a group element
-    /// raised to the same secret, and the filler is derived from a per-exchange value so it is
-    /// not recognisable across exchanges either.
-    pub fn offer(&self) -> Vec<Blinded> {
-        self.ordered
-            .iter()
-            .enumerate()
-            .map(|(i, a)| match a {
-                Some(addr) => (point_of(addr) * self.secret).compress().to_bytes(),
-                None => (filler(&self.pad, i) * self.secret).compress().to_bytes(),
-            })
-            .collect()
+    /// The key others evaluate under. Published, and the thing a proof is checked against.
+    pub fn public_key(&self) -> <<Suite as voprf::CipherSuite>::Group as voprf::Group>::Elem {
+        self.server.get_public_key()
     }
 
-    /// Raise the other side's offer to this party's secret, **preserving order**.
-    ///
-    /// Order is preserved on purpose and it is not a leak. The other side already knows which
-    /// of its own contacts sits at each position; this reply tells it nothing it did not send.
-    /// Shuffling here would break the protocol rather than strengthen it, because the sender
-    /// could no longer tell which reply belongs to which of its own contacts.
-    pub fn reblind(&self, theirs: &[Blinded]) -> Vec<Blinded> {
-        theirs
+    /// Ask another party to evaluate this party's contacts under its key.
+    pub fn ask(&self) -> Ask {
+        let mut inputs: Vec<(Vec<u8>, Option<Address>)> = self
+            .contacts
             .iter()
-            .map(|b| {
-                CompressedRistretto(*b)
-                    .decompress()
-                    .map(|p| (p * self.secret).compress().to_bytes())
-                    // An undecodable point cannot be raised to anything, and substituting a
-                    // fixed value would make every such entry match every other. Zero never
-                    // decompresses to a valid point, so it can never collide with a real one.
-                    .unwrap_or([0u8; 32])
-            })
-            .collect()
+            .map(|a| (input_of(a), Some(*a)))
+            .collect();
+        for i in inputs.len()..BUCKET {
+            inputs.push((filler(&self.pad, i), None));
+        }
+        // Ordered by the input bytes, so position is a function of the contact rather than of
+        // insertion order. Sending them as stored would say which contacts are oldest.
+        inputs.sort_by(|a, b| a.0.cmp(&b.0));
+
+        let mut blinded = Vec::with_capacity(inputs.len());
+        let mut states = Vec::with_capacity(inputs.len());
+        for (bytes, _) in &inputs {
+            let r = VoprfClient::<Suite>::blind(bytes, &mut rand::rngs::OsRng)
+                .expect("a non-empty input blinds");
+            blinded.push(r.message);
+            states.push(r.state);
+        }
+        Ask {
+            blinded,
+            states,
+            inputs,
+        }
     }
 
-    /// Which of this party's own contacts the other side also holds.
+    /// Evaluate an initiator's blinded contacts, prove it, and describe this party's own set.
     ///
-    /// `mine_returned` is what the other side produced from this party's offer, position for
-    /// position. `theirs_reblinded` is what this party produced from the other side's offer.
-    /// A contact is shared when its doubly-blinded value appears in both.
-    pub fn intersect(
-        &self,
-        mine_returned: &[Blinded],
-        theirs_reblinded: &[Blinded],
-    ) -> Vec<Address> {
-        let theirs: std::collections::BTreeSet<Blinded> =
-            theirs_reblinded.iter().copied().collect();
-        self.ordered
+    /// The proof covers every evaluation at once and is checked against `public_key`.
+    pub fn answer(&self, ask: &[voprf::BlindedElement<Suite>]) -> Result<Answer, PsiError> {
+        let batch = self
+            .server
+            .batch_blind_evaluate(&mut rand::rngs::OsRng, &ask.to_vec())
+            .map_err(|_| PsiError::Malformed)?;
+
+        let mut theirs: Vec<Tag> = self
+            .contacts
             .iter()
-            .enumerate()
-            .filter_map(|(i, slot)| {
-                let addr = (*slot)?;
-                let returned = mine_returned.get(i)?;
-                if *returned != [0u8; 32] && theirs.contains(returned) {
-                    Some(addr)
-                } else {
-                    None
-                }
+            .map(|a| {
+                let out = self
+                    .server
+                    .evaluate(&input_of(a))
+                    .expect("a non-empty input evaluates");
+                let mut t = [0u8; 64];
+                t.copy_from_slice(&out);
+                t
             })
-            .collect()
+            .collect();
+        // Pad to the bucket with values indistinguishable from outputs, and shuffle, because
+        // the order this party stores its own contacts in is not the initiator's business.
+        for i in theirs.len()..BUCKET {
+            let mut t = [0u8; 64];
+            let mut h = blake3::Hasher::new();
+            h.update(b"karst.member.v2.own-filler");
+            h.update(&self.pad);
+            h.update(&(i as u64).to_le_bytes());
+            h.finalize_xof().fill(&mut t);
+            theirs.push(t);
+        }
+        theirs.sort_unstable();
+
+        Ok(Answer {
+            evaluated: batch.messages,
+            proof: batch.proof,
+            theirs,
+        })
     }
 }
 
-/// Run a full exchange and return what each side learns.
+impl Ask {
+    /// Which of this party's contacts the responder also holds.
+    ///
+    /// **The proof is verified before anything is believed.** Without it a responder could
+    /// evaluate under one key and describe its own set under another, which made every contact
+    /// appear shared to a responder holding none.
+    ///
+    /// After verification the comparison is a plain set membership on PRF outputs, and the
+    /// forgery is not merely detected but unavailable: RFC 9497 binds the input into the
+    /// output, so producing the tag for a contact requires knowing that contact, and the
+    /// responder only ever saw it blinded.
+    pub fn learn(
+        &self,
+        answer: &Answer,
+        responder_key: <<Suite as voprf::CipherSuite>::Group as voprf::Group>::Elem,
+    ) -> Result<Vec<Address>, PsiError> {
+        if answer.evaluated.len() != self.blinded.len() {
+            return Err(PsiError::Malformed);
+        }
+        let raw_inputs: Vec<&[u8]> = self.inputs.iter().map(|(b, _)| b.as_slice()).collect();
+        let outputs = VoprfClient::<Suite>::batch_finalize(
+            &raw_inputs,
+            &self.states,
+            &answer.evaluated,
+            &answer.proof,
+            responder_key,
+        )
+        .map_err(|_| PsiError::Unproven)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| PsiError::Unproven)?;
+
+        let theirs: std::collections::BTreeSet<Tag> = answer.theirs.iter().copied().collect();
+        Ok(self
+            .inputs
+            .iter()
+            .zip(outputs)
+            .filter_map(|((_, addr), out)| {
+                let a = (*addr)?;
+                let mut t = [0u8; 64];
+                t.copy_from_slice(&out);
+                theirs.contains(&t).then_some(a)
+            })
+            .collect())
+    }
+}
+
+/// Run the exchange in both directions and return what each side learns.
 ///
-/// Two messages each way. The wire form is `offer` and `reblind`; this shows the order they
-/// compose in and is what the tests drive.
+/// **Two runs, not one.** Meadows specifies one-sided output, and the earlier attempt to give
+/// both sides output in a single exchange had to transmit the initiator's comparison set to
+/// the party that set exists to constrain. Each direction here is an independent verifiable
+/// OPRF with its own key and its own proof, so neither party's soundness rests on the other's
+/// honesty. It costs a second round and it is the reason the answer can be believed.
 pub fn exchange(a: &Party, b: &Party) -> (Vec<Address>, Vec<Address>) {
-    let a_offer = a.offer();
-    let b_offer = b.offer();
+    let a_asks = a.ask();
+    let from_b = b.answer(&a_asks.blinded).expect("well-formed ask");
+    let a_sees = a_asks
+        .learn(&from_b, b.server.get_public_key())
+        .expect("an honest responder proves");
 
-    let a_returned = b.reblind(&a_offer);
-    let b_returned = a.reblind(&b_offer);
+    let b_asks = b.ask();
+    let from_a = a.answer(&b_asks.blinded).expect("well-formed ask");
+    let b_sees = b_asks
+        .learn(&from_a, a.server.get_public_key())
+        .expect("an honest responder proves");
 
-    let a_sees = a.intersect(&a_returned, &b_returned);
-    let b_sees = b.intersect(&b_returned, &a_returned);
     (a_sees, b_sees)
 }
 
@@ -325,179 +412,136 @@ mod tests {
     /// Set size is informative on its own: a party with four contacts and a party with four
     /// hundred are different kinds of participant, and one of them is far easier to identify.
     #[test]
-    fn the_offer_is_the_same_size_whatever_is_held() {
-        let empty = Party::new(&[]);
-        let one = Party::new(&set(0..1));
-        let many = Party::new(&set(0..BUCKET as u32));
-        assert_eq!(empty.offer().len(), BUCKET);
-        assert_eq!(one.offer().len(), BUCKET);
-        assert_eq!(many.offer().len(), BUCKET);
-        assert_ne!(empty.held(), many.held());
-    }
-
-    /// Padding must be indistinguishable from a real contact.
-    ///
-    /// If filler were a fixed value, an observer would learn it once and subtract it from every
-    /// exchange thereafter, and the bucket would conceal nothing.
-    #[test]
-    fn padding_is_not_recognisable_across_exchanges() {
-        let a = Party::new(&set(0..3));
-        let b = Party::new(&set(0..3));
-        let (oa, ob) = (a.offer(), b.offer());
-
-        let shared: std::collections::BTreeSet<Blinded> = oa
-            .iter()
-            .filter(|x| ob.contains(x))
-            .copied()
-            .collect();
-        assert!(
-            shared.is_empty(),
-            "two parties produced identical wire values, so padding or blinding is not per-party"
-        );
-        // And nothing in either offer repeats, which a constant filler would.
-        let uniq: std::collections::BTreeSet<Blinded> = oa.iter().copied().collect();
-        assert_eq!(uniq.len(), BUCKET);
-    }
-
-    /// A party's own offer must not reveal its contacts to anyone without the other secret.
-    #[test]
-    fn an_offer_does_not_reveal_a_contact_to_an_observer() {
-        let contacts = set(0..10);
-        let a = Party::new(&contacts);
-        let offered: std::collections::BTreeSet<Blinded> = a.offer().into_iter().collect();
-
-        // An observer knowing the whole address space still cannot match anything, because
-        // every entry is raised to a secret they do not have.
-        for c in set(0..200) {
-            let bare = point_of(&c).compress().to_bytes();
-            assert!(!offered.contains(&bare));
+    fn an_ask_is_the_same_size_whatever_is_held() {
+        for n in [0usize, 1, 7, 200] {
+            let cs: Vec<Address> = (0..n as u32).map(addr).collect();
+            assert_eq!(Party::new(&cs).ask().blinded.len(), BUCKET, "n = {n}");
         }
     }
 
-    /// Two exchanges by the same party must not be linkable by their wire values.
-    ///
-    /// A party that produced the same blinded set every time would be trivially trackable
-    /// across every introduction it ever made, which would make the protocol worse than
-    /// exchanging plaintext hashes with people you already trust.
     #[test]
     fn the_same_contacts_produce_different_wire_values_each_time() {
-        let contacts = set(0..20);
-        let first = Party::new(&contacts).offer();
-        let second = Party::new(&contacts).offer();
-        let overlap = first.iter().filter(|x| second.contains(x)).count();
-        assert_eq!(overlap, 0, "{overlap} wire values repeated across exchanges");
+        let cs: Vec<Address> = (0..5).map(addr).collect();
+        let p = Party::new(&cs);
+        let one = p.ask();
+        let two = p.ask();
+        let ser = |a: &Ask| -> Vec<Vec<u8>> {
+            a.blinded.iter().map(|b| b.serialize().to_vec()).collect()
+        };
+        assert_ne!(ser(&one), ser(&two), "blinding must be fresh per exchange");
     }
 
-    /// A party larger than the bucket must not silently drop contacts.
+    /// A responder holding nothing must not be able to make everything look shared.
+    ///
+    /// This is #147. The earlier protocol gave both sides output in one exchange, which meant
+    /// transmitting the initiator's comparison set to the responder, and a responder could
+    /// simply echo it: every contact appeared shared to a party holding none, which forges the
+    /// introduction credential from nothing.
+    #[test]
+    fn a_responder_holding_nothing_cannot_forge_a_shared_contact() {
+        let mine: Vec<Address> = (0..8).map(addr).collect();
+        let me = Party::new(&mine);
+        let liar = Party::new(&[]);
+
+        let ask = me.ask();
+        let mut answer = liar.answer(&ask.blinded).unwrap();
+
+        // The liar's best move is to claim its own set is whatever it just evaluated. It
+        // cannot: RFC 9497 binds the input into the output, and the liar never saw the inputs.
+        answer.theirs = answer
+            .evaluated
+            .iter()
+            .map(|e| {
+                let mut t = [0u8; 64];
+                let s = e.serialize();
+                t[..s.len().min(64)].copy_from_slice(&s[..s.len().min(64)]);
+                t
+            })
+            .collect();
+        answer.theirs.sort_unstable();
+
+        let seen = ask.learn(&answer, liar.public_key()).unwrap();
+        assert!(seen.is_empty(), "a responder with no contacts forged {seen:?}");
+    }
+
+    /// A responder that answers under a key it did not publish is refused, not believed.
+    #[test]
+    fn an_answer_under_the_wrong_key_does_not_verify() {
+        let mine: Vec<Address> = (0..4).map(addr).collect();
+        let me = Party::new(&mine);
+        let them = Party::new(&mine);
+        let other = Party::new(&mine);
+
+        let ask = me.ask();
+        let answer = them.answer(&ask.blinded).unwrap();
+
+        assert_eq!(
+            ask.learn(&answer, other.public_key()),
+            Err(PsiError::Unproven),
+            "an evaluation was accepted against a key that did not produce it"
+        );
+        // And against the right key it works, so the negative above is not vacuous.
+        assert_eq!(ask.learn(&answer, them.public_key()).unwrap().len(), 4);
+    }
+
+    /// A tampered evaluation is refused by the proof rather than producing a wrong answer.
+    #[test]
+    fn a_tampered_evaluation_is_refused() {
+        let mine: Vec<Address> = (0..4).map(addr).collect();
+        let me = Party::new(&mine);
+        let them = Party::new(&mine);
+
+        let ask = me.ask();
+        let mut answer = them.answer(&ask.blinded).unwrap();
+        answer.evaluated.swap(0, 1);
+
+        assert_eq!(
+            ask.learn(&answer, them.public_key()),
+            Err(PsiError::Unproven)
+        );
+    }
+
+    /// An answer of the wrong shape is refused rather than half-processed.
+    #[test]
+    fn a_truncated_answer_is_refused() {
+        let mine: Vec<Address> = (0..4).map(addr).collect();
+        let me = Party::new(&mine);
+        let them = Party::new(&mine);
+        let ask = me.ask();
+        let mut answer = them.answer(&ask.blinded).unwrap();
+        answer.evaluated.truncate(BUCKET - 1);
+        assert_eq!(
+            ask.learn(&answer, them.public_key()),
+            Err(PsiError::Malformed)
+        );
+    }
+
     #[test]
     fn a_set_larger_than_the_bucket_is_not_silently_truncated() {
-        let big = set(0..(BUCKET as u32 + 50));
-        let a = Party::new(&big);
-        assert_eq!(a.held(), big.len());
-        // The offer grows past the bucket rather than losing entries, which is a visible cost
-        // rather than a silent loss.
-        assert_eq!(a.offer().len(), big.len());
-    }
-
-    /// Garbage returned in place of an honest reblind must not produce a match.
-    ///
-    /// An undecodable point cannot be raised to anything, and substituting a constant for it
-    /// would make every such entry match every other one, so those become a value no real
-    /// point can take.
-    #[test]
-    fn garbage_returned_instead_of_a_reblind_does_not_match() {
-        let a = Party::new(&set(0..5));
-        let b = Party::new(&set(0..5));
-
-        // b returns junk rather than an honest reblind of a's offer.
-        let junk: Vec<Blinded> = (0..BUCKET).map(|i| [i as u8; 32]).collect();
-        let honest_from_b = a.reblind(&b.offer());
+        let cs: Vec<Address> = (0..BUCKET as u32 + 10).map(addr).collect();
+        let p = Party::new(&cs);
         assert!(
-            a.intersect(&junk, &honest_from_b).is_empty(),
-            "junk in place of a reblind produced a match"
-        );
-
-        // And undecodable input to reblind produces the reserved value, not a usable point.
-        let undecodable = vec![[0xffu8; 32]; 4];
-        assert!(a.reblind(&undecodable).iter().all(|v| *v == [0u8; 32]));
-
-        // The case that matters: the sentinel appearing on BOTH sides. A malicious party
-        // offers undecodable points, so the victim's own reblind seeds its comparison set with
-        // the sentinel, and the reply does too. If the sentinel were a comparable value rather
-        // than one no real point can take, every such position would match every other.
-        let hostile_offer = vec![[0xffu8; 32]; BUCKET];
-        let mine_on_theirs = a.reblind(&hostile_offer);
-        let theirs_on_mine = vec![[0u8; 32]; BUCKET];
-        assert!(mine_on_theirs.iter().any(|v| *v == [0u8; 32]));
-        assert!(
-            a.intersect(&theirs_on_mine, &mine_on_theirs).is_empty(),
-            "the sentinel matched itself and manufactured an intersection"
+            p.ask().blinded.len() >= p.held(),
+            "contacts were dropped to fit the bucket"
         );
     }
 
-    /// A lying responder can misattribute a genuine share, and this records that it can.
+    /// A party who submits a set of one learns whether the other holds that one element.
     ///
-    /// This is the limit of the semi-honest model, stated as a test rather than only in prose.
-    /// The responder cannot invent a share, because every value it returns must land in a set
-    /// the initiator computed from the responder's own offer. It can return, at the position of
-    /// one of the initiator's contacts, the reblinded form of a *different* contact it really
-    /// does share. The count stays honest; the names do not.
-    #[test]
-    fn a_lying_responder_can_misattribute_a_genuine_share() {
-        let shared = addr(7);
-        let a = Party::new(&[addr(1), shared]);
-        let b = Party::new(&[shared]);
-
-        let a_offer = a.offer();
-        let honest = b.reblind(&a_offer);
-        let from_b = a.reblind(&b.offer());
-
-        // Honest run: a learns the shared contact and only that.
-        assert_eq!(a.intersect(&honest, &from_b), vec![shared]);
-
-        // b instead answers every position with the reblind of the position that genuinely
-        // matched, which it can identify because it holds the contact.
-        let matching = honest
-            .iter()
-            .find(|v| a.intersect(std::slice::from_ref(v), &from_b).len() + 1 > 0 && from_b.contains(v))
-            .copied()
-            .expect("the genuine match is in b's reply");
-        let lying: Vec<Blinded> = vec![matching; a_offer.len()];
-
-        let misled = a.intersect(&lying, &from_b);
-        assert!(
-            misled.len() > 1,
-            "the responder could not misattribute, which would be better than documented"
-        );
-        assert!(
-            misled.contains(&addr(1)),
-            "a contact b does not hold was not reported as shared"
-        );
-    }
-
-    /// A singleton set is a membership query, and the protocol cannot prevent it.
-    ///
-    /// Recorded as a passing test because it is the abuse that matters and it is not fixable
-    /// with cryptography: an intersection with a set of one *is* a membership oracle. Padding
-    /// hides how many contacts a party has, not what they asked. The defences are rate
-    /// limiting and refusing to run this with strangers, neither of which lives here.
+    /// Inherent to PSI: an intersection with a singleton is a membership query, and padding
+    /// hides set size rather than this. Recorded as a test so it is a known property rather
+    /// than a discovery.
     #[test]
     fn a_singleton_probe_learns_membership_and_nothing_stops_it() {
         let target = addr(42);
-        let victim = Party::new(&set(0..100));
+        let holder = Party::new(&[target, addr(1), addr(2)]);
         let prober = Party::new(&[target]);
 
-        let (_, prober_sees) = exchange(&victim, &prober);
-        assert_eq!(prober_sees, vec![target], "the probe should succeed, and does");
-
-        // And a probe for something absent returns nothing, which is the other half of an
-        // oracle: the answer is informative either way.
-        let absent = Party::new(&[addr(9_999)]);
-        let (_, nothing) = exchange(&victim, &absent);
-        assert!(nothing.is_empty());
+        let ask = prober.ask();
+        let answer = holder.answer(&ask.blinded).unwrap();
+        assert_eq!(ask.learn(&answer, holder.public_key()).unwrap(), vec![target]);
     }
 
-    /// The exchange must be symmetric: both sides compute the same intersection.
     #[test]
     fn both_sides_agree_on_what_is_shared() {
         for n in [0u32, 1, 7, 40] {
