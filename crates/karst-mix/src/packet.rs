@@ -38,28 +38,17 @@
 //!
 //! # What this is not
 //!
-//! Deviations from the paper, enumerated. An audit found the previous version of this list
-//! said "one deviation" and understated the wide-block cipher, which is the pattern
-//! `docs/28-blinding.md` was written to condemn, so it is spelled out here instead.
+//! Deviations from the paper, enumerated.
 //!
-//! 1. **Primitives are BLAKE3-based** rather than the paper's. The MAC is a keyed BLAKE3 and
-//!    the stream is its XOF. Both are documented uses of a vetted primitive.
+//! 1. **The MAC and the key derivation are BLAKE3-based** rather than the paper's. The header
+//!    MAC is a keyed BLAKE3 and the per-hop key derivation is its XOF. Both are documented
+//!    uses of a vetted primitive.
 //!
-//! 2. **The wide-block cipher is in the LIONESS shape and is not LIONESS.** The round
-//!    structure matches Anderson and Biham (FSE 1996) exactly: four unbalanced rounds
-//!    S, H, S, H, with the left half at 32 bytes to satisfy the paper's `|L| = keylen(S)`
-//!    requirement, and `wide_decrypt` is its exact inverse. Three things differ:
-//!    - The paper uses four **independent** keys; these are four subkeys of one, so their
-//!      independence is computational rather than information-theoretic.
-//!    - The paper computes `S(L xor K)`, keying the stream cipher with the round key XORed
-//!      into the left half. This hashes the two together instead, so the round function is a
-//!      joint PRF of `(L, K)` rather than the paper's construction.
-//!    - The hash rounds carry no domain-separation label, unlike every other hash here.
-//!
-//!    None of these is known to weaken the construction under a PRF assumption on BLAKE3, and
-//!    the tagging resistance the payload depends on is exercised directly. But it is not the
-//!    function LIONESS's analysis is stated over, and `lioness-rs` now exists as a candidate
-//!    replacement. See issue #152.
+//! 2. **The wide-block cipher is LIONESS** (Anderson and Biham, *Two Practical and Provably
+//!    Secure Block Ciphers: BEAR and LION*, FSE 1996), from `lioness-rs`, instantiated as
+//!    ChaCha20 and BLAKE3. The paper's four round keys are information-theoretically
+//!    independent and these are four subkeys of the per-hop secret, which is standard practice
+//!    and is the one deviation that remains.
 //!
 //! 3. **A length field accompanies the zero prefix.** The paper's payload is `0_kappa || m`
 //!    with the exit checking the prefix; this is `0_kappa || len || m || padding`. The prefix
@@ -217,55 +206,64 @@ const FEISTEL_L: usize = 32;
 /// attacker flip a chosen plaintext bit by flipping the corresponding ciphertext bit, which
 /// is exactly the mark a confederate downstream looks for. Here any single-bit change
 /// randomises the entire payload, so a modification produces noise rather than a signal.
-fn wide_encrypt(key: &[u8; 32], data: &mut [u8]) {
-    if data.len() <= FEISTEL_L {
-        // Degenerate width: fall back to a keyed stream over the whole thing. Not reachable
-        // with the sizes above, and defined rather than left to panic.
-        let ks = stream(key, "narrow", data.len());
-        xor(data, &ks);
-        return;
-    }
-    let (l, r) = data.split_at_mut(FEISTEL_L);
+/// The wide-block cipher, from the paper rather than shaped like it.
+///
+/// Sphinx needs a strong pseudorandom permutation over the whole payload: `delta` carries no
+/// MAC, so tagging resistance rests entirely on any modification diffusing across the block
+/// instead of flipping a chosen bit. The paper names LIONESS (Anderson and Biham, *Two
+/// Practical and Provably Secure Block Ciphers: BEAR and LION*, FSE 1996) as the instantiation.
+///
+/// This is `lioness-rs`, instantiated as ChaCha20 and BLAKE3. The previous version here had
+/// the right round structure and the wrong keying: the paper computes `S(L xor K)`, feeding the
+/// round key XORed into the left half to the stream cipher, and the local version hashed the
+/// two together instead, which makes the round function a joint PRF rather than the function
+/// the analysis is stated over.
+///
+/// # There are no published test vectors, so the test is a second implementation
+///
+/// Neither Rust LIONESS crate ships known-answer tests. What exists instead is two independent
+/// implementations, written years apart by different authors, and
+/// `the_construction_matches_an_independent_implementation` checks they agree byte for byte.
+/// Two implementations agreeing is the evidence a KAT would have provided.
+type Wide = lioness_rs::Lioness<chacha20::ChaCha20, blake3::Hasher>;
 
-    // R ^= S(k1, L)
-    let ks = stream(&subkey(key, "f1"), &hex(l), r.len());
-    xor(r, &ks);
-    // L ^= H(k2, R)
-    xor(l, &hash_to(&subkey(key, "f2"), r, FEISTEL_L));
-    // R ^= S(k3, L)
-    let ks = stream(&subkey(key, "f3"), &hex(l), r.len());
-    xor(r, &ks);
-    // L ^= H(k4, R)
-    xor(l, &hash_to(&subkey(key, "f4"), r, FEISTEL_L));
+/// LIONESS takes four independent round keys. The per-hop secret is one, so they are derived,
+/// which is standard practice and is a deviation from the paper's information-theoretic
+/// independence.
+fn wide_key(key: &[u8; 32]) -> lioness_rs::Key<Wide> {
+    let mut raw = [0u8; 128];
+    for (i, label) in ["f1", "f2", "f3", "f4"].iter().enumerate() {
+        raw[i * 32..(i + 1) * 32].copy_from_slice(&subkey(key, label));
+    }
+    lioness_rs::Key::<Wide>::try_from(&raw[..]).expect("128 bytes is this cipher's key length")
+}
+
+fn wide_encrypt(key: &[u8; 32], data: &mut [u8]) {
+    use lioness_rs::KeyInit;
+    // A block at or below the left half has no right half to diffuse into. Unreachable at
+    // PAYLOAD_BYTES and refused rather than silently degraded to a stream cipher, which is
+    // what the previous fallback did: exactly the primitive the wide block exists to avoid.
+    assert!(
+        data.len() > FEISTEL_L,
+        "a wide-block cipher needs a block wider than its left half"
+    );
+    Wide::new(&wide_key(key))
+        .encrypt_block(data)
+        .expect("length checked above");
 }
 
 fn wide_decrypt(key: &[u8; 32], data: &mut [u8]) {
-    if data.len() <= FEISTEL_L {
-        let ks = stream(key, "narrow", data.len());
-        xor(data, &ks);
-        return;
-    }
-    let (l, r) = data.split_at_mut(FEISTEL_L);
-
-    xor(l, &hash_to(&subkey(key, "f4"), r, FEISTEL_L));
-    let ks = stream(&subkey(key, "f3"), &hex(l), r.len());
-    xor(r, &ks);
-    xor(l, &hash_to(&subkey(key, "f2"), r, FEISTEL_L));
-    let ks = stream(&subkey(key, "f1"), &hex(l), r.len());
-    xor(r, &ks);
+    use lioness_rs::KeyInit;
+    assert!(
+        data.len() > FEISTEL_L,
+        "a wide-block cipher needs a block wider than its left half"
+    );
+    Wide::new(&wide_key(key))
+        .decrypt_block(data)
+        .expect("length checked above");
 }
 
-fn hex(b: &[u8]) -> String {
-    b.iter().map(|x| format!("{x:02x}")).collect()
-}
 
-fn hash_to(key: &[u8; 32], data: &[u8], n: usize) -> Vec<u8> {
-    let mut h = blake3::Hasher::new_keyed(key);
-    h.update(data);
-    let mut out = vec![0u8; n];
-    h.finalize_xof().fill(&mut out);
-    out
-}
 
 // ---------------------------------------------------------------- types
 
@@ -823,6 +821,108 @@ mod tests {
             },
             _ => panic!("expected a forward"),
         }
+    }
+
+    /// Two independent LIONESS implementations agree byte for byte.
+    ///
+    /// Neither Rust LIONESS crate ships known-answer test vectors, and the crate this depends
+    /// on says so in its own test module. So the test is a second implementation: `lioness`
+    /// by Jeff Burdges and `lioness-rs` by the Nym project, written years apart by different
+    /// authors, on different dependency stacks. If both compute the same permutation for the
+    /// same key and block, the construction is pinned by something other than one author's
+    /// reading of the paper.
+    ///
+    /// The comparison runs over ChaCha20 and BLAKE2b because that is the pair both implement.
+    /// What it establishes is the **round structure and the keying**, which is what the local
+    /// version got wrong; the hash choice is orthogonal, and the packet path above uses BLAKE3
+    /// for the same reason everything else in this crate does.
+    #[test]
+    fn the_construction_matches_an_independent_implementation() {
+        use blake2::digest::consts::U32;
+        use lioness::{LionessDefault, RAW_KEY_SIZE};
+        use lioness_rs::KeyInit;
+
+        type Independent = lioness_rs::Lioness<chacha20::ChaCha20, blake2::Blake2bMac<U32>>;
+
+        let mut raw = [0u8; RAW_KEY_SIZE];
+        for (i, b) in raw.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(7).wrapping_add(3);
+        }
+
+        for len in [FEISTEL_L + 1, 200, PAYLOAD_BYTES] {
+            let plain: Vec<u8> = (0..len).map(|i| (i % 251) as u8).collect();
+
+            let mut theirs = plain.clone();
+            LionessDefault::new_raw(&raw).encrypt(&mut theirs).unwrap();
+
+            let mut ours = plain.clone();
+            let key = lioness_rs::Key::<Independent>::try_from(&raw[..]).unwrap();
+            Independent::new(&key).encrypt_block(&mut ours).unwrap();
+
+            assert_eq!(ours, theirs, "the two implementations disagree at {len} bytes");
+            assert_ne!(ours, plain);
+        }
+    }
+
+    /// The keying the paper specifies, checked against the paper's equations directly.
+    ///
+    /// LIONESS is `R ^= S(L xor K1); L ^= H(K2, R); R ^= S(L xor K3); L ^= H(K4, R)`. The
+    /// distinguishing feature is that the round key is **XORed into the left half** and the
+    /// result keys the stream cipher. The previous local version hashed the two together
+    /// instead, which is a joint PRF of the same inputs and is not the same function.
+    ///
+    /// So this writes the four equations out and asserts the crate computes them. It is a
+    /// weaker check than the cross-implementation test above, because a reference written here
+    /// could repeat a mistake made here; what it adds is that it names the specific property,
+    /// so a crate that silently changed its keying would fail this and say why.
+    #[test]
+    fn the_round_key_is_xored_into_the_left_half() {
+        use blake3::Hasher;
+        use chacha20::cipher::{KeyIvInit, StreamCipher};
+        use lioness_rs::KeyInit;
+
+        let mut raw = [0u8; 128];
+        for (i, b) in raw.iter_mut().enumerate() {
+            *b = (i as u8).wrapping_mul(11).wrapping_add(5);
+        }
+        let mut block: Vec<u8> = (0..300u32).map(|i| (i % 251) as u8).collect();
+
+        // The crate.
+        let mut theirs = block.clone();
+        let k = lioness_rs::Key::<Wide>::try_from(&raw[..]).unwrap();
+        Wide::new(&k).encrypt_block(&mut theirs).unwrap();
+
+        // The paper.
+        let stream_into = |left: &[u8], round_key: &[u8], right: &mut [u8]| {
+            let mut sk = [0u8; 32];
+            for i in 0..32 {
+                sk[i] = round_key[i] ^ left[i];
+            }
+            let mut c = chacha20::ChaCha20::new(&sk.into(), &[0u8; 12].into());
+            c.apply_keystream(right);
+        };
+        let mac_into = |right: &[u8], round_key: &[u8], left: &mut [u8]| {
+            let mut kk = [0u8; 32];
+            kk.copy_from_slice(&round_key[..32]);
+            let mut h = Hasher::new_keyed(&kk);
+            h.update(right);
+            let tag = h.finalize();
+            for (i, b) in left.iter_mut().enumerate() {
+                *b ^= tag.as_bytes()[i];
+            }
+        };
+        {
+            let (l, r) = block.split_at_mut(32);
+            stream_into(l, &raw[0..32], r);
+            mac_into(r, &raw[32..64], l);
+            stream_into(l, &raw[64..96], r);
+            mac_into(r, &raw[96..128], l);
+        }
+
+        assert_eq!(
+            theirs, block,
+            "the crate does not compute the paper's rounds with XOR keying"
+        );
     }
 
     /// A payload that did not survive intact is refused, not delivered.
