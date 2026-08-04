@@ -80,3 +80,9 @@ karst-witness = { path = "crates/karst-witness" }
 karst-attest = { path = "crates/karst-attest" }
 karst-afford = { path = "crates/karst-afford" }
 karst-thread = { path = "crates/karst-thread" }
+
+# Dependencies optimised, our own crates not. The suite is dominated by curve25519, RSA
+# blinding and LIONESS, none of which we debug, and all of which run about ten times slower
+# unoptimised. Our crates stay at opt-level 0 so debug assertions and backtraces survive.
+[profile.dev.package."*"]
+opt-level = 3
