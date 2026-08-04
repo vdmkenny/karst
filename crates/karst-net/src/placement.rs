@@ -99,14 +99,49 @@ pub const DEFAULT_REPLICAS: usize = 3;
 /// The value placement rotates on.
 ///
 /// It must be **unpredictable** before its epoch begins, or rotation buys nothing: an adversary
-/// grinds against a value they can compute in advance. A counter is the worst case and was what
+/// grinds against a value it can compute in advance. A counter is the worst case and was what
 /// this used first.
 ///
-/// Producing such a value without a trusted party is its own problem, solved by commit-and-
-/// reveal among a quorum (Syta, Jovanovic, Kokoris Kogias, Gailly, Gasser, Khoffi, Fischer,
-/// Ford, *Scalable Bias-Resistant Distributed Randomness*, IEEE S&P 2017) and deployed as
-/// drand. Nothing here produces one; this type is the shape of the dependency, and
-/// [`Beacon::predictable`] exists so tests can be explicit about using the unsafe kind.
+/// # Why it is not a shared beacon
+///
+/// Every deployed unbiasable beacon rests on an honest-majority assumption over a named set.
+/// drand fixes its group by a distributed key generation ceremony, Tor's shared random value
+/// needs its directory authorities, a stake-weighted beacon needs a stake register. That named
+/// set is error 03, and this design cannot have one.
+///
+/// Nor is it an engineering gap that better protocol design closes. Cleve (*Limits on the
+/// Security of Coin Flips when Half the Processors Are Faulty*, STOC 1986) shows no protocol
+/// agrees on a bit with negligible bias once half the parties are faulty, and Douceur (*The
+/// Sybil Attack*, IPTPS 2002) shows that without a logically centralised authority an adversary
+/// can be half the parties whenever it chooses. Open membership plus free identities rules out
+/// distributed coin tossing.
+///
+/// # So each publisher brings its own
+///
+/// The value for an epoch is the **publisher's own VRF output** on that epoch, from
+/// `schnorrkel`'s Schnorr VRF over Ristretto. Unpredictable to everyone but the publisher,
+/// unique so the publisher cannot regrind it, verifiable by anyone holding the publisher's VRF
+/// public key, and there are as many of them as there are publishers, which is "zero or n,
+/// never one" satisfied literally rather than by analogy.
+///
+/// # What this buys, and what it does not
+///
+/// It stops the adversary **aiming**. It cannot take a named publisher's slots by hashing a few
+/// hundred candidate identities, because it does not know what to hash against until the epoch
+/// starts. That is the attack Biryukov, Pustogarov and Weinmann ran against Tor and Sridhar and
+/// colleagues priced on IPFS at about four dollars.
+///
+/// It does nothing about **presence**. Rendezvous hashing is uniform and uniform is exactly what
+/// unpredictability guarantees, so an adversary running a share of the provider set holds that
+/// share of every publisher's placement, having ground nothing. Measured in
+/// `an_unpredictable_beacon_stops_aiming_and_not_presence`.
+///
+/// # The cost, which is real
+///
+/// Placement stops being announcement-free. The reader needs the publisher's beacon for the
+/// epoch, so it needs one small unforgeable value that any provider can serve and anyone can
+/// verify. A publisher that stops emitting falls back to a stale value, which an adversary then
+/// has unlimited time to grind against, so silence is a slow-acting attack on yourself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Beacon {
     pub epoch: u64,
@@ -133,6 +168,97 @@ impl Beacon {
     }
 }
 
+/// A publisher's beacon key. Separate from its L2 identity, like every other key here.
+pub struct BeaconKey {
+    keypair: schnorrkel::Keypair,
+}
+
+/// What travels with a beacon so a reader can check it.
+#[derive(Clone)]
+pub struct BeaconProof {
+    pub epoch: u64,
+    pub value: [u8; 32],
+    preout: [u8; 32],
+    proof: Vec<u8>,
+}
+
+impl core::fmt::Debug for BeaconKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str("BeaconKey(redacted)")
+    }
+}
+
+impl core::fmt::Debug for BeaconProof {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        write!(f, "BeaconProof(epoch {})", self.epoch)
+    }
+}
+
+/// The transcript a beacon is computed over. Domain separated, so a signature over anything
+/// else in this system cannot be replayed as a beacon.
+fn beacon_transcript(epoch: u64) -> merlin::Transcript {
+    let mut t = merlin::Transcript::new(b"karst.net.v2.beacon");
+    t.append_message(b"epoch", &epoch.to_le_bytes());
+    t
+}
+
+impl BeaconKey {
+    pub fn generate() -> Self {
+        BeaconKey {
+            keypair: schnorrkel::Keypair::generate(),
+        }
+    }
+
+    /// Deterministic, for tests that need a fixed transcript.
+    pub fn from_seed(seed: [u8; 32]) -> Self {
+        let mini = schnorrkel::MiniSecretKey::from_bytes(&seed).expect("32 bytes");
+        BeaconKey {
+            keypair: mini.expand_to_keypair(schnorrkel::ExpansionMode::Ed25519),
+        }
+    }
+
+    /// What a reader needs to check this publisher's beacons. Published once.
+    pub fn public(&self) -> [u8; 32] {
+        self.keypair.public.to_bytes()
+    }
+
+    /// The beacon for an epoch, with the proof a reader checks it by.
+    ///
+    /// The publisher can compute every future epoch immediately, which is fine: the publisher
+    /// is not the adversary here, and the value being unique means it cannot shop for a
+    /// favourable one. What matters is that nobody else can compute it before it is emitted.
+    pub fn beacon(&self, epoch: u64) -> BeaconProof {
+        let (inout, proof, _) = self.keypair.vrf_sign(beacon_transcript(epoch));
+        BeaconProof {
+            epoch,
+            value: inout.make_bytes(b"karst.net.v2.beacon.value"),
+            preout: inout.to_preout().to_bytes(),
+            proof: proof.to_bytes().to_vec(),
+        }
+    }
+}
+
+impl BeaconProof {
+    /// Check a beacon against the publisher's beacon key.
+    ///
+    /// A reader that skips this is taking placement from whoever spoke last, which is the
+    /// announcement-withholding attack the computed-placement design existed to remove.
+    pub fn verify(&self, publisher_key: &[u8; 32]) -> Option<Beacon> {
+        let pk = schnorrkel::PublicKey::from_bytes(publisher_key).ok()?;
+        let proof = schnorrkel::vrf::VRFProof::from_bytes(&self.proof).ok()?;
+        let preout = schnorrkel::vrf::VRFPreOut::from_bytes(&self.preout).ok()?;
+        let (inout, _) = pk
+            .vrf_verify(beacon_transcript(self.epoch), &preout, &proof)
+            .ok()?;
+        let value: [u8; 32] = inout.make_bytes(b"karst.net.v2.beacon.value");
+        (value == self.value).then_some(Beacon {
+            epoch: self.epoch,
+            value,
+        })
+    }
+}
+
+/// How long a provider must have been present before it can hold anything.
 /// How long a provider must have been present before it can hold anything.
 ///
 /// A beacon is predictable for some window before its epoch, because producing one takes
@@ -446,6 +572,96 @@ mod beacon_tests {
 
     fn providers(n: u16) -> Vec<u16> {
         (0..n).collect()
+    }
+
+    /// A publisher's beacon is unforgeable and verifiable by anyone holding its key.
+    #[test]
+    fn a_beacon_verifies_against_its_publisher_and_nobody_else() {
+        let k = BeaconKey::from_seed([1u8; 32]);
+        let other = BeaconKey::from_seed([2u8; 32]);
+
+        let b = k.beacon(7);
+        let checked = b.verify(&k.public()).expect("an honest beacon verifies");
+        assert_eq!(checked.epoch, 7);
+        assert_eq!(checked.value, b.value);
+
+        assert!(
+            b.verify(&other.public()).is_none(),
+            "a beacon verified against a key that did not produce it"
+        );
+    }
+
+    /// The value is a function of the key and the epoch, and of nothing the publisher chooses.
+    ///
+    /// This is what "unique" buys and it is the difference from a signature. A publisher that
+    /// could shop for a favourable output would grind its own placement, picking the epoch
+    /// value that puts its own providers in the set.
+    #[test]
+    fn a_publisher_cannot_shop_for_a_favourable_value() {
+        let k = BeaconKey::from_seed([3u8; 32]);
+        assert_eq!(k.beacon(11).value, k.beacon(11).value, "not deterministic");
+        assert_ne!(k.beacon(11).value, k.beacon(12).value, "epochs collide");
+
+        // And a different publisher gets a different value for the same epoch, so the epoch
+        // number alone predicts nothing.
+        let j = BeaconKey::from_seed([4u8; 32]);
+        assert_ne!(k.beacon(11).value, j.beacon(11).value);
+    }
+
+    /// A tampered beacon does not verify, so a provider cannot substitute a value it likes.
+    #[test]
+    fn a_substituted_value_is_refused() {
+        let k = BeaconKey::from_seed([5u8; 32]);
+        let mut b = k.beacon(2);
+        b.value[0] ^= 1;
+        assert!(
+            b.verify(&k.public()).is_none(),
+            "a value that does not match its proof was accepted"
+        );
+
+        let mut c = k.beacon(2);
+        c.epoch = 3;
+        assert!(
+            c.verify(&k.public()).is_none(),
+            "a beacon was accepted for an epoch it was not computed for"
+        );
+    }
+
+    /// The grinding attack the beacon exists to stop, run against a real one.
+    ///
+    /// `grinding_into_a_chosen_publishers_set_is_cheap` shows a slot costs a few hundred
+    /// hashes when the value is predictable. That attack needs the value in advance, and here
+    /// it is a VRF output the adversary cannot compute without the publisher's secret. What
+    /// remains available to them is grinding *after* the epoch's value is published, which is
+    /// a race against the epoch rather than unlimited precomputation.
+    #[test]
+    fn a_vrf_beacon_cannot_be_ground_against_in_advance() {
+        let honest = providers(128);
+        let target = addr(9_999);
+        let k = DEFAULT_REPLICAS;
+        let publisher = BeaconKey::from_seed([6u8; 32]);
+
+        // The adversary grinds an identity that wins for epoch 5, knowing everything public.
+        let future = 5u64;
+        let guessed = Beacon::predictable(future);
+        let incumbent = rank(&target, &guessed, &honest, k);
+        let bar = weight(&target, &guessed, *incumbent.last().unwrap());
+        let mut winner = 1_000u16;
+        while weight(&target, &guessed, winner) <= bar {
+            winner = winner.wrapping_add(1);
+        }
+
+        // Then the epoch arrives and the publisher emits its own value instead.
+        let real = publisher
+            .beacon(future)
+            .verify(&publisher.public())
+            .unwrap();
+        let mut all = honest.clone();
+        all.push(winner);
+        assert!(
+            !rank(&target, &real, &all, k).contains(&winner),
+            "an identity ground in advance still landed, so the value was predictable"
+        );
     }
 
     /// An unpredictable beacon stops targeted grinding and does not stop bulk minting.

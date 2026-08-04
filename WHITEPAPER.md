@@ -740,14 +740,22 @@ without a logically centralised authority an adversary can be half the parties w
 chooses. Open membership plus free identities therefore rules out distributed coin tossing, and
 every route back to it reintroduces the privileged set error 03 exists to delete.
 
-The route that stays inside the design is to stop asking for a *shared* value: give each
-publisher a verifiable random function keypair and let the placement value for an epoch be that
-publisher's own VRF output on it. Unpredictable to everyone but the publisher, unique so the
-publisher cannot regrind it, verifiable by anyone holding the address, and there are as many of
-them as there are publishers, which is "zero or n, never one" satisfied literally. The cost is
-that the value has to reach the reader, so this section's claim that placement needs no
-announcement weakens to needing one small unforgeable one, and a publisher who stops emitting
-falls back to a stale value an adversary then has unlimited time to grind against. See #79.
+**So each publisher brings its own, and that is what ships.** The value for an epoch is the
+publisher's own VRF output on it, a Schnorr VRF over Ristretto from `schnorrkel`. Unpredictable
+to everyone but the publisher, unique so the publisher cannot shop for a value that favours
+providers it runs, verifiable by anyone holding the publisher's beacon key, and there are as
+many of them as there are publishers, which is "zero or n, never one" satisfied literally rather
+than by analogy.
+
+The cost is paid rather than argued away: **placement is no longer announcement-free.** A reader
+needs the publisher's beacon for the epoch, which is one small unforgeable value any provider
+can serve and anyone can check, and a publisher that stops emitting falls back to a stale value
+an adversary then has unlimited time to grind against. Silence becomes a slow attack on
+yourself.
+
+That trade is worth taking because the property given up is weaker than it sounds. A reader
+already fetches from providers to read anything at all, so one more cacheable value is a
+marginal addition, whereas targeted capture at the prices above is demonstrated and cheap.
 
 **Divergence is detectable, not preventable.** A reader that asks `k` providers and receives
 different answers learns that at least one is lying and cannot learn which. Quorum reads
@@ -1634,7 +1642,7 @@ See [`docs/08-roadmap.md`](docs/08-roadmap.md) for phases and open issues.
 |---|---|---|
 | L2 Identity | built, tested | `karst-id` |
 | L6 Objects | built, tested | `karst-object`, `karst-blob` |
-| L6.1 Resolution | built; placement grindable until a beacon exists (#79) | `karst-net` |
+| L6.1 Resolution | built; per-publisher VRF beacon, presence attack open (#130) | `karst-net` |
 | L7 Streams | structure built, live append open | `karst-blob` |
 | L9 Authority | built, tested | `karst-cap` |
 | L10 Document | built, tested | `karst-doc` |
