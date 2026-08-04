@@ -29,6 +29,15 @@ implementation of a standard exists it is used rather than rebuilt, and where on
 construction is a published scheme with its deviations enumerated in the module that implements
 it.
 
+> **The whole stack runs, in one binary.** `karst-stack-demo` stands up ten mixes in four
+> layers on real UDP sockets and exercises **every layer that has code**: L1 paths composed
+> from signed segments, L3 emission drawn without reference to the queue, L4 mixing with L4/L6
+> sealing, L5 introduction by shared contact, L6 objects, L6.1 computed placement on a
+> per-publisher VRF beacon, L7 verified file seeking, L8 witnessed history, L9 and L11
+> delegated authority, L10 documents, L12 agent fetch policy, L13 authorship agency, L14
+> unlinkable credentials, and L15 discovery. It checks nineteen claims about itself and exits
+> non-zero if any of them stops holding. L0 Bearer is specification only.
+>
 > **L4 mixing runs.** `karst-net-demo` stands up seven mixes in four layers on real UDP
 > sockets, one thread each, and two clients exchange messages through them with cover traffic
 > carrying the rest of the stream. Against a whole-network observer the design holds the
@@ -40,7 +49,7 @@ it.
 > [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 561 tests
+cargo test          # 562 tests
 cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-index --bin karst-search    # discovery with 200,000 sybils in the room
 cargo run --release -p karst-stack --bin karst-stack-demo  # the whole stack, composed
@@ -68,7 +77,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`karst-wire`](crates/karst-wire) | L3 Wire | One datagram size, Poisson emission drawn without reference to the queue. |
 | [`karst-seal`](crates/karst-seal) | L4/L6 | HPKE base mode, RFC 9180. Sealing keys are separate from identity keys, on purpose. |
 | [`karst-net`](crates/karst-net) | L3-L6.1 | Directory, routes drawn uniformly over operators, providers, placement on a per-publisher VRF beacon, clients, public feeds. The network, running. |
-| [`karst-stack`](crates/karst-stack) | all | The layers composed over real sockets: publish, replicate, read, detect a withholding replica, find a shared contact without naming one, and pay a relay unlinkably. |
+| [`karst-stack`](crates/karst-stack) | all | **The full-stack proof of concept.** Every layer with code, over real sockets, in one run: sender-composed paths, paced emission, sealed mail, mixing, publication, replication, witnessed history, verified file seeking, delegated authority, agent fetch policy, shared-contact discovery, unlinkable payment, and a hosted-nowhere discussion. Nineteen checks, and it exits non-zero if any fails. |
 | [`karst-index`](crates/karst-index) | L15 Discovery | Publishing is announcing. Ranking is the reader's, and every stranger together counts once. |
 | [`karst-symmetry`](crates/karst-symmetry) | L16 Symmetry | Does flattening returns to scale actually prevent capture? Partly. |
 | [`karst-value`](crates/karst-value) | L14 Value | Capacity credentials, earned by relaying and spent unlinkably as RFC 9474 blind signatures. No bank. |
