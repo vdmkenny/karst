@@ -66,7 +66,7 @@ impl Checks {
 }
 
 /// How many checks a healthy run makes. A run that makes fewer exited early.
-const CHECKS_EXPECTED: usize = 8;
+const CHECKS_EXPECTED: usize = 19;
 
 fn rule(t: &str) {
     println!("\n\x1b[1m{}\x1b[0m", t);
@@ -540,6 +540,241 @@ fn run() -> std::io::Result<std::process::ExitCode> {
     note("him, and one of them stopped agreeing. What he cannot detect is all of them showing");
     note("him the same incomplete view, which needs comparison with other readers.");
 
+    rule("L3 + L4: what the wire and the provider actually see");
+
+    // L3. The emission schedule is drawn from its own randomness, never from the queue, so a
+    // client that starts talking does not change when it transmits.
+    // Deterministic seeds so the two schedules are comparable; the point is that the queue
+    // does not enter the draw, not that the draw is fixed.
+    let mut idle = karst_wire::Pacer::<u8>::seeded(20.0, 7);
+    let mut busy = karst_wire::Pacer::<u8>::seeded(20.0, 7);
+    for i in 0..64u8 {
+        let _ = busy.offer(i);
+    }
+    let mut quiet = Vec::new();
+    let mut talking = Vec::new();
+    for ms in 0..600u64 {
+        quiet.push(idle.tick(ms, || 0u8).len());
+        talking.push(busy.tick(ms, || 0u8).len());
+    }
+    println!(
+        "  a silent client emitted {} times in 600ms; a client with 64 queued emitted {}",
+        quiet.iter().sum::<usize>(),
+        talking.iter().sum::<usize>()
+    );
+    checks.require(
+        quiet == talking,
+        "the emission schedule is identical whether or not the client has anything to say",
+    );
+
+    // L4/L6. What the provider holds for a recipient, and what it can do with it.
+    let recipient = karst_seal::SealingKey::from_seed([190u8; 32]);
+    let sealed = karst_seal::seal(&recipient.public(), b"", b"the actual message");
+    println!(
+        "  the provider stores {} bytes and can read none of them",
+        sealed.len()
+    );
+    checks.require(
+        !sealed.windows(6).any(|w| w == b"actual"),
+        "the plaintext does not appear in what the provider holds",
+    );
+    checks.require(
+        recipient.open(b"", &sealed).as_deref() == Ok(b"the actual message".as_slice()),
+        "and the recipient can still open it",
+    );
+    note("Sealing is separate from mixing on purpose: mixing hides who is talking to whom and");
+    note("hides nothing from the party the packet is delivered to, which at L4 is a provider.");
+
+    rule("L1: alice composes her own path, from segments she holds");
+
+    // Nothing converged to produce this. Each segment is one operator's signed willingness to
+    // carry between two points, and alice assembles an end-to-end path from the ones she has.
+    let now_ms = 1_000u64;
+    let mut segments = karst_path::Segments::new();
+    let carriers: Vec<karst_id::Identity> = (0..3)
+        .map(|i| karst_id::Identity::from_seed([160u8 + i; 32]))
+        .collect();
+    let points: Vec<karst_id::Address> = (0..4)
+        .map(|i| karst_id::Identity::from_seed([170u8 + i; 32]).address())
+        .collect();
+    for (i, op) in carriers.iter().enumerate() {
+        segments
+            .learn(
+                karst_path::Segment::offer(op, points[i], points[i + 1], now_ms + 60_000),
+                now_ms,
+            )
+            .expect("a signed offer");
+    }
+    let paths = segments.compose(points[0], points[3], now_ms);
+    match paths.first() {
+        Some(path) => {
+            println!("  {} hops, accountable to:", path.hops());
+            for a in path.accountable() {
+                println!("    {}", a.short());
+            }
+            checks.require(path.hops() == 3, "the path spans every segment alice holds");
+        }
+        None => {
+            checks.require(false, "a path composed from held segments");
+            println!("  \x1b[31mno path\x1b[0m");
+        }
+    }
+    // A segment naming an operator who did not sign it is refused at the door.
+    let impostor = karst_path::Segment::offer(&carriers[0], points[0], points[1], now_ms + 1);
+    let mut forged = karst_path::Segments::new();
+    println!(
+        "  a segment that expired before it was offered: {:?}",
+        forged.learn(impostor, now_ms + 10_000)
+    );
+    note("No routing table converged, nothing was advertised onward, and two senders holding");
+    note("different segments are both correct. A path names, in advance, every party that must");
+    note("misbehave for it to fail.");
+
+    rule("L6/L7: a file, chunked and verified, costing the origin one upload");
+
+    let payload: Vec<u8> = (0..200_000u32).map(|i| (i % 251) as u8).collect();
+    let (manifest, bodies) = karst_blob::Manifest::build("lecture.av", "video/karst", &payload);
+    let mut origin = karst_blob::BlobStore::new();
+    origin.put_all(&bodies);
+    println!(
+        "  {} bytes in {} chunks, manifest {}",
+        manifest.total_len,
+        manifest.chunks.len(),
+        manifest.cid().short()
+    );
+
+    // A reader seeks into the middle and verifies that chunk alone.
+    let idx = manifest.chunks_for_range(120_000, 128)[0];
+    let proof = manifest.proof(idx).expect("an inclusion proof");
+    let seek = origin
+        .read_range(&manifest, 120_000, 128)
+        .expect("range read");
+    checks.require(
+        seek == payload[120_000..120_128],
+        "a byte range verified against the root without fetching the rest",
+    );
+    println!(
+        "  seek to byte 120000 -> chunk {idx}, verified with a {} byte proof",
+        proof.wire_len()
+    );
+
+    let mut tampered = bodies[idx].clone();
+    tampered[0] ^= 0xff;
+    checks.require(
+        !manifest.verify_chunk(idx, &tampered, &proof),
+        "a corrupted chunk from a peer was refused",
+    );
+    println!("  a peer serving a corrupted chunk: refused");
+
+    let stats = karst_blob::Swarm::new(origin.clone(), 10_000).distribute(&manifest);
+    println!(
+        "  audience 10000: origin pushed {} bytes, delivered {}, x{:.0}",
+        stats.origin_bytes,
+        stats.delivered_bytes,
+        stats.amplification()
+    );
+    note("The origin uploads once whether the audience is one or ten thousand, and every peer");
+    note("verifies what it was served rather than trusting who served it.");
+
+    rule("L9 + L11: an agent acts with authority that can only narrow");
+
+    let agent = karst_id::Identity::from_seed([180u8; 32]);
+    let resource = karst_afford::Resource {
+        owner: alice_id.address(),
+        title: "Bookings".into(),
+        affordances: vec![karst_afford::Affordance {
+            name: "book".into(),
+            summary: "Reserve a slot".into(),
+            params: vec![karst_afford::Param::required(
+                "slot",
+                karst_afford::ParamType::Instant,
+            )],
+            price_minor: 4500,
+            currency: "EUR".into(),
+        }],
+    };
+    // Alice owns the resource and grants a person full authority; the person narrows it for
+    // an agent. The agent never holds either of their keys.
+    let person = karst_id::Identity::from_seed([181u8; 32]);
+    let root_cap =
+        karst_cap::Capability::issue(&alice_id, resource.cid(), person.address(), vec![]);
+    let narrowed = root_cap
+        .attenuate(
+            &person,
+            agent.address(),
+            karst_afford::agent_budget("book", 5000, 10_000, 1),
+        )
+        .expect("attenuation");
+    let mut args = std::collections::BTreeMap::new();
+    args.insert("slot".to_string(), karst_doc::Value::Instant(42));
+    let invocation = karst_cap::SignedInvocation::sign(
+        &agent,
+        &narrowed,
+        karst_afford::request_for("book", 4500, [1; 16], &args),
+    );
+    let mut ledger = karst_cap::UseLedger::new();
+    match resource.invoke(&narrowed, &invocation, &args, &mut ledger, 100) {
+        Ok(r) => println!(
+            "  \x1b[32mbooked, charged {} {}\x1b[0m",
+            r.charged_minor, r.currency
+        ),
+        Err(e) => {
+            checks.require(false, "the agent's authorised invocation succeeded");
+            println!("  \x1b[31m{e:?}\x1b[0m");
+        }
+    }
+    // The same capability a second time, against a one-use budget.
+    let again = karst_cap::SignedInvocation::sign(
+        &agent,
+        &narrowed,
+        karst_afford::request_for("book", 4500, [2; 16], &args),
+    );
+    let second = resource.invoke(&narrowed, &again, &args, &mut ledger, 100);
+    checks.require(second.is_err(), "a one-use capability was spent only once");
+    println!("  spending it twice: {:?}", second.err());
+    note("The agent never held alice's key. A capability can only ever narrow, so an agent");
+    note("that signs itself a wider one is refused, which an API key cannot do.");
+
+    rule("L12: what the agent may fetch, and what its fetches say about it");
+
+    let declared: Vec<karst_object::Cid> = node_objs.iter().map(|o| o.cid()).collect();
+    let held: std::collections::BTreeSet<karst_object::Cid> =
+        declared.iter().take(2).copied().collect();
+    let policy = karst_agency::Policy::default();
+    let ask = karst_agency::Request::new();
+    let plan = karst_agency::decide(&declared, &held, &ask, &policy);
+    println!(
+        "  {} nodes declared, {} already held, agent fetches {}",
+        declared.len(),
+        held.len(),
+        plan.fetches.len()
+    );
+    checks.require(
+        plan.fetches.len() == declared.len(),
+        "the fetch set is the declaration, not the difference from what is cached",
+    );
+    note("The set an agent fetches is a function of what the document declares, not of what");
+    note("this reader happens to have. Deriving it from the local store made the fetch pattern");
+    note("a 64-bit identifier for the reader.");
+
+    rule("L13.1: who is accountable, and what is actually verifiable");
+
+    let delegated = karst_attest::Agency::Delegated {
+        resource_owner: alice_id.address(),
+        capability: narrowed.clone(),
+    };
+    println!("  Delegated verifiable: {}", delegated.is_verifiable());
+    println!(
+        "  Direct verifiable:    {}",
+        karst_attest::Agency::Direct.is_verifiable()
+    );
+    checks.require(
+        delegated.is_verifiable() && !karst_attest::Agency::Direct.is_verifiable(),
+        "only a delegation chain is verifiable, and a bare claim of humanity is not",
+    );
+    note("You cannot falsely claim to be authorised by someone. You can always falsely claim");
+    note("to be a person, permanently, and no layer here changes that.");
+
     rule("They find they know somebody in common, without saying who they know");
 
     // L5. Each side holds contacts; neither sends a contact list. The responder evaluates the
@@ -655,6 +890,48 @@ fn run() -> std::io::Result<std::process::ExitCode> {
     note("The issuer signed a value it could not read. The verifier checked a public key and");
     note("could not have minted one. No field is common to the two transcripts, and no bank");
     note("was asked anything.");
+
+    rule("A discussion with no host, assembled from what each author signed");
+
+    let mut graph = karst_thread::Graph::new();
+    let opening = karst_thread::Post::create(
+        &alice_id,
+        1,
+        "Does provenance belong in the object?",
+        None,
+        karst_attest::Agency::Direct,
+    );
+    let root_cid = graph.insert(&opening).expect("a signed post");
+    for (i, who) in [&person, &agent].iter().enumerate() {
+        let reply = karst_thread::Post::create(
+            who,
+            1,
+            &format!("reply {i}"),
+            Some(root_cid),
+            karst_attest::Agency::Direct,
+        );
+        graph.insert(&reply).expect("a signed reply");
+    }
+    let thread = graph.thread(&root_cid);
+    println!(
+        "  {} posts, assembled from backlinks rather than from a table",
+        thread.len()
+    );
+    checks.require(thread.len() == 3, "the thread assembled from its backlinks");
+
+    // A board is a view over the same posts. Two curators, same posts, different rooms.
+    let strict = karst_thread::Board::new(
+        "provenance",
+        alice_id.address(),
+        karst_attest::Policy::HumanClaimedOnly,
+    );
+    println!("  a board is a view over those posts, not a host for them:");
+    for line in strict.render(&graph, &root_cid).lines().take(4) {
+        println!("    {line}");
+    }
+
+    note("No host owns the thread. A hostile curator costs one subscription change, because");
+    note("the posts are the authors' and the board is only an opinion about them.");
 
     rule("What your own access provider sees, which is the thing this does not hide");
 

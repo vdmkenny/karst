@@ -891,6 +891,11 @@ dependencies = [
 name = "karst-stack"
 version = "0.1.0"
 dependencies = [
+ "karst-afford",
+ "karst-agency",
+ "karst-attest",
+ "karst-blob",
+ "karst-cap",
  "karst-doc",
  "karst-id",
  "karst-index",
@@ -899,7 +904,11 @@ dependencies = [
  "karst-net",
  "karst-node",
  "karst-object",
+ "karst-path",
+ "karst-seal",
+ "karst-thread",
  "karst-value",
+ "karst-wire",
  "karst-witness",
  "rand 0.8.7",
 ]

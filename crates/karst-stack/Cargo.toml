@@ -20,6 +20,15 @@ karst-net.workspace = true
 karst-witness.workspace = true
 karst-member.workspace = true
 karst-value.workspace = true
+karst-thread.workspace = true
+karst-attest.workspace = true
+karst-agency.workspace = true
+karst-afford.workspace = true
+karst-cap.workspace = true
+karst-blob.workspace = true
+karst-path.workspace = true
+karst-seal.workspace = true
+karst-wire.workspace = true
 rand = "0.8"
 
 [lints]

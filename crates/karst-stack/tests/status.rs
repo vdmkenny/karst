@@ -384,3 +384,55 @@ fn the_readme_test_count_is_not_stale() {
         "the README claims {claimed} tests and the source declares {found}"
     );
 }
+
+/// The composed demo must exercise every layer that has code.
+///
+/// A stack demonstration that covers two thirds of the stack is a demonstration of two thirds
+/// of the claim. This was the state until it was measured: nine of twenty crates appeared, and
+/// L1 Path and L12 Agency appeared in no demo at all despite having 34 tests between them.
+///
+/// Tooling is exempt. Everything else has to be reachable from the one binary that claims to
+/// compose the stack.
+#[test]
+fn the_composed_demo_exercises_every_layer_that_has_code() {
+    let demo = std::fs::read_to_string(root().join("crates/karst-stack/src/main.rs"))
+        .expect("the stack demo");
+
+    // Harnesses, fuzzers and the other demo are not layers.
+    let tooling: BTreeSet<String> = [
+        "karst-fuzz",
+        "karst-demo",
+        "karst-stack",
+        // Simulated rather than run: L16 has its own harness because contention over years
+        // does not happen inside a demo.
+        "karst-symmetry",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+
+    let mut missing = Vec::new();
+    for entry in std::fs::read_dir(root().join("crates")).expect("crates/") {
+        let name = entry
+            .expect("entry")
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+        if tooling.contains(&name)
+            || !root()
+                .join("crates")
+                .join(&name)
+                .join("Cargo.toml")
+                .exists()
+        {
+            continue;
+        }
+        if !demo.contains(&name.replace('-', "_")) {
+            missing.push(name);
+        }
+    }
+    assert!(
+        missing.is_empty(),
+        "the stack demo does not exercise {missing:?}, so it demonstrates less than the stack"
+    );
+}
