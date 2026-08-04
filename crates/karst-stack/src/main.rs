@@ -244,7 +244,11 @@ fn run() -> std::io::Result<std::process::ExitCode> {
         collect_addrs[0].1,
         LAMBDA,
     )?;
-    let feed = feed_tag(&alice_id.address(), 0);
+    // The feed is named by publisher and epoch. The tag is derived locally for the reader's
+    // own bookkeeping; it is never what goes on the wire, because a provider that accepted a tag
+    // would accept a mailbox tag too.
+    let (publisher, epoch) = (alice_id.address(), 0u64);
+    let feed = feed_tag(&publisher, epoch);
     for p in &holders {
         for o in &node_objs {
             alice.publish_to(feed, *p, &o.encode()).unwrap();
@@ -295,7 +299,7 @@ fn run() -> std::io::Result<std::process::ExitCode> {
         alice.step();
         bob.step();
         for (p, at, reader) in readers.iter_mut() {
-            for env in bob.poll_tag_at(*at, feed) {
+            for env in bob.poll_feed_at(*at, &publisher, epoch) {
                 if let Some(obj) = reader.accept(&mut bob.client, &env) {
                     watch.record(*p, obj.cid());
                     if seen.insert(obj.cid()) {
@@ -519,7 +523,7 @@ fn run() -> std::io::Result<std::process::ExitCode> {
         alice.step();
         bob.step();
         for (p, at, reader) in readers.iter_mut() {
-            for env in bob.poll_tag_at(*at, feed) {
+            for env in bob.poll_feed_at(*at, &publisher, epoch) {
                 if let Some(obj) = reader.accept(&mut bob.client, &env) {
                     watch.record(*p, obj.cid());
                 }

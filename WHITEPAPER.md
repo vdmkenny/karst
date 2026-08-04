@@ -728,8 +728,15 @@ derive the `k` providers, and read, having spoken to nobody first.
 **A public tag is a public tag.** Reading a feed needs no credential, because the tag is
 derivable by anyone; a feed is a broadcast, not a mailbox. Reads are non-destructive for the
 same reason: a stranger who could drain a feed could delete a publisher one packet at a time.
+
 Private mail uses a different tag, the hash of a drain key's public half, and draining requires
-a signature under that key rather than presentation of a secret.
+a signature under that key rather than presentation of a secret. The separation is enforced by
+what a request can say rather than by a check on what it said: a read names a feed by its
+preimage, a publisher address and an epoch, and the provider derives the tag itself. The
+readable keyspace is therefore exactly the image of the feed derivation, and a mailbox tag
+cannot be named by a read at all. This matters because a mailbox tag is not secret. It ships
+in every contact, since a correspondent needs it to deposit, so any read path that accepts a
+tag hands every correspondent a key to everyone's mail.
 
 **Asking is the exposure this layer does not close.** A feed tag is derivable from a publisher's
 address alone, so asking a provider for one tells that provider which publisher a reader

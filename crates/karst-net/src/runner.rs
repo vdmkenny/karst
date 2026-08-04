@@ -35,15 +35,21 @@ use std::io;
 use std::net::{SocketAddr, UdpSocket};
 use std::time::Instant;
 
+use karst_id::Address;
 use karst_node::{MixNode, Outbound};
 use karst_wire::{Pacer, UdpTransport};
 
 use crate::client::{Client, Contact, Dispatch, SendError};
 use crate::directory::Directory;
+use crate::feed::feed_tag;
 use crate::frame::ENVELOPE_BYTES;
 use crate::provider::{Provider, Tag};
 
-/// A collection request: kind, a 32 byte credential or tag, and a cursor.
+/// A collection request: kind, a 32 byte field, and a cursor.
+///
+/// The 32 byte field is read according to the kind and never as a bare tag. A drain reads it
+/// as the drain key it must then prove possession of; a read reads it as a publisher address
+/// and derives the feed tag from it. Neither can name a box directly.
 ///
 /// Fixed width, because a request whose length varied with what it asked for would tell an
 /// observer which kind it was.
@@ -51,9 +57,7 @@ pub const REQUEST_BYTES: usize = 1 + 32 + 8 + 8 + 64;
 
 /// Where the counter sits in a request.
 const REQ_COUNTER: usize = 33;
-/// Where the drain signature sits. Zero-filled for a read, so both requests are one size and
-/// an observer cannot tell a mailbox drain from a feed read by length.
-/// A fresh random value per request, echoed in the response.
+/// Where the nonce sits: a fresh random value per request, echoed in the response.
 ///
 /// Everything else in the matching predicate is attacker-supplyable: a UDP source address is
 /// spoofable, a feed tag is public by construction, a mailbox tag is in every `Contact`, and
@@ -66,7 +70,14 @@ const REQ_COUNTER: usize = 33;
 /// bits and a port. It closes the off-path case and does nothing about an attacker who can
 /// read the request. See #181.
 const REQ_NONCE: usize = 41;
+/// Where the drain signature sits. A read carries no signature, so both requests are one size
+/// and an observer cannot tell a mailbox drain from a feed read by length.
 const REQ_SIG: usize = 49;
+/// Where a read's epoch sits, overlapping the region a drain uses for its signature.
+///
+/// The two never collide: a request is one kind or the other, and each reads only its own
+/// field. Sharing the region is what keeps both requests the same width.
+const REQ_EPOCH: usize = REQ_SIG;
 
 /// A collection response: the refusal count, the nonce it answers, and a fixed body.
 ///
@@ -102,6 +113,16 @@ const RESP_BODY: usize = RESP_NONCE + 8;
 pub const REQ_DRAIN: u8 = 1;
 /// Read one item of a public feed at a cursor, without removing it.
 pub const REQ_READ: u8 = 2;
+
+/// The box a read request names.
+///
+/// The entire access rule for reads, in one function, so there is exactly one place where wire
+/// bytes become a box and it can be tested on its own. The 32 byte field is a publisher
+/// address, never a tag, so the reachable keyspace is exactly the image of `feed_tag` and no
+/// request can name anything outside it.
+fn readable_box(field: &[u8; 32], epoch: u64) -> Tag {
+    feed_tag(&Address::from_raw(*field), epoch)
+}
 
 /// A mix, running.
 pub struct NodeRunner {
@@ -222,9 +243,24 @@ impl NodeRunner {
                         .drain_once(&tag, &cred, counter, &sig)
                         .unwrap_or_default()
                 }
-                // Reading a feed needs nothing, because a feed tag is public. It also takes
-                // nothing away, or any stranger could delete a publisher one packet at a time.
-                REQ_READ => store.peek(&cred, cursor),
+                // A read names a feed by its preimage, not by a tag, and the provider derives
+                // the tag itself. That is the whole access rule, and it is structural rather
+                // than a policy check: the readable keyspace is exactly the image of
+                // `feed_tag`, so a mailbox tag cannot be named here at all.
+                //
+                // Accepting a raw 32 byte tag is what made this an unauthenticated read of any
+                // box. A mailbox tag ships in every `Contact`, so every correspondent held a
+                // key to a keyspace with one namespace in it, and could read mail addressed to
+                // someone else by asking for it.
+                //
+                // The read itself still needs no proof, because a feed genuinely is public and
+                // derivable from a publisher's address. It stays non-destructive, or any
+                // stranger could delete a publisher one packet at a time.
+                REQ_READ => {
+                    let epoch =
+                        u64::from_le_bytes(buf[REQ_EPOCH..REQ_EPOCH + 8].try_into().unwrap());
+                    store.peek(&readable_box(&cred, epoch), cursor)
+                }
                 _ => (None, 0),
             };
 
@@ -500,28 +536,40 @@ impl ClientRunner {
         Ok(())
     }
 
-    /// Collect raw envelopes from any box, not only this client's own.
+    /// Collect raw envelopes from one publisher's feed, which is not this client's own box.
+    ///
+    /// Named by publisher and epoch rather than by tag. A reader cannot ask for a box it can
+    /// only name, because the provider derives the tag and will not look anywhere else; that
+    /// is what keeps private mail out of the readable keyspace.
     ///
     /// A feed tag is derivable from a publisher's address, so asking for one tells the
     /// provider which publisher this client follows. That is the exposure this design does not
     /// close, and calling it out here rather than in a comment somewhere else is deliberate:
     /// it is the same gap as #53, reached by a different road.
-    pub fn poll_tag(&mut self, tag: Tag) -> Vec<Vec<u8>> {
+    pub fn poll_feed(&mut self, publisher: &Address, epoch: u64) -> Vec<Vec<u8>> {
         let at = self.provider_collect;
-        self.poll_tag_at(at, tag)
+        self.poll_feed_at(at, publisher, epoch)
     }
 
     /// Read a feed from one named provider, at that provider's own cursor.
     ///
     /// Cursors are per provider, because replicas hold different amounts and a shared cursor
     /// would skip whatever the furthest-ahead replica had already served.
-    pub fn poll_tag_at(&mut self, at: SocketAddr, tag: Tag) -> Vec<Vec<u8>> {
+    pub fn poll_feed_at(
+        &mut self,
+        at: SocketAddr,
+        publisher: &Address,
+        epoch: u64,
+    ) -> Vec<Vec<u8>> {
+        // The tag is bookkeeping here, not authority. It keys the cursor and the outstanding
+        // table locally; the provider is told the preimage and derives its own.
+        let tag = feed_tag(publisher, epoch);
         let cursor = *self.feed_cursors.entry((at, tag)).or_insert(0) as u32;
         let mut req = [0u8; REQUEST_BYTES];
         req[0] = REQ_READ;
-        req[1..33].copy_from_slice(&tag);
+        req[1..33].copy_from_slice(publisher.as_bytes());
         req[REQ_COUNTER..REQ_COUNTER + 8].copy_from_slice(&(cursor as u64).to_le_bytes());
-        // Signature bytes stay zero. A read needs no proof and must not be shorter for it.
+        req[REQ_EPOCH..REQ_EPOCH + 8].copy_from_slice(&epoch.to_le_bytes());
         let nonce = self.record(at, tag, Some(cursor));
         req[REQ_NONCE..REQ_NONCE + 8].copy_from_slice(&nonce);
         let _ = self.collect_sock.send_to(&req, at);
@@ -668,7 +716,84 @@ mod tests {
     use super::*;
     use crate::client::Client;
     use crate::directory::NodeInfo;
+    use crate::frame::MAILBOX_BYTES;
     use karst_mix::packet::MixKey;
+
+    /// A read must not be able to reach private mail.
+    ///
+    /// A mailbox tag is not a secret. It ships in every `Contact`, because a correspondent
+    /// needs it to deposit. The separation that makes that safe is that depositing and
+    /// collecting are different rights, and the drain key is what proves the second.
+    ///
+    /// Reads used to take a raw 32 byte tag off the wire and hand it straight to `peek`, over
+    /// one flat keyspace with no namespace in it. So every correspondent held a working key to
+    /// everyone's mail: put the tag you were given into a read request and the provider hands
+    /// back the sealed envelopes, without a signature, a challenge, or a policy check. The
+    /// comment above it reasoned about feed tags being public and then implemented that for
+    /// every tag.
+    #[test]
+    fn a_read_request_cannot_name_a_mailbox() {
+        let drain = karst_id::Identity::from_seed([7u8; 32]);
+        let mailbox = crate::client::mailbox_tag(&drain.key_bytes());
+
+        let mut p = Provider::new();
+        let mut payload = vec![0u8; MAILBOX_BYTES + ENVELOPE_BYTES];
+        payload[..MAILBOX_BYTES].copy_from_slice(&mailbox);
+        payload[MAILBOX_BYTES..].copy_from_slice(&[9u8; ENVELOPE_BYTES]);
+        p.deposit(&payload).expect("deposit");
+        assert_eq!(p.depth(&mailbox), 1, "the mail is in the box");
+
+        // The attack, verbatim: a correspondent puts the tag it was given into the one field a
+        // read request has. That field is now a publisher address, so the box it reaches is
+        // some stranger's feed, and the mail stays where it is.
+        for epoch in [0u64, 1, 7, 1 << 32, u64::MAX] {
+            let reached = readable_box(&mailbox, epoch);
+            assert_ne!(
+                reached, mailbox,
+                "a read reached a mailbox at epoch {epoch}"
+            );
+            assert_eq!(
+                p.peek(&reached, 0).0,
+                None,
+                "private mail was readable at epoch {epoch}"
+            );
+        }
+
+        // And a feed is still readable, which is what a read is for. Naming it by preimage is
+        // no loss: a feed tag was always derived from the publisher's address, so a reader who
+        // could name the tag could already name the address.
+        let publisher = Address::from_raw([3u8; 32]);
+        payload[..MAILBOX_BYTES].copy_from_slice(&feed_tag(&publisher, 4));
+        p.deposit(&payload).expect("deposit");
+        assert_eq!(
+            p.peek(&readable_box(publisher.as_bytes(), 4), 0).0,
+            Some(vec![9u8; ENVELOPE_BYTES]),
+            "the feed a reader asked for was not served"
+        );
+        // The epoch is part of the name, not decoration.
+        assert_eq!(p.peek(&readable_box(publisher.as_bytes(), 5), 0).0, None);
+    }
+
+    /// No tag leaves the client on a read, so there is nothing for a provider to be handed.
+    #[test]
+    fn a_read_puts_a_publisher_on_the_wire_and_never_a_tag() {
+        let mut r = rig();
+        let publisher = Address::from_raw([11u8; 32]);
+        r.runner.poll_feed(&publisher, 9);
+        let req = r.last_request();
+
+        assert_eq!(req[0], REQ_READ);
+        assert_eq!(&req[1..33], publisher.as_bytes());
+        assert_ne!(
+            &req[1..33],
+            &feed_tag(&publisher, 9)[..],
+            "the client sent a tag, which is the thing a provider must not be given"
+        );
+        assert_eq!(
+            u64::from_le_bytes(req[REQ_EPOCH..REQ_EPOCH + 8].try_into().unwrap()),
+            9
+        );
+    }
 
     /// A runner and a socket standing in for its provider.
     ///
@@ -830,11 +955,12 @@ mod tests {
     #[test]
     fn an_empty_answer_does_not_advance_past_an_object_that_has_not_arrived() {
         let mut r = rig();
-        let tag = [11u8; 32];
+        let publisher = Address::from_raw([11u8; 32]);
+        let tag = feed_tag(&publisher, 0);
         let at = r.client_at();
 
         // The reader is ahead of the publisher: index 0 is not there yet.
-        r.runner.poll_tag(tag);
+        r.runner.poll_feed(&publisher, 0);
         let req = r.last_request();
         assert_eq!(
             u64::from_le_bytes(req[REQ_COUNTER..REQ_COUNTER + 8].try_into().unwrap()),
@@ -851,7 +977,7 @@ mod tests {
         let _ = r.collected(tag);
 
         // The publisher deposits. The next poll must still ask for index 0.
-        r.runner.poll_tag(tag);
+        r.runner.poll_feed(&publisher, 0);
         let req2 = r.last_request();
         assert_eq!(
             u64::from_le_bytes(req2[REQ_COUNTER..REQ_COUNTER + 8].try_into().unwrap()),
@@ -865,7 +991,7 @@ mod tests {
         assert_eq!(got[0], served_body(42));
 
         // And a served item does advance, so the guard is not simply pinning the cursor.
-        r.runner.poll_tag(tag);
+        r.runner.poll_feed(&publisher, 0);
         let req3 = r.last_request();
         assert_eq!(
             u64::from_le_bytes(req3[REQ_COUNTER..REQ_COUNTER + 8].try_into().unwrap()),
@@ -938,8 +1064,9 @@ mod tests {
         assert_eq!(r.runner.refused_seen(), 42);
 
         // A later poll of a different box reports zero refusals, honestly.
-        let other = [3u8; 32];
-        r.runner.poll_tag(other);
+        let elsewhere = Address::from_raw([3u8; 32]);
+        let other = feed_tag(&elsewhere, 0);
+        r.runner.poll_feed(&elsewhere, 0);
         let req2 = r.last_request();
         r.respond_to(&req2, &r.provider, at, other, 0, 1);
         let _ = r.collected(other);
@@ -993,7 +1120,8 @@ mod tests {
     #[test]
     fn nothing_on_the_wire_can_move_the_cursor() {
         let mut r = rig();
-        let tag = [3u8; 32];
+        let publisher = Address::from_raw([3u8; 32]);
+        let tag = feed_tag(&publisher, 0);
         let at = r.client_at();
 
         for expected in 0..4u32 {
@@ -1005,7 +1133,7 @@ mod tests {
                     .unwrap_or(0),
                 expected as usize
             );
-            r.runner.poll_tag(tag);
+            r.runner.poll_feed(&publisher, 0);
             let req = r.last_request();
             // The request asks for the index the client chose.
             assert_eq!(
@@ -1087,9 +1215,9 @@ mod tests {
     fn unanswered_requests_do_not_accumulate_without_limit() {
         let mut r = rig();
         for i in 0..(ClientRunner::MAX_OUTSTANDING as u32 + 500) {
-            let mut tag = [0u8; 32];
-            tag[..4].copy_from_slice(&i.to_le_bytes());
-            r.runner.poll_tag(tag);
+            let mut who = [0u8; 32];
+            who[..4].copy_from_slice(&i.to_le_bytes());
+            r.runner.poll_feed(&Address::from_raw(who), 0);
         }
         assert!(r.runner.outstanding.len() <= ClientRunner::MAX_OUTSTANDING);
     }

@@ -101,9 +101,14 @@ pub struct Client {
     sealing: SealingKey,
     /// Proves the right to **drain** this client's box.
     ///
-    /// The tag is its hash, so a correspondent holding the tag may deposit and cannot collect.
-    /// When the two were the same value, every correspondent could permanently delete the
-    /// mail they had sent, and anyone who learned a tag could delete everything in it.
+    /// The tag is its hash, so a correspondent holding the tag may deposit and can neither
+    /// drain nor read. Draining needs a signature under this key; reading cannot name a mailbox
+    /// at all, because a read carries a publisher address and the provider derives the feed tag
+    /// from it.
+    ///
+    /// When the tag and the key were the same value, every correspondent could permanently
+    /// delete the mail they had sent, and anyone who learned a tag could delete everything in
+    /// it. When reads took a raw tag, every correspondent could read it instead.
     drain: Identity,
     /// Strictly increasing, so a captured drain request cannot be replayed.
     drain_counter: u64,

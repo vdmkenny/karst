@@ -118,8 +118,13 @@ They are separate now:
 
 | | Deposit needs | Collect needs | Removes on read |
 |---|---|---|---|
-| Mailbox | the tag | the **preimage** of the tag | yes |
-| Feed | the tag | nothing, the tag is public | **no** |
+| Mailbox | the tag | a signature under the drain key, whose hash is the tag | yes |
+| Feed | the tag | the publisher's address and epoch, which anyone can derive | **no** |
+
+A read names a feed by preimage rather than by tag, so the provider derives the tag itself and
+the readable keyspace is exactly the image of the feed derivation. A mailbox tag is not secret,
+it ships in every contact, so this is what keeps a correspondent from reading the box it was
+given the right to deposit into.
 
 A mailbox tag is the hash of a collection key its owner keeps and never puts in a `Contact`, so
 holding the tag lets you write and not drain. A feed has no such key, because its tag is public

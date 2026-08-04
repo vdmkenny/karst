@@ -12,11 +12,18 @@
 //! does see how much traffic a tag receives and when it is collected, and it can withhold or
 //! discard. **A provider is trusted for availability and not for confidentiality.**
 //!
-//! # Tags are secret
+//! # A tag is a deposit capability and nothing else
 //!
-//! A mailbox tag is 32 random bytes given out with a contact's sealing key, not derived from
-//! an identity. Anyone who has been given a tag can deposit into it, and nobody else can find
-//! it. This is what keeps a stranger from flooding a box they were never told about.
+//! A mailbox tag is the hash of a drain key's public half, given out with a contact's sealing
+//! key. Anyone who has been given one can deposit into it, and nobody else can find it. This
+//! is what keeps a stranger from flooding a box they were never told about.
+//!
+//! Holding the tag buys nothing beyond depositing. Draining needs a signature under the drain
+//! key, and reading cannot name a mailbox at all: a read request carries a publisher address
+//! and an epoch, and the provider derives the feed tag itself, so the readable keyspace is
+//! exactly the image of `feed_tag`. That is structural rather than a policy check, which
+//! matters, because when the read path took a raw tag off the wire every correspondent held a
+//! working key to everyone's mail.
 //!
 //! It leaves a known gap: a **correspondent** can flood a box they legitimately know. The
 //! answer is to gate deposit on a capability the recipient issues, spendable anonymously so
