@@ -9,14 +9,14 @@
 //!
 //! Two things here still fall short and are not fixed by that:
 //!
-//! - **Threshold issuance is not composed.** The `shamir` module carries the structure and the
+//! - **Threshold issuance is not composed.** It is not deferred either; see the note on
 //!   credential path does not use it, so an issuer set is one key. Plurality of issuer sets is
 //!   what error 03 actually demands and it is satisfied, since anyone may run a set and there
 //!   is no registry; threshold *within* a set, which protects one set against a compromised or
 //!   compelled member, is absent. Recovering it needs Coconut over a pairing curve or
 //!   threshold RSA. (#133)
 //! - **Serials come from the system CSPRNG and everything else in this module does not.** The
-//!   double-spend and earn ledgers are models, and `IssuerSet` is not a deployment artifact.
+//!   double-spend and earn ledgers are models, and `Issuer` is not a deployment artifact.
 //!
 //! What is worth reading here is the *structure*: which acts are separated, what each ledger
 //! observes, and why double-spend attribution can be made to work without identifying honest
@@ -70,7 +70,6 @@
 
 pub mod blind;
 pub mod doublespend;
-pub mod shamir;
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -121,30 +120,37 @@ impl std::error::Error for ValueError {}
 
 // ---------------------------------------------------------------- issuance
 
-/// An issuer set.
+/// One issuer.
 ///
-/// `threshold` is retained because the earn side still speaks in those terms; it is **not**
-/// enforced by the credential, because threshold issuance is not composed with the blind
-/// signature that replaced the placeholder (#133). The `Issuer` type that held one Shamir
-/// share of a reconstructable key is gone with it: that arrangement returned the share itself
-/// to whoever asked, so one honest issuance handed over the master secret.
+/// **Not a set, and it used to claim to be one.** The type was `Issuer` with a `threshold`
+/// field that nothing enforced, over a `shamir` module whose issuance handed each requester a
+/// share of a reconstructable key. A name that describes a property the code does not have is
+/// worse than no name, because a reader stops looking.
 ///
-/// What error 03 demands is **plurality of issuer sets**, and that holds: anyone may run one,
-/// many coexist, and there is no registry. Threshold *within* a set is a different property
-/// and it is absent.
-pub struct IssuerSet {
-    pub threshold: usize,
+/// # Threshold within a set is not deferred, it is declined
+///
+/// What error 03 demands is **plurality of issuer sets**: anyone may run one, many coexist, no
+/// global one must be used, and there is no registry. That holds, and it is the property the
+/// design actually needs.
+///
+/// Threshold *within* one set protects that set against a member being compromised or
+/// compelled. It is valuable and it is a different concern, and reaching it needs Coconut over
+/// a pairing curve or threshold RSA, neither of which composes with the RFC 9474 blind
+/// signature a credential is now built on. The `shamir` module that used to stand in for it is
+/// deleted rather than kept: it had a 61-bit field and deterministic coefficients derived from
+/// a public seed, so one share recovered the secret, and dead cryptography with known defects
+/// invites somebody to wire it in. (#133, #135)
+pub struct Issuer {
     key: blind::IssuerKey,
 }
 
-impl IssuerSet {
+impl Issuer {
     /// An issuer set. Generating a key takes a moment; do it once and keep it.
     ///
     /// `threshold` is retained in the type because the earn side still speaks in those terms,
     /// and it is **not** enforced by the credential: see the note on plurality below.
-    pub fn new(threshold: usize, _count: usize) -> Result<Self, ValueError> {
-        Ok(IssuerSet {
-            threshold,
+    pub fn new() -> Result<Self, ValueError> {
+        Ok(Issuer {
             key: blind::IssuerKey::generate(blind::ISSUER_BITS).map_err(|_| ValueError::Invalid)?,
         })
     }
@@ -546,13 +552,13 @@ mod tests {
     }
 
     /// One issuer set, generated once. RSA key generation is slow.
-    fn set() -> &'static IssuerSet {
+    fn set() -> &'static Issuer {
         use std::sync::OnceLock;
-        static S: OnceLock<IssuerSet> = OnceLock::new();
-        S.get_or_init(|| IssuerSet::new(1, 1).expect("issuer set"))
+        static S: OnceLock<Issuer> = OnceLock::new();
+        S.get_or_init(|| Issuer::new().expect("issuer set"))
     }
 
-    fn issue(set: &IssuerSet, w: &mut Wallet) -> Result<Credential, ValueError> {
+    fn issue(set: &Issuer, w: &mut Wallet) -> Result<Credential, ValueError> {
         let pk = set.public();
         let req = w.request(&pk, warrant(1, 1))?;
         let sig = set.sign(&req)?;
@@ -577,7 +583,7 @@ mod tests {
 
         // Everything a verifier holds is public, and a different issuer's key does not accept
         // this credential, so holding one verifier's state mints nothing.
-        let other = IssuerSet::new(1, 1).unwrap();
+        let other = Issuer::new().unwrap();
         let mut l2 = SpendLedger::new();
         assert_eq!(l2.accept(&other.public(), &cred), Err(ValueError::Invalid));
     }
@@ -698,7 +704,7 @@ mod tests {
     #[test]
     fn a_credential_from_another_issuer_set_does_not_verify() {
         let mine = set();
-        let theirs = IssuerSet::new(1, 1).unwrap();
+        let theirs = Issuer::new().unwrap();
         let mut w = Wallet::new();
         let c = issue(&theirs, &mut w).unwrap();
 

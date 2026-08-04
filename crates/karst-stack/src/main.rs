@@ -628,7 +628,7 @@ fn run() -> std::io::Result<std::process::ExitCode> {
     checks.require(forged_draw.is_err(), "a forged warrant drew nothing");
     println!("  a forged warrant for 99 units draws: {forged_draw:?}");
 
-    let issuer = karst_value::IssuerSet::new(1, 1).expect("issuer");
+    let issuer = karst_value::Issuer::new().expect("issuer");
     let pk = issuer.public();
     let mut wallet = karst_value::Wallet::new();
     let req = wallet.request(&pk, warrant.clone()).expect("request");
@@ -655,6 +655,18 @@ fn run() -> std::io::Result<std::process::ExitCode> {
     note("The issuer signed a value it could not read. The verifier checked a public key and");
     note("could not have minted one. No field is common to the two transcripts, and no bank");
     note("was asked anything.");
+
+    rule("What your own access provider sees, which is the thing this does not hide");
+
+    // A demonstration that shows only what a design achieves is an advertisement. This is the
+    // one cost a user has to know before they start rather than after.
+    println!("  \x1b[33mconstant-rate cover is the most distinctive pattern a consumer line carries\x1b[0m");
+    println!("  your ISP cannot read any of it and can tell you are running it");
+    note("Anonymity against a global network observer is what this buys, and it is measured.");
+    note("Unobservability against the party metering your line is not, and no construction");
+    note("here recovers it: they bill the aggregate byte counter, and nothing inside the");
+    note("tunnel changes that number. In a jurisdiction where running the tool is itself the");
+    note("offence, that is the sentence that matters.");
 
     rule("What was never involved");
 
