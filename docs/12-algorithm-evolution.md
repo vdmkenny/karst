@@ -69,9 +69,13 @@ document to its head.
 The same-author rule on lineage edges has an explicit exception for this: a key rotation is the
 one legitimate cross-key edge. `Rotation` in `karst-object` implements it, and **both halves are
 required**. The old key attests to its successor and the new key attests to its predecessor,
-because each direction alone enables a different attack: forward-only lets a compromised old key
-hand identity to an attacker, backward-only lets anyone claim to be anyone's successor. A
+because backward-only would let anyone claim to be anyone's successor from public bytes alone. A
 one-sided claim moves nothing.
+
+Countersigning does not survive compromise of the old key, which produces both halves: the
+forward with the stolen key, the backward with the attacker's own over the old key's public
+bytes. The containment is that two countersigned successions from one address fork the identity
+and neither certifies an edge, so a holder who still has their key can make the theft visible.
 
 ### Hashes are the harder problem, and they are worse
 

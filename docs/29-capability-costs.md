@@ -84,8 +84,9 @@ old private key to sign the forward half:
 pub fn forward(old: &Identity, new_key: &[u8; 32], seq: u64)
 ```
 
-That bidirectionality is deliberate and correct: it is what stops a compromised old key or an
-opportunistic new one from moving an identity alone. It also means a key that is gone cannot
+That bidirectionality is deliberate: it is what stops anyone from claiming to be someone's
+successor out of their public key alone. It does not stop a compromised old key, which signs
+both halves. It also means a key that is gone cannot
 authorise its own succession, and by design there is no registrar to petition.
 
 What a user loses with the key:
