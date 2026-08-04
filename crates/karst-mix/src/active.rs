@@ -414,3 +414,181 @@ mod tests {
         assert!(r.mean_anonymity_set > 10.0);
     }
 }
+
+/// What the delay parameter actually buys, measured against the adversary it is for.
+///
+/// The passive adversary is saturated by cover traffic alone, so it cannot price delay. The
+/// n-1 attack can: an adversary drains a mix to isolate one message, and how hard that is
+/// depends on how much is resident when it starts.
+///
+/// Measured, 600 trials per row:
+///
+/// | rate | delay | occupancy | isolation | suppressed |
+/// |---|---|---|---|---|
+/// | 10 | 0.5 | 5 | 0.518 | 5 |
+/// | 10 | 1 | 10 | 0.185 | 10 |
+/// | 10 | 2 | 20 | 0.058 | 20 |
+/// | 10 | 8 | 80 | 0.015 | 83 |
+/// | 10 | 16 | 160 | 0.005 | 168 |
+/// | 40 | 0.5 | 20 | **0.157** | 19 |
+/// | 40 | 2 | 80 | 0.022 | 82 |
+/// | 2.5 | 8 | 20 | 0.052 | 20 |
+/// | 2.5 | 32 | 80 | 0.022 | 83 |
+///
+/// **Mean pool occupancy governs isolation, and the delay itself does not, with one exception
+/// that matters.** Occupancy is `arrival_rate * mean_delay` for an M/M/infinity queue, and the
+/// rows at occupancy 80 agree to within 0.007 across a sixteen-fold spread of arrival rates.
+/// So a deployment can pick its delay from its own arrival rate and an isolation target rather
+/// than choosing a number.
+///
+/// The exception is the row in bold. At occupancy 20 the three samples are 0.052, 0.058 and
+/// **0.157**, and the outlier is the one with a mean delay of half a tick. Below roughly one
+/// tick the exponential has no room to spread, most packets leave in the tick they arrive, and
+/// the discipline degrades toward the batch behaviour it exists to avoid. Occupancy alone stops
+/// predicting it.
+///
+/// So the rule has two parts, and a derivation that uses only the first will pick a delay that
+/// does not work: **set occupancy from the isolation target, and keep the mean delay above the
+/// granularity of the schedule.**
+///
+/// Returns `(arrival_rate, mean_delay, occupancy, isolation, suppressed)`.
+pub fn delay_frontier(seed: u64) -> Vec<(f64, f64, f64, f64, f64)> {
+    let mut out = Vec::new();
+    for (rate, delay) in [
+        (10.0, 0.5),
+        (10.0, 1.0),
+        (10.0, 2.0),
+        (10.0, 4.0),
+        (10.0, 8.0),
+        (10.0, 16.0),
+        // Same occupancies reached from a different rate, to test the product hypothesis.
+        (40.0, 0.5),
+        (40.0, 2.0),
+        (2.5, 8.0),
+        (2.5, 32.0),
+    ] {
+        let cfg = ActiveConfig {
+            discipline: Discipline::Poisson,
+            arrival_rate: rate,
+            mean_delay: delay,
+            trials: 600,
+            seed,
+            ..ActiveConfig::default()
+        };
+        let r = n_minus_one(&cfg);
+        out.push((
+            rate,
+            delay,
+            rate * delay,
+            r.isolation_rate,
+            r.mean_suppressed,
+        ));
+    }
+    out
+}
+
+#[cfg(test)]
+mod delay_frontier_tests {
+    use super::*;
+
+    /// Isolation tracks mean pool occupancy, not delay on its own.
+    ///
+    /// This is what makes the delay derivable rather than chosen: two configurations with the
+    /// same `arrival_rate * mean_delay` are about equally hard to drain, so a deployment
+    /// reasons from its own arrival rate to its own delay.
+    ///
+    /// Restricted to mean delays of at least one tick, because that is where it holds. The
+    /// companion test below establishes that it stops holding below that, and the two together
+    /// are the rule: occupancy sets the target, and the delay has to stay above the schedule's
+    /// granularity for occupancy to mean anything.
+    #[test]
+    fn isolation_is_governed_by_occupancy_rather_than_delay_alone() {
+        let rows = delay_frontier(5);
+
+        let mut groups: std::collections::BTreeMap<u64, Vec<f64>> = Default::default();
+        for (_, delay, occ, iso, _) in &rows {
+            if *delay < 1.0 {
+                continue;
+            }
+            groups.entry(occ.round() as u64).or_default().push(*iso);
+        }
+        let mut compared = 0;
+        for (occ, isos) in &groups {
+            if isos.len() < 2 {
+                continue;
+            }
+            compared += 1;
+            let lo = isos.iter().cloned().fold(f64::MAX, f64::min);
+            let hi = isos.iter().cloned().fold(f64::MIN, f64::max);
+            assert!(
+                hi - lo < 0.02,
+                "at occupancy {occ} isolation ranged {lo:.3} to {hi:.3} across arrival rates, \
+                 so the product does not govern it and the delay cannot be derived"
+            );
+        }
+        assert!(
+            compared >= 2,
+            "fewer than two occupancies had multiple samples, so this compared nothing"
+        );
+    }
+
+    /// Below a tick of mean delay, occupancy stops predicting isolation.
+    ///
+    /// A derivation that used occupancy alone would happily trade a long delay for a high
+    /// arrival rate and arrive at a configuration that does not defend. At half a tick the
+    /// exponential has no room to spread: most packets leave in the tick they arrive, and the
+    /// discipline degrades toward the batch behaviour delay exists to avoid.
+    ///
+    /// Asserted rather than mentioned, because it is the failure mode of the rule above and
+    /// the rule is the useful output of this module.
+    #[test]
+    fn a_sub_tick_delay_is_worse_than_its_occupancy_predicts() {
+        let rows = delay_frontier(5);
+        let at = |r: f64, d: f64| {
+            rows.iter()
+                .find(|x| x.0 == r && x.1 == d)
+                .map(|x| x.3)
+                .expect("row")
+        };
+        // Three configurations, all at occupancy 20.
+        let sub_tick = at(40.0, 0.5);
+        let ordinary = at(10.0, 2.0);
+        let long = at(2.5, 8.0);
+
+        assert!(
+            (ordinary - long).abs() < 0.02,
+            "the two above-tick samples disagree ({ordinary:.3} vs {long:.3}), so this test \
+             cannot attribute the outlier to the sub-tick delay"
+        );
+        assert!(
+            sub_tick > ordinary * 2.0,
+            "half a tick of delay gave isolation {sub_tick:.3} against {ordinary:.3} at the \
+             same occupancy, so the granularity floor this documents does not exist"
+        );
+    }
+
+    /// More occupancy is monotonically harder to drain, so there is something to solve for.
+    #[test]
+    fn draining_a_fuller_mix_is_harder() {
+        let rows = delay_frontier(5);
+        let at = |r: f64, d: f64| {
+            rows.iter()
+                .find(|x| x.0 == r && x.1 == d)
+                .map(|x| (x.3, x.4))
+                .expect("row")
+        };
+        let (thin_iso, thin_cost) = at(10.0, 0.5);
+        let (thick_iso, thick_cost) = at(10.0, 16.0);
+
+        assert!(
+            thin_iso > thick_iso,
+            "a nearly empty mix ({thin_iso:.3}) was not easier to isolate in than a full one \
+             ({thick_iso:.3})"
+        );
+        assert!(
+            thick_cost > thin_cost * 4.0,
+            "draining the full mix cost {thick_cost:.0} suppressed packets against \
+             {thin_cost:.0} for the thin one, which is not the separation the delay is for"
+        );
+    }
+}

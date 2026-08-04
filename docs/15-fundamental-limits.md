@@ -126,6 +126,47 @@ Stated as a rule rather than a constant, because the constant depends on the del
 distribution: **the emission interval must stay inside the spread of the end-to-end delay, not
 merely inside its mean.**
 
+### What sets the delay, since the trilemma does not
+
+The trilemma prices rounds, not seconds, and the passive adversary is saturated by cover alone.
+So neither can produce a delay parameter. The n-1 attack can, and `karst-mix::active` measures
+it. 600 trials per row:
+
+| arrival rate | mean delay | occupancy | isolation | packets suppressed |
+|---|---|---|---|---|
+| 10 | 0.5 | 5 | 0.518 | 5 |
+| 10 | 1 | 10 | 0.185 | 10 |
+| 10 | 2 | 20 | 0.058 | 20 |
+| 10 | 8 | 80 | 0.015 | 83 |
+| 10 | 16 | 160 | 0.005 | 168 |
+| 40 | 0.5 | 20 | 0.157 | 19 |
+| 40 | 2 | 80 | 0.022 | 82 |
+| 2.5 | 8 | 20 | 0.052 | 20 |
+| 2.5 | 32 | 80 | 0.022 | 83 |
+
+**Mean pool occupancy governs isolation, and delay on its own does not.** Occupancy is
+`arrival_rate * mean_delay`, and the rows at occupancy 80 agree to within 0.007 across a
+sixteen-fold spread of arrival rates. That is what makes the delay derivable: a deployment
+computes its arrival rate per mix as `N * r / W` for N clients emitting at rate r across W
+mixes per layer, picks an isolation target, and reads off the occupancy it needs.
+
+**With one exception, and it is the one a careless derivation would walk into.** At occupancy
+20 the three samples are 0.052, 0.058 and 0.157. The outlier has a mean delay of half a tick.
+Below roughly one unit of schedule granularity the exponential has no room to spread, most
+packets leave in the interval they arrive, and the discipline degrades toward the batch
+behaviour delay exists to avoid. Occupancy stops predicting anything.
+
+So the rule has two parts, and using only the first produces a configuration that does not
+defend:
+
+1. **Set occupancy from the isolation target.** Roughly 20 for 5%, 80 for 2%, 160 for 0.5%.
+2. **Keep the mean delay above the granularity of the emission schedule.** Occupancy bought by
+   raising the arrival rate while shrinking the delay below that floor is not real.
+
+Both are measured here rather than derived from the literature, because the literature does not
+supply them: Loopix recommends no parameter values, giving only the ratio `lambda/mu >= 2` for
+aggregate arrival rate at a mix, and the trilemma abstracts away from wall-clock time entirely.
+
 ---
 
 ## 2. Membership concealment, and a claim withdrawn
