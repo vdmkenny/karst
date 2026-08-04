@@ -356,8 +356,13 @@ matches, with no directory and no lookup. That property is what lets capability 
 L9 verify entirely offline.
 
 **Key rotation** is a countersigned cross-key lineage edge: the old key attests to its successor
-and the new key to its predecessor, so neither a compromised old key nor an opportunistic new one
-can move an identity alone. Implemented in `karst-object`.
+and the new key to its predecessor, at one sequence number, so an attacker holding only a target's
+public key cannot claim to be their successor. It does **not** survive compromise of the old key,
+which signs the forward half while the attacker's own key signs the backward half over public
+bytes. What the lineage does instead is refuse to guess: two countersigned successions from one
+address are reported as a fork and neither certifies a cross-key edge, so a holder who still has
+their key makes the theft visible by rotating. That is detection, not prevention. Implemented in
+`karst-object`; see §6.17.
 
 **Open.** Hash-of-key addresses are unreadable by humans, so a petname layer is mandatory, and
 every petname layer in recorded history has recentralised into a registry.
@@ -1625,9 +1630,9 @@ cannot. `docs/29-capability-costs.md`.
 
 **6.16 Losing your key destroys your identity, permanently.** An address is the hash of a locally
 generated key, and the only migration path needs the old private key to sign its own succession.
-That bidirectionality is what stops a compromised old key or an opportunistic new one from moving
-an identity alone, and it means a key that is gone cannot authorise anything, including a
-successor. There is no registrar to petition, by design.
+That requirement is what stops anyone from claiming to be your successor out of your public key
+alone, and it means a key that is gone cannot authorise anything, including a successor. There is
+no registrar to petition, by design.
 
 Gone with the key: every L16 standing, every capability naming that address, every L5
 introduction, every undelivered blinded drop, and the ability to ever publish a successor to your
@@ -1635,6 +1640,24 @@ own documents, so every `Tracking` link to your work freezes at the last version
 offers account recovery. This offers nothing, and it offers nothing for the same reason it has no
 registrar: **a recovery path is an authority that can take an identity from you**, which is error
 01 wearing a helpful face. No mitigation is claimed because none is built.
+
+**6.17 A stolen identity key is not recoverable either, and countersigning does not prevent it.**
+Rotation requires both halves, but an attacker holding the old private key produces both: the
+forward half with the stolen key, the backward half with their own key over the old key's public
+bytes, which ship on every object that key ever signed. Countersigning establishes possession of
+the old key, and possession is what the attacker has, so no arrangement between the two keys can
+close this.
+
+What the layer does instead is decline to guess. Two countersigned successions from one address
+are reported as a forked identity and neither certifies a cross-key edge, so a holder who still
+has their key publishes a competing rotation and readers see a fork rather than the attacker's
+succession silently. Ordering does not resolve it, because whichever rule decides, an attacker
+willing to pick a larger sequence number or generate a lower-sorting address satisfies it.
+
+That is detection, and it needs the victim to still hold the key. Prevention needs a party other
+than the two keys to countersign the rotation. `karst-witness` is the mechanism and it is not
+wired into rotation. Until it is, a stolen key takes an identity as thoroughly as a lost one
+destroys it, and §6.16's conclusion applies unchanged.
 
 ---
 

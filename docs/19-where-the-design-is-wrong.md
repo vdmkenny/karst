@@ -119,8 +119,12 @@ It is not a reviewed implementation.
 Two small pieces that must exist **before there is data to migrate**:
 
 - **Cross-key rotation exception** to the same-author rule on lineage edges. A key rotation is
-  the one legitimate cross-key edge, with bidirectional signing so neither key alone can claim
-  the other.
+  the one legitimate cross-key edge, with bidirectional signing so nobody can claim to be
+  someone's successor from their public key alone. **It does not survive compromise of the old
+  key**, which signs the forward half while the attacker's own key signs the backward half. Two
+  successions from one address fork the identity and neither certifies an edge, so a holder who
+  still has their key can make the theft visible; a holder who does not cannot. Prevention needs
+  a third party to countersign, which `karst-witness` could do and does not.
 - **Self-describing digests**, so a future hash is distinguishable rather than ambiguous.
 
 Cheap now, impossible later. Content addresses are permanent names.

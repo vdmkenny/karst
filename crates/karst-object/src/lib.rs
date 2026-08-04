@@ -511,36 +511,83 @@ pub const ROTATION_KIND: &str = "karst.rotation.v1";
 /// lineage hijacking (issue #31) also stops a legitimate rotation, and identity could never
 /// migrate.
 ///
-/// **Both directions must be signed.** The old key attests to its successor and the new key
-/// attests to its predecessor. A single-sided claim proves nothing: with only the forward half
-/// a compromised old key could hand identity to an attacker, and with only the backward half
-/// anyone could claim to be anyone's successor.
+/// **Both directions must be signed, at one sequence number.** The old key attests to its
+/// successor and the new key attests to its predecessor, and the two halves are one rotation
+/// only when they agree on `seq`. Without that agreement any forward half composes with any
+/// backward half, so two unrelated attestations months apart would read as a rotation.
+///
+/// Countersigning buys one property and it is worth stating exactly: an attacker who holds
+/// only a target's *public* key cannot claim to be their successor, because the forward half
+/// needs the old private key.
+///
+/// **It does not survive compromise of the old key.** An attacker holding it signs the forward
+/// half with the stolen key and the backward half with their own, over the old key's public
+/// bytes, which ship in `author_key` on every object that key ever signed. Both halves are
+/// theirs and the rotation completes. Two-sided signing cannot fix this, because the property
+/// it establishes is possession of the old key, and that is what the attacker has.
+///
+/// What containment exists is that the victim, if they still hold the key, publishes a
+/// competing rotation and the lineage reports both. A reader sees a forked identity rather
+/// than the attacker's silently, which is the same discipline [`Resolution::Forked`] applies
+/// to version histories. That is detection, not prevention. Prevention needs a party other
+/// than the two keys to countersign, which is what `karst-witness` is for and is not wired in
+/// here. See #144.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rotation {
     pub from: Address,
     pub to: Address,
+    /// The sequence number both halves carry. Orders one address's rotations and chains them
+    /// through `supersedes`; it deliberately does **not** resolve a fork, because letting the
+    /// highest number win would hand the outcome to whichever party is willing to pick a
+    /// larger one, and an attacker holding a stolen key always is.
+    pub seq: u64,
 }
 
 impl Rotation {
     /// The old key attests that `to` succeeds it.
-    pub fn forward(old: &Identity, new_key: &[u8; 32], seq: u64) -> Result<Object, ObjectError> {
+    ///
+    /// `supersedes` names the previous rotation of this key, so a chain of rotations is
+    /// walkable rather than a set of unordered pairs.
+    pub fn forward(
+        old: &Identity,
+        new_key: &[u8; 32],
+        seq: u64,
+        supersedes: Option<Cid>,
+    ) -> Result<Object, ObjectError> {
         let new_addr =
             Address::from_key_bytes(new_key).map_err(|_| ObjectError::MalformedAuthorKey)?;
         let mut e = Enc::new();
         e.str("forward").addr(&new_addr);
-        Ok(Object::create(old, ROTATION_KIND, seq, e.finish(), None))
+        Ok(Object::create(
+            old,
+            ROTATION_KIND,
+            seq,
+            e.finish(),
+            supersedes,
+        ))
     }
 
     /// The new key attests that it succeeds `old`.
-    pub fn backward(new: &Identity, old_key: &[u8; 32], seq: u64) -> Result<Object, ObjectError> {
+    pub fn backward(
+        new: &Identity,
+        old_key: &[u8; 32],
+        seq: u64,
+        supersedes: Option<Cid>,
+    ) -> Result<Object, ObjectError> {
         let old_addr =
             Address::from_key_bytes(old_key).map_err(|_| ObjectError::MalformedAuthorKey)?;
         let mut e = Enc::new();
         e.str("backward").addr(&old_addr);
-        Ok(Object::create(new, ROTATION_KIND, seq, e.finish(), None))
+        Ok(Object::create(
+            new,
+            ROTATION_KIND,
+            seq,
+            e.finish(),
+            supersedes,
+        ))
     }
 
-    fn parse(obj: &Object) -> Option<(bool, Address, Address)> {
+    fn parse(obj: &Object) -> Option<(bool, Address, Address, u64)> {
         if obj.kind != ROTATION_KIND {
             return None;
         }
@@ -550,11 +597,31 @@ impl Rotation {
         let other = d.addr().ok()?;
         d.end().ok()?;
         match dir.as_str() {
-            "forward" => Some((true, signer, other)),
-            "backward" => Some((false, other, signer)),
+            "forward" => Some((true, signer, other, obj.seq)),
+            "backward" => Some((false, other, signer, obj.seq)),
             _ => None,
         }
     }
+}
+
+/// Where an address's identity stands, once its rotations are followed.
+///
+/// Separate from [`Resolution`], which answers the same question about a document's versions,
+/// and shaped the same way for the same reason: an ambiguous answer is reported rather than
+/// resolved.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IdentityLine {
+    /// No rotation leaves this address. It is the identity in use.
+    Settled(Address),
+    /// One chain of rotations, ending here.
+    Moved(Address),
+    /// More than one countersigned rotation leaves the same address, so two parties hold
+    /// something that looks like a valid succession. Either the key was compromised and both
+    /// the holder and the thief rotated, or the holder equivocated. Nothing in the lineage
+    /// distinguishes those, so nothing here picks between them.
+    Forked(Vec<Address>),
+    /// The rotations lead back to an address already visited.
+    Cycle(Address),
 }
 
 /// How a version series resolves.
@@ -592,8 +659,11 @@ impl Resolution {
 #[derive(Default)]
 pub struct Lineage {
     objects: BTreeMap<Cid, Object>,
-    /// Half-signed rotation claims, awaiting their counterpart.
-    rotation_halves: BTreeMap<(Address, Address), (bool, bool)>,
+    /// Rotation claims by pair and sequence number, awaiting their counterpart.
+    ///
+    /// Keyed by `seq` as well as by the pair, so a forward half at one sequence cannot pair
+    /// with a backward half at another. Both halves of one rotation carry the same number.
+    rotation_halves: BTreeMap<(Address, Address, u64), (bool, bool)>,
 }
 
 impl Lineage {
@@ -607,10 +677,10 @@ impl Lineage {
     /// both directions are present.
     pub fn insert(&mut self, obj: Object) -> Result<Cid, ObjectError> {
         obj.verify()?;
-        if let Some((is_forward, from, to)) = Rotation::parse(&obj) {
+        if let Some((is_forward, from, to, seq)) = Rotation::parse(&obj) {
             let e = self
                 .rotation_halves
-                .entry((from, to))
+                .entry((from, to, seq))
                 .or_insert((false, false));
             if is_forward {
                 e.0 = true;
@@ -623,41 +693,76 @@ impl Lineage {
         Ok(cid)
     }
 
-    /// Rotations with both halves present.
+    /// Rotations with both halves present, at one sequence number.
     pub fn rotations(&self) -> Vec<Rotation> {
         self.rotation_halves
             .iter()
             .filter(|(_, (f, b))| *f && *b)
-            .map(|((from, to), _)| Rotation {
+            .map(|((from, to, seq), _)| Rotation {
                 from: *from,
                 to: *to,
+                seq: *seq,
             })
             .collect()
     }
 
+    /// Every distinct address a completed rotation leads to from here.
+    ///
+    /// Distinct *addresses*, not distinct rotations: re-signing the same succession at a
+    /// higher sequence number is a republication, not a second claim, and must not read as
+    /// equivocation.
+    fn successor_addresses(&self, from: &Address) -> Vec<Address> {
+        let mut out: Vec<Address> = self
+            .rotations()
+            .into_iter()
+            .filter(|r| r.from == *from)
+            .map(|r| r.to)
+            .collect();
+        out.sort();
+        out.dedup();
+        out
+    }
+
     fn rotation_exists(&self, from: &Address, to: &Address) -> bool {
-        matches!(self.rotation_halves.get(&(*from, *to)), Some((true, true)))
+        // One successor only. Where an address has two, no cross-key edge out of it is valid,
+        // including the genuine one: a verifier that cannot tell which key is the holder's
+        // must not certify either, or the attacker's edge is accepted exactly as often as the
+        // victim's.
+        self.successor_addresses(from) == vec![*to]
+    }
+
+    /// Where an address's identity stands, following completed rotations.
+    ///
+    /// Reports a fork rather than resolving one. Silently picking a successor is how an
+    /// attacker's rotation becomes invisible, and the ordering that used to do the picking was
+    /// the successor address's own byte order, which is a value the attacker chooses by
+    /// generating keys until one sorts low.
+    pub fn identity_line(&self, addr: Address) -> IdentityLine {
+        let mut seen = std::collections::BTreeSet::new();
+        let mut cur = addr;
+        while seen.insert(cur) {
+            let next = self.successor_addresses(&cur);
+            match next.len() {
+                0 if cur == addr => return IdentityLine::Settled(cur),
+                0 => return IdentityLine::Moved(cur),
+                1 => cur = next[0],
+                _ => return IdentityLine::Forked(next),
+            }
+        }
+        IdentityLine::Cycle(cur)
     }
 
     /// Follow rotations forward from an address to the identity currently in use.
     ///
-    /// Returns the input unchanged when there is no rotation, and stops rather than looping if
-    /// a cycle is present.
+    /// Returns the input unchanged when there is no rotation, when the rotations fork, and
+    /// when they cycle. A forked identity moves nothing, because the two candidates are a
+    /// compromised key and its holder in some order and this layer cannot tell which is which.
+    /// Callers that must distinguish those cases use [`Lineage::identity_line`].
     pub fn current_identity(&self, addr: Address) -> Address {
-        let mut seen = std::collections::BTreeSet::new();
-        let mut cur = addr;
-        while seen.insert(cur) {
-            let next = self
-                .rotations()
-                .into_iter()
-                .find(|r| r.from == cur)
-                .map(|r| r.to);
-            match next {
-                Some(n) => cur = n,
-                None => break,
-            }
+        match self.identity_line(addr) {
+            IdentityLine::Settled(a) | IdentityLine::Moved(a) => a,
+            IdentityLine::Forked(_) | IdentityLine::Cycle(_) => addr,
         }
-        cur
     }
 
     pub fn get(&self, cid: &Cid) -> Option<&Object> {
@@ -692,8 +797,11 @@ impl Lineage {
     /// The same rule, with the key-rotation exception applied.
     ///
     /// A cross-key edge is legitimate exactly when a **fully countersigned** rotation links the
-    /// two authors. One-sided claims are refused, so neither a compromised old key nor an
-    /// opportunistic new one can move an identity alone.
+    /// two authors and is the only rotation leaving the predecessor. One-sided claims are
+    /// refused, so nobody can claim to be someone's successor from their public key alone,
+    /// and a forked rotation certifies neither branch.
+    ///
+    /// An attacker who holds the old private key still signs both halves. See [`Rotation`].
     pub fn is_valid_edge_with_rotations(&self, predecessor: &Object, successor: &Object) -> bool {
         if successor.supersedes != Some(predecessor.cid())
             || successor.kind != predecessor.kind
@@ -915,10 +1023,157 @@ mod tests {
     }
 
     fn rotate(old: &Identity, new: &Identity, lin: &mut Lineage) {
-        lin.insert(Rotation::forward(old, &new.key_bytes(), 0).unwrap())
+        rotate_at(old, new, 0, lin);
+    }
+
+    fn rotate_at(old: &Identity, new: &Identity, seq: u64, lin: &mut Lineage) {
+        lin.insert(Rotation::forward(old, &new.key_bytes(), seq, None).unwrap())
             .unwrap();
-        lin.insert(Rotation::backward(new, &old.key_bytes(), 0).unwrap())
+        lin.insert(Rotation::backward(new, &old.key_bytes(), seq, None).unwrap())
             .unwrap();
+    }
+
+    /// Two successions from one address are reported, not resolved.
+    ///
+    /// This is the compromised-key case as a reader sees it: the holder rotates to their new
+    /// key, the thief rotates to theirs, and both rotations are fully countersigned because
+    /// both parties hold the old key. Nothing in the lineage says which is which.
+    ///
+    /// It used to resolve silently, by `find` over a `BTreeMap` keyed on the successor
+    /// address, so the winner was whichever address sorted lower. That is a value an attacker
+    /// picks: generate keys until one starts with a low byte, and take the identity with a
+    /// probability approaching one, invisibly. The crate already refuses to do this for
+    /// document versions, calling it out as how an author shows different histories to
+    /// different readers, and identity is the same problem with more at stake.
+    #[test]
+    fn two_successions_from_one_address_move_nothing_and_are_reported() {
+        let old = Identity::generate();
+        let holder = Identity::generate();
+        let thief = Identity::generate();
+        let mut lin = Lineage::new();
+
+        rotate_at(&old, &holder, 0, &mut lin);
+        rotate_at(&old, &thief, 1, &mut lin);
+
+        let branches = match lin.identity_line(old.address()) {
+            IdentityLine::Forked(b) => b,
+            other => panic!("a forked identity resolved to {other:?}"),
+        };
+        assert_eq!(branches.len(), 2);
+        assert!(branches.contains(&holder.address()) && branches.contains(&thief.address()));
+
+        assert_eq!(
+            lin.current_identity(old.address()),
+            old.address(),
+            "a forked identity moved anyway"
+        );
+
+        // Neither branch certifies a cross-key edge. Accepting the higher sequence number, or
+        // the lower address, would accept the attacker's exactly as readily as the holder's.
+        let v1 = Object::create(&old, "page", 0, b"before".to_vec(), None);
+        let c1 = lin.insert(v1).unwrap();
+        for who in [&holder, &thief] {
+            let v2 = Object::create(who, "page", 1, b"after".to_vec(), Some(c1));
+            let cid = lin.insert(v2).unwrap();
+            assert!(
+                !lin.successors(&c1).contains(&cid),
+                "a forked rotation certified a cross-key edge"
+            );
+        }
+    }
+
+    /// Signing the same succession again is a republication, not a second claim.
+    #[test]
+    fn re_signing_one_succession_at_a_higher_sequence_is_not_a_fork() {
+        let old = Identity::generate();
+        let new = Identity::generate();
+        let mut lin = Lineage::new();
+
+        rotate_at(&old, &new, 0, &mut lin);
+        rotate_at(&old, &new, 7, &mut lin);
+
+        assert_eq!(lin.rotations().len(), 2, "both rotations are held");
+        assert_eq!(
+            lin.identity_line(old.address()),
+            IdentityLine::Moved(new.address()),
+            "one succession signed twice read as equivocation"
+        );
+    }
+
+    /// Halves pair by sequence number, so unrelated attestations do not compose.
+    ///
+    /// Without this, a forward half signed years before any backward half existed still
+    /// completes a rotation the moment a matching backward half appears, and the two are
+    /// evidence of nothing in common.
+    #[test]
+    fn two_halves_at_different_sequence_numbers_are_not_a_rotation() {
+        let old = Identity::generate();
+        let new = Identity::generate();
+        let mut lin = Lineage::new();
+
+        lin.insert(Rotation::forward(&old, &new.key_bytes(), 0, None).unwrap())
+            .unwrap();
+        lin.insert(Rotation::backward(&new, &old.key_bytes(), 1, None).unwrap())
+            .unwrap();
+
+        assert!(
+            lin.rotations().is_empty(),
+            "halves at different sequence numbers composed into a rotation"
+        );
+        assert_eq!(lin.current_identity(old.address()), old.address());
+    }
+
+    /// A stolen key rotates by itself, and this asserts it rather than omitting it.
+    ///
+    /// Countersigning was documented as stopping "a compromised old key or an opportunistic
+    /// new one" from moving an identity alone. The second half is true. The first is not, and
+    /// no amount of countersigning between the two keys could make it true, because the
+    /// property countersigning establishes is possession of the old key and that is precisely
+    /// what the attacker has.
+    ///
+    /// The backward half needs only the old key's **public** bytes, which ship in `author_key`
+    /// on every object that key ever signed.
+    ///
+    /// The neighbouring test shows one-sided claims being refused, and passes only because it
+    /// never constructs the second half. That is a real property and a narrow one; without
+    /// this test beside it, a reader would take the green result for the broad claim.
+    #[test]
+    fn a_stolen_old_key_completes_a_rotation_without_its_owner() {
+        let old = Identity::generate();
+        let attacker = Identity::generate();
+        let mut lin = Lineage::new();
+
+        let v1 = Object::create(&old, "page", 0, b"before".to_vec(), None);
+        let c1 = lin.insert(v1).unwrap();
+
+        // Everything here is available to a thief holding the old private key.
+        lin.insert(Rotation::forward(&old, &attacker.key_bytes(), 0, None).unwrap())
+            .unwrap();
+        lin.insert(Rotation::backward(&attacker, &old.key_bytes(), 0, None).unwrap())
+            .unwrap();
+
+        assert_eq!(lin.rotations().len(), 1, "the rotation did not complete");
+        assert_eq!(
+            lin.current_identity(old.address()),
+            attacker.address(),
+            "this test no longer demonstrates the limit it is named for"
+        );
+
+        let v2 = Object::create(&attacker, "page", 1, b"after".to_vec(), Some(c1));
+        let c2 = lin.insert(v2).unwrap();
+        assert_eq!(lin.successors(&c1), vec![c2]);
+        assert_eq!(lin.resolve(&c1), Resolution::Head(c2));
+
+        // What the victim can do, if they still hold the key, is make it visible. Their own
+        // rotation forks the identity and the attacker stops resolving as the head.
+        let holder = Identity::generate();
+        rotate_at(&old, &holder, 1, &mut lin);
+        assert!(matches!(
+            lin.identity_line(old.address()),
+            IdentityLine::Forked(_)
+        ));
+        assert_eq!(lin.current_identity(old.address()), old.address());
+        assert!(lin.successors(&c1).is_empty());
     }
 
     #[test]
@@ -955,7 +1210,7 @@ mod tests {
         let c1 = lin
             .insert(Object::create(&old, "page", 0, b"before".to_vec(), None))
             .unwrap();
-        lin.insert(Rotation::forward(&old, &attacker.key_bytes(), 0).unwrap())
+        lin.insert(Rotation::forward(&old, &attacker.key_bytes(), 0, None).unwrap())
             .unwrap();
         assert!(
             lin.rotations().is_empty(),
@@ -977,7 +1232,7 @@ mod tests {
         let d1 = lin2
             .insert(Object::create(&old, "page", 0, b"before".to_vec(), None))
             .unwrap();
-        lin2.insert(Rotation::backward(&attacker, &old.key_bytes(), 0).unwrap())
+        lin2.insert(Rotation::backward(&attacker, &old.key_bytes(), 0, None).unwrap())
             .unwrap();
         assert!(
             lin2.rotations().is_empty(),
