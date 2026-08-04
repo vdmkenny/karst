@@ -65,6 +65,7 @@ fn main() -> std::io::Result<()> {
                 addr: r.addr()?,
                 mix_public: public,
                 layer,
+                operator: karst_net::solo_operator(id),
             });
             runners.push(r);
             id += 1;

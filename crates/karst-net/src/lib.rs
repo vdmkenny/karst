@@ -14,7 +14,7 @@ pub mod watch;
 
 pub use bulk::{plan, plan_with, Carriage, Exposure, FetchPlan, Policy};
 pub use client::{Client, Contact, SendError};
-pub use directory::{Directory, NodeInfo, RouteError};
+pub use directory::{solo_operator, Directory, NodeInfo, RouteError};
 pub use feed::{feed_tag, FeedReader, FeedStats};
 pub use frame::{Fragment, FrameError, Reassembler};
 pub use placement::{placement, DEFAULT_REPLICAS};

@@ -119,8 +119,11 @@ autonomous systems without attribution, patience is the cheap input. So:
    does. It is not a Sybil defence and the whitepaper no longer implies it is.
 2. **L5 acquires the real work.** Social introduction becomes a SybilLimit-style admission
    bound with an explicit parameter, rather than an unquantified "bounded rate".
-3. **L4 path selection stays uniform over admitted relays**, or uses a defence with a proof.
-   A readable diversity heuristic is worse than uniform random.
+3. **L4 path selection is uniform over admitted operators**, not over registered relays. The
+   second is what the placement literature attacks: an operator running `m` of `n` relays gets
+   `m/n`, and identities are free. Uniform over operators is the theta = 1 rule of Wan et al.'s
+   definition under a flat per-operator cost, which is the only cost this design can price.
+   A readable diversity heuristic beyond that is worse than uniform random.
 4. **The residual is documented, not closed.** A patient well-funded adversary who invests in
    the social graph gets in, in proportion to that investment.
 

@@ -148,6 +148,7 @@ mod tests {
                         addr: "127.0.0.1:1".parse().unwrap(),
                         mix_public: key.public(),
                         layer,
+                        operator: crate::directory::solo_operator(0),
                     });
                     nodes.push(MixNode::new(key));
                     id += 1;
