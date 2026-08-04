@@ -135,6 +135,17 @@ pub fn split(msg_id: [u8; 16], message: &[u8]) -> Result<Vec<Fragment>, FrameErr
 }
 
 /// Collect fragments until a message is whole.
+/// Whether a response body is an open envelope carrying a decodable fragment.
+///
+/// This is how a client tells a served item from the filler a provider sends when it has
+/// nothing, now that no status byte announces it on the wire. Random filler passes the length
+/// check and then fails to decode, which is the same answer by a route an observer cannot read.
+pub fn is_open_fragment(body: &[u8]) -> bool {
+    body.len() == ENVELOPE_BYTES
+        && body[0] == ENV_OPEN
+        && Fragment::decode(&body[1..1 + INNER_BYTES]).is_ok()
+}
+
 #[derive(Debug, Default)]
 pub struct Reassembler {
     partial: std::collections::BTreeMap<[u8; 16], Partial>,
