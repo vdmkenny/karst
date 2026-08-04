@@ -13,9 +13,10 @@ on:
     branches: [main]
   pull_request:
 
+# `-D warnings` is a clippy argument and lives on the clippy step. As a global RUSTFLAGS it
+# also applied to the test and release builds, which gave each profile its own cache key.
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -D warnings
 
 jobs:
   test:
@@ -32,17 +33,17 @@ jobs:
         run: cargo fmt --all --check
 
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
-
-      - name: Tests
-        run: cargo test --workspace
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       # The README states a test count and it has gone stale three times, twice because a
-      # `sed` matched nothing and reported success. A test checks it; this prints it.
-      - name: Test count
+      # `sed` matched nothing and reported success. A test checks it; this echoes it out of
+      # the one run. Counting it in a second `cargo test --workspace` cost as much again as
+      # the suite, and was half of why this job never finished inside its timeout.
+      - name: Tests
         run: |
-          n=$(cargo test --workspace 2>&1 | awk -F'[ ;]' '/^test result/ {s+=$4} END {print s}')
-          echo "suite: $n tests"
+          set -o pipefail
+          cargo test --workspace 2>&1 | tee /tmp/t.log
+          awk -F'[ ;]' '/^test result/ {s+=$4} END {print "suite: " s " tests"}' /tmp/t.log
 
   demos:
     runs-on: ubuntu-latest
