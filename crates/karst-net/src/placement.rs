@@ -432,3 +432,97 @@ mod tests {
         assert!(placement_among(&target, &beacon, &patient, DEFAULT_REPLICAS).contains(&id));
     }
 }
+
+#[cfg(test)]
+mod beacon_tests {
+    use super::*;
+    use karst_id::Identity;
+
+    fn addr(n: u32) -> Address {
+        let mut seed = [0u8; 32];
+        seed[..4].copy_from_slice(&n.to_le_bytes());
+        Identity::from_seed(seed).address()
+    }
+
+    fn providers(n: u16) -> Vec<u16> {
+        (0..n).collect()
+    }
+
+    /// An unpredictable beacon stops targeted grinding and does not stop bulk minting.
+    ///
+    /// This is the question #79 has to answer before a beacon is worth building, and the
+    /// answer is not the flattering one. Unpredictability removes the adversary's ability to
+    /// aim: it can no longer take a chosen publisher's slots for a chosen epoch by hashing a
+    /// few hundred candidate identities, because it does not know the value to hash against
+    /// until the epoch begins.
+    ///
+    /// What it cannot remove is presence. An adversary that mints many identities and keeps
+    /// them holds a share of every publisher's placement proportional to its share of the
+    /// provider set, whatever the beacon does, because rendezvous hashing is uniform and
+    /// uniform is exactly what an unpredictable value guarantees.
+    ///
+    /// So a beacon converts "four dollars to capture the publisher you name" into "hold a
+    /// proportion of the network to capture a proportion of publishers". That is worth having
+    /// and it is not the same as solving it, and the difference is what this measures.
+    #[test]
+    fn an_unpredictable_beacon_stops_aiming_and_not_presence() {
+        let honest = providers(128);
+        let k = DEFAULT_REPLICAS;
+
+        // The adversary mints a quarter as many identities as the honest set and keeps them.
+        // It does no grinding at all: these are simply providers it runs.
+        let minted: Vec<u16> = (5_000u16..5_032).collect();
+        let mut all = honest.clone();
+        all.extend_from_slice(&minted);
+
+        // Across many publishers and an unpredictable value per epoch, what share does it get?
+        let mut captured_slots = 0usize;
+        let mut total_slots = 0usize;
+        for pubr in 0..200u32 {
+            let target = addr(pubr);
+            let mut h = blake3::Hasher::new();
+            h.update(b"unpredictable");
+            h.update(&pubr.to_le_bytes());
+            let beacon = Beacon::new(0, *h.finalize().as_bytes());
+
+            let held = rank(&target, &beacon, &all, k);
+            total_slots += held.len();
+            captured_slots += held.iter().filter(|p| minted.contains(p)).count();
+        }
+
+        let share_of_set = minted.len() as f64 / all.len() as f64;
+        let share_of_slots = captured_slots as f64 / total_slots as f64;
+
+        // Presence translates into placement at about its own rate. No beacon changes this.
+        assert!(
+            (share_of_slots - share_of_set).abs() < 0.05,
+            "minted identities are {:.1}% of the set and took {:.1}% of slots, so this \
+             measurement is not showing what it claims",
+            share_of_set * 100.0,
+            share_of_slots * 100.0
+        );
+
+        // And the thing a beacon does buy: the adversary cannot concentrate that share on a
+        // publisher it names. Its share of any one publisher's slots is no better than its
+        // share overall.
+        let worst = (0..200u32)
+            .map(|pubr| {
+                let target = addr(pubr);
+                let mut h = blake3::Hasher::new();
+                h.update(b"unpredictable");
+                h.update(&pubr.to_le_bytes());
+                let beacon = Beacon::new(0, *h.finalize().as_bytes());
+                rank(&target, &beacon, &all, k)
+                    .iter()
+                    .filter(|p| minted.contains(p))
+                    .count()
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(
+            worst < k,
+            "some publisher lost all {k} slots to minted identities without any grinding, \
+             so uniformity is not holding"
+        );
+    }
+}
