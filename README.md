@@ -40,7 +40,7 @@ it.
 > [`docs/21-a-running-network.md`](docs/21-a-running-network.md).
 
 ```bash
-cargo test          # 564 tests
+cargo test          # 566 tests
 cargo run -p karst-net --bin karst-net-demo    # a real network on real sockets, with live drop detection
 cargo run -p karst-index --bin karst-search    # discovery with 200,000 sybils in the room
 cargo run --release -p karst-stack --bin karst-stack-demo  # the whole stack, composed
@@ -67,7 +67,7 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 | [`karst-node`](crates/karst-node) | L4 Mixing | A mix that runs: defended clock, delay queue, shuffled release, eviction by remaining hold. |
 | [`karst-wire`](crates/karst-wire) | L3 Wire | One datagram size, Poisson emission drawn without reference to the queue. |
 | [`karst-seal`](crates/karst-seal) | L4/L6 | HPKE base mode, RFC 9180. Sealing keys are separate from identity keys, on purpose. |
-| [`karst-net`](crates/karst-net) | L3-L6.1 | Directory, stratified routes, providers, computed placement, clients, public feeds. The network, running. |
+| [`karst-net`](crates/karst-net) | L3-L6.1 | Directory, routes drawn uniformly over operators, providers, placement on a per-publisher VRF beacon, clients, public feeds. The network, running. |
 | [`karst-stack`](crates/karst-stack) | all | The layers composed over real sockets: publish, replicate, read, detect a withholding replica, find a shared contact without naming one, and pay a relay unlinkably. |
 | [`karst-index`](crates/karst-index) | L15 Discovery | Publishing is announcing. Ranking is the reader's, and every stranger together counts once. |
 | [`karst-symmetry`](crates/karst-symmetry) | L16 Symmetry | Does flattening returns to scale actually prevent capture? Partly. |
@@ -141,6 +141,7 @@ cited an RFC it did not implement.
 | Blind signatures | `blind-rsa-signatures` | RFC 9474, RSABSSA-SHA384-PSS-Randomized |
 | Private set intersection | `voprf` | RFC 9497, OPRF(ristretto255, SHA-512), verifiable mode |
 | Wide-block payload cipher | `lioness-rs` | LIONESS (Anderson and Biham, FSE 1996) |
+| Verifiable random function | `schnorrkel` | Schnorr VRF over Ristretto, for per-publisher placement beacons |
 | Constant-time comparison | `subtle` | |
 | Hashing, MACs, key derivation | `blake3` | |
 

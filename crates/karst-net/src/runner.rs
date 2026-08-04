@@ -704,6 +704,7 @@ mod tests {
             addr: "127.0.0.1:1".parse().unwrap(),
             mix_public: key.public(),
             layer: 0,
+            operator: crate::directory::solo_operator(0),
         });
         let provider = UdpSocket::bind("127.0.0.1:0").expect("provider socket");
         provider.set_nonblocking(true).unwrap();

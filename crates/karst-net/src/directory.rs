@@ -28,8 +28,11 @@
 //! open, and it is not merely a parameter: guard placement attacks defeat Counter-RAPTOR,
 //! DeNASA and LASTor, with 0.216% of bandwidth reaching 18.22% of guard selections (Wan,
 //! Johnson, Wails, Wagh, Mittal, *Guard Placement Attacks on Path Selection Algorithms for
-//! Tor*, PoPETs 2019(4)). Selection is uniform within a layer until that is settled.
+//! Tor*, PoPETs 2019(4)). Selection is uniform over **operators** within a layer, which is the
+//! cost-proportional rule under the only cost this design can price, and nothing beyond that is
+//! attempted until it is settled.
 
+use karst_id::Address;
 use karst_mix::packet::{Hop, MixPublic, MAX_HOPS};
 use karst_node::MixNode;
 use rand::Rng;
@@ -44,6 +47,19 @@ pub enum RouteError {
     NoSuchNode,
 }
 
+/// One operator per node, derived from the node id.
+///
+/// For demos and tests where every node genuinely is its own operator. A deployment reads the
+/// operator from a signed registration instead; this exists so that the common case in test
+/// code does not quietly collapse every node onto one operator, which would make selection
+/// look uniform-over-operators while behaving as uniform-over-records.
+pub fn solo_operator(id: u16) -> Address {
+    let mut seed = [0u8; 32];
+    seed[..2].copy_from_slice(&id.to_le_bytes());
+    seed[2] = 0xA7;
+    karst_id::Identity::from_seed(seed).address()
+}
+
 #[derive(Debug, Clone)]
 pub struct NodeInfo {
     pub id: u16,
@@ -51,6 +67,15 @@ pub struct NodeInfo {
     pub mix_public: MixPublic,
     /// Which mixing stage this node serves. Providers sit in the last layer.
     pub layer: u8,
+    /// Who runs it.
+    ///
+    /// Selection is uniform over **operators** rather than over records, and this is the field
+    /// that makes that possible. Without it, an operator running `m` nodes in a layer received
+    /// `m/n` of the selections, so splitting one budget across many identities bought
+    /// proportionally more of the network. That is LASTor's failure mode, and Wan, Johnson,
+    /// Wails, Wagh and Mittal (PoPETs 2019(4)) measured a fixed budget split across twenty
+    /// relays reaching 18.22% average selection against it.
+    pub operator: Address,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -107,11 +132,35 @@ impl Directory {
 
         let mut hops = Vec::with_capacity(mixing_layers as usize + 1);
         for layer in 0..mixing_layers {
-            let candidates: Vec<&NodeInfo> =
-                self.nodes.iter().filter(|n| n.layer == layer).collect();
-            if candidates.is_empty() {
+            // Uniform over operators, then over that operator's nodes in this layer.
+            //
+            // Uniform over *records* is the rule the placement attack is written against:
+            // running more identities buys more selections, and identities are free by design.
+            // Uniform over operators makes an operator's share `1/operators` however many
+            // nodes it registers, so splitting a budget buys nothing.
+            //
+            // This is cost-proportional selection under the only cost this design can measure.
+            // Wan et al.'s Theorem 1 calls a rule theta-GP-secure when the ratio of selection
+            // probability to relative cost is bounded by theta; with no bandwidth consensus to
+            // price, the measurable cost is admission, which is flat per operator, and the
+            // theta = 1 rule under a flat cost is exactly uniform over operators.
+            let mut operators: Vec<Address> = self
+                .nodes
+                .iter()
+                .filter(|n| n.layer == layer)
+                .map(|n| n.operator)
+                .collect();
+            operators.sort_unstable();
+            operators.dedup();
+            if operators.is_empty() {
                 return Err(RouteError::EmptyLayer);
             }
+            let op = operators[rng.gen_range(0..operators.len())];
+            let candidates: Vec<&NodeInfo> = self
+                .nodes
+                .iter()
+                .filter(|n| n.layer == layer && n.operator == op)
+                .collect();
             let pick = candidates[rng.gen_range(0..candidates.len())];
             hops.push(Hop {
                 id: pick.id,
@@ -145,6 +194,7 @@ mod tests {
                     addr: "127.0.0.1:1".parse().unwrap(),
                     mix_public: k.public(),
                     layer,
+                    operator: crate::directory::solo_operator(0),
                 });
                 keys.push(k);
                 id += 1;
@@ -229,6 +279,7 @@ mod tests {
                 addr: "127.0.0.1:1".parse().unwrap(),
                 mix_public: k.public(),
                 layer,
+                operator: crate::directory::solo_operator(layer as u16),
             });
         }
         let mut rng = rand::thread_rng();
@@ -248,12 +299,14 @@ mod tests {
             addr: "127.0.0.1:1".parse().unwrap(),
             mix_public: k.public(),
             layer: 0,
+            operator: crate::directory::solo_operator(0),
         });
         d.add(NodeInfo {
             id: 9,
             addr: "127.0.0.1:1".parse().unwrap(),
             mix_public: k.public(),
             layer: 3,
+            operator: crate::directory::solo_operator(9),
         });
         let mut rng = rand::thread_rng();
         assert_eq!(d.route_to(9, &mut rng).unwrap_err(), RouteError::EmptyLayer);
@@ -269,6 +322,7 @@ mod tests {
                 addr: "127.0.0.1:1".parse().unwrap(),
                 mix_public: k.public(),
                 layer,
+                operator: crate::directory::solo_operator(layer as u16),
             });
         }
         let mut rng = rand::thread_rng();
@@ -276,5 +330,113 @@ mod tests {
             d.route_to(MAX_HOPS as u16, &mut rng).unwrap_err(),
             RouteError::TooManyLayers
         );
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+    use karst_mix::packet::MixKey;
+    use rand::SeedableRng;
+
+    fn op(n: u32) -> Address {
+        let mut seed = [0u8; 32];
+        seed[..4].copy_from_slice(&n.to_le_bytes());
+        karst_id::Identity::from_seed(seed).address()
+    }
+
+    /// Splitting one budget across many identities buys no extra selection.
+    ///
+    /// Uniform over *records* is the rule the placement literature is written against: an
+    /// operator running `m` of `n` nodes in a layer receives `m/n`, and identities are free by
+    /// design here, so the rule rewards exactly the behaviour the design cannot prevent. Wan,
+    /// Johnson, Wails, Wagh and Mittal (PoPETs 2019(4)) measured a fixed budget split across
+    /// twenty relays reaching 18.22% average selection under LASTor, whose selection likewise
+    /// has no dependency on cost.
+    ///
+    /// Uniform over operators makes the share `1/operators` whatever `m` is. That is the
+    /// theta = 1 rule under the only cost this design can price, which is admission, and
+    /// admission is flat per operator.
+    #[test]
+    fn one_operator_running_many_nodes_gets_one_operators_share() {
+        let mut dir = Directory::new(15.0);
+        let mut id = 0u16;
+        let add = |dir: &mut Directory, layer: u8, operator: Address, id: &mut u16| {
+            let key = MixKey::from_seed([(*id as u8).wrapping_add(1); 32]);
+            dir.add(NodeInfo {
+                id: *id,
+                addr: "127.0.0.1:1".parse().unwrap(),
+                mix_public: key.public(),
+                layer,
+                operator,
+            });
+            *id += 1;
+        };
+
+        // Three honest operators with one node each in layer 0, and one adversary with twenty.
+        for o in 0..3u32 {
+            add(&mut dir, 0, op(o), &mut id);
+        }
+        let greedy = op(99);
+        for _ in 0..20 {
+            add(&mut dir, 0, greedy, &mut id);
+        }
+        // A terminal layer so a route can be built at all.
+        add(&mut dir, 1, op(7), &mut id);
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(4);
+        let mut picked = 0usize;
+        let trials = 4_000;
+        for _ in 0..trials {
+            let route = dir.route_to(id - 1, &mut rng).expect("route");
+            let first = route[0].id;
+            let info = dir.get(first).expect("known node");
+            if info.operator == greedy {
+                picked += 1;
+            }
+        }
+
+        let share = picked as f64 / trials as f64;
+        // Four operators, so a quarter. Under the old rule it would be 20 of 23, about 87%.
+        assert!(
+            (share - 0.25).abs() < 0.04,
+            "an operator with 20 of 23 nodes took {:.1}% of first hops, so selection is still \
+             per record and splitting a budget still pays",
+            share * 100.0
+        );
+    }
+
+    /// And the honest case still works: every operator is reachable.
+    #[test]
+    fn every_operator_in_a_layer_is_selectable() {
+        let mut dir = Directory::new(15.0);
+        let mut id = 0u16;
+        for o in 0..5u32 {
+            let key = MixKey::from_seed([(id as u8).wrapping_add(1); 32]);
+            dir.add(NodeInfo {
+                id,
+                addr: "127.0.0.1:1".parse().unwrap(),
+                mix_public: key.public(),
+                layer: 0,
+                operator: op(o),
+            });
+            id += 1;
+        }
+        let key = MixKey::from_seed([200u8; 32]);
+        dir.add(NodeInfo {
+            id,
+            addr: "127.0.0.1:1".parse().unwrap(),
+            mix_public: key.public(),
+            layer: 1,
+            operator: op(50),
+        });
+
+        let mut rng = rand::rngs::StdRng::seed_from_u64(9);
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..500 {
+            let route = dir.route_to(id, &mut rng).expect("route");
+            seen.insert(dir.get(route[0].id).unwrap().operator);
+        }
+        assert_eq!(seen.len(), 5, "some operator was never selected");
     }
 }

@@ -310,11 +310,23 @@ a peer-reviewed result showing partial deployment can introduce **new** vulnerab
 (Lychev, Goldberg, Schapira, SIGCOMM 2013).
 
 **Interaction with L4.** Path selection also determines anonymity, and **selection is uniform
-over admitted relays**. A structural preference that relay operators can read is a placement
-target: guard placement attacks defeat Counter-RAPTOR, DeNASA and LASTor, letting an adversary
-with 0.216% of Tor's bandwidth reach 18.22% guard selection probability. The defence against an
-observer belongs at L5 admission, not in path selection. See
-[`docs/13-observation-defence.md`](docs/13-observation-defence.md).
+over admitted operators, not over registered relays**. The distinction is the whole of it.
+Uniform over relays is the rule the placement literature is written against: an operator running
+`m` of `n` relays in a layer receives `m/n`, identities are free by design here, so the rule
+rewards precisely the behaviour this design cannot prevent. Guard placement attacks defeat
+Counter-RAPTOR, DeNASA and LASTor, letting an adversary with 0.216% of Tor's bandwidth reach
+18.22% guard selection probability, and LASTor falls hardest because its selection has no
+dependency on cost at all.
+
+Selecting over operators makes an operator's share `1/operators` however many relays it
+registers. That is the cost-proportional rule under the only cost this design can price:
+there is no bandwidth consensus to measure, so the measurable cost is admission, and admission
+is flat per operator. Measured in `karst-net::directory`: an operator holding 20 of 23 relays
+in a layer takes 25% of first hops rather than 88.6%.
+
+A structural preference that relay operators can *read* remains a placement target, which is
+why nothing beyond cost-proportionality is attempted here, and the defence against an observer
+belongs at L5 admission. See [`docs/13-observation-defence.md`](docs/13-observation-defence.md).
 
 **Open.** Sender-chosen paths mean the sender decides who gets paid, which inverts transit
 economics in a direction whose equilibrium we cannot predict.
