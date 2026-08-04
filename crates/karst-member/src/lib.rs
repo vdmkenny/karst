@@ -20,9 +20,10 @@
 //!
 //! Tor bridges are membership concealment in production, and the record should be read before
 //! anyone designs another one. China broke the HTTPS distribution channel in September 2009 and
-//! the Gmail one in March 2010, in Dingledine's words "by just pretending to be enough
-//! legitimate users from enough different subnets". By 2011 the pools in distribution were 176
-//! bridges by HTTPS and 201 by mail, against a state.
+//! the Gmail one in March 2010, "by just pretending to be enough legitimate users from enough
+//! different subnets". By 2011 the pools in distribution were 176 bridges by HTTPS and 201 by
+//! mail, against a state. (Dingledine, *Research problems: Ten ways to discover Tor bridges*,
+//! Tor Project blog, 2011.)
 //!
 //! Ling, Luo, Yu, Yang and Fu (INFOCOM 2012) then showed distribution was not the weak part.
 //! One malicious middle relay, run for fourteen days, enumerated 2,369 bridges: as many as a
@@ -38,10 +39,11 @@
 //! most sybil-to-sybil links are accidental rather than intended. That is a measurement
 //! refutation rather than a modelling quibble.
 //!
-//! Alvisi and colleagues then measured those schemes under the real attack shape, scoring the
-//! probability that a random honest node ranks above a random sybil, where 0.5 is a coin flip:
-//! SybilLimit 0.45, SybilGuard 0.44, Gatekeeper 0.49, and one variant at 0.34. **Four of five
-//! perform at or below chance.** Mohaisen, Yun and Kim had already shown the mixing-time
+//! Alvisi and colleagues then simulated the Renren attack shape on a Facebook graph, scoring
+//! the probability that a random honest node ranks above a random sybil, where 0.5 is a coin
+//! flip: SybilLimit 0.45, SybilGuard 0.44, Mislove 0.34, Gatekeeper 0.49, ACL 0.37. **All five
+//! perform below chance**, including ACL, which the same paper introduces as the first sybil
+//! defence with provable guarantees. Mohaisen, Yun and Kim had already shown the mixing-time
 //! assumption fails on real graphs, and worse, that the graphs with genuine trust semantics are
 //! the slow-mixing ones. So there is no admission decision to make here, and none is made.
 //!

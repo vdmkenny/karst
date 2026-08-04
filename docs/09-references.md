@@ -4,6 +4,13 @@ Sources for the load-bearing claims in these documents. Where a design here is a
 existing published system, that is stated rather than implied. Very little of KARST is
 new; the contribution is the assembly and the four-error framing, not the primitives.
 
+This is a reading list, not a complete bibliography, and it does not assert that every
+claim elsewhere in the repository appears here.
+[`docs/30-research-and-its-citations.md`](30-research-and-its-citations.md) is the
+verification pass: it checks each citation against the source text, quotes the passage
+the claim rests on, and records where a document states a cited result imprecisely. Where
+the two disagree, docs/30 is the one that was checked.
+
 ---
 
 ## Anonymity and mix networks
@@ -68,6 +75,29 @@ around nine or ten, which vote hourly to produce the consensus document listing 
 Cited in `04-lessons-from-tor.md` §2 as the argument that a hardcoded key set is a root
 store by another name.
 
+**Ten ways to discover Tor bridges.** Roger Dingledine, *Research problems: Ten ways to discover
+Tor bridges*, Tor Project blog, 2011.
+<https://blog.torproject.org/research-problems-ten-ways-discover-tor-bridges/>
+
+The source for the September 2009 HTTPS break and the March 2010 mail break, for the phrase "by
+just pretending to be enough legitimate users from enough different subnets", and for the 176 and
+201 bridge pool sizes. Cited in WHITEPAPER §3 L5 and in `karst-member`, as the record of what
+happened to membership concealment when a state attacked it.
+
+**Bridge enumeration from a middle relay.** Zhen Ling, Junzhou Luo, Wei Yu, Ming Yang and Xinwen
+Fu, *Extensive Analysis and Large-Scale Empirical Evaluation of Tor Bridge Discovery*, IEEE
+INFOCOM 2012, pp. 2381-2389.
+
+One malicious middle relay run for fourteen days enumerated 2,369 bridges, as many as a month of
+enumeration across 500 PlanetLab nodes and 2,000 mail accounts. Cited in WHITEPAPER §3 L5 for the
+claim that distribution was never the weak part.
+
+**Bridge guards.** Tor proposal 188, *Bridge Guards and other anti-enumeration defenses*.
+<https://spec.torproject.org/proposals/188-bridge-guards.html>
+
+Tor's structural answer to the above. Still marked Reserve, shelved in 2020 on the grounds that
+the attack had not been observed in use rather than that it had been fixed.
+
 **KAX17.** A single unattributed operator ran over 900 Tor relays at peak, against a
 network of roughly 9,000 to 10,000, from 2017 until removal between October and November
 2021, across more than fifty autonomous systems. At its height a user faced up to a 16%
@@ -91,6 +121,29 @@ relays from being deployed. See WHITEPAPER §6.
 The architecture behind Freenet 0.7's darknet mode, released May 2008: nodes connect only to
 peers whose references were exchanged out of band, chosen by trust rather than by a routing
 algorithm. This is L5's mechanism, shipped to end users eighteen years ago.
+
+**Sybils do not form a tight region.** Zhi Yang, Christo Wilson, Xiao Wang, Tingting Gao, Ben Y.
+Zhao and Yafei Dai, *Uncovering Social Network Sybils in the Wild*, IMC 2011, extended in ACM
+Transactions on Knowledge Discovery from Data 8(1), February 2014.
+
+A detector deployed on Renren found more than 100,000 sybil accounts, in a dataset of 650,000.
+Verbatim: "contrary to prior conjecture, Sybils in OSNs do not form tight-knit communities". Over
+70% have no edge to any other sybil; of the remainder, the largest component "formed accidentally".
+This is a measurement refutation of the assumption the SybilGuard family is built on, not a
+modelling quibble. Cited in WHITEPAPER §3 L5 and in `karst-member`.
+
+**And the schemes score below chance.** Lorenzo Alvisi, Allen Clement, Alessandro Epasto, Silvio
+Lattanzi and Alessandro Panconesi, *SoK: The Evolution of Sybil Defense via Social Networks*, IEEE
+Symposium on Security and Privacy 2013, pp. 382-396. Extended as *Communities, Random Walks, and
+Social Sybil Defense*, Internet Mathematics 10(3-4):360-420, 2014.
+
+Simulating the Renren attack shape on a Facebook graph, the probability that a random honest node
+ranks above a random sybil: SybilLimit 0.45, SybilGuard 0.44, Mislove 0.34, Gatekeeper 0.49, ACL
+0.37, where 0.5 is a coin flip. All five below chance, including the ACL algorithm the same paper
+introduces as the first with provable guarantees. The extended version states the conclusion
+plainly: the goal of universal decentralized sybil defense "rests on assumptions (short mixing
+time and cut sparseness) whose validity is at best dubious". Cited in WHITEPAPER §3 L5 and in
+`karst-member`.
 
 **What the users did with it.** The Hyphanet project's own documentation states:
 "Unfortunately most people use Hyphanet in opennet mode currently", and explains that opennet
