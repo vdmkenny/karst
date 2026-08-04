@@ -167,6 +167,60 @@ Both are measured here rather than derived from the literature, because the lite
 supply them: Loopix recommends no parameter values, giving only the ratio `lambda/mu >= 2` for
 aggregate arrival rate at a mix, and the trilemma abstracts away from wall-clock time entirely.
 
+### The emission rate, and the thing it collides with
+
+The delay derivation above needs an emission rate to start from. Three independent lines of
+evidence converge on roughly one packet every five seconds, and a fourth says that number
+cannot be run on a phone.
+
+**What it costs in data.** At 1024 bytes both directions, one packet per second is 5.31 GB per
+month, and IP and UDP headers add 3% to 8% on top. That exceeds the ITU's 5 GB reference basket
+for mobile broadband, the FCC Lifeline minimum of 4.5 GB per month (frozen at that figure
+through 1 December 2027), and the 4.51 GB per month an average Kenyan mobile broadband
+subscriber actually consumes. At one packet per second, cover traffic is not a share of a
+low-end plan, it is more than the whole plan.
+
+One packet every five seconds is 1.06 GB per month. That is about 5% of what a typical
+subscriber in the EU, US or India uses, and 106% of the ITU's low-consumption basket. Thirty
+seconds is 177 MB, under 1% of typical usage, which is a rounding error anywhere.
+
+**What comparable systems chose.** Tor's deployed connection padding samples its interval from
+1.5 to 9.5 seconds, mean 5.5. Talek picked exactly 5 seconds as its shipped default after
+evaluating 1 second and rejecting it on bandwidth grounds. Tor's reduced mode for mobile
+clients samples 9 to 14 seconds. Loopix's lowest experimental configuration is one message
+every 12 seconds. The deployed precedent band is one packet every 5 to 12 seconds, and nothing
+above one per second ships anywhere except Nym.
+
+**What it costs in battery, which is where the agreement ends.** The binding constraint is not
+the data plan, it is the RRC inactivity timer, and every network with a published measurement
+puts it between 10.7 and 21.4 seconds. **An emission interval below about ten seconds means the
+radio never returns to idle, at all, ever.** A pinned LTE radio draws about 1060 mW against an
+idle floor of about 31 mW, a factor of 34, and radio-only battery life on a 15.5 Wh phone falls
+from roughly 21 days to roughly 15 hours.
+
+The middle does not rescue it. At 30 to 60 seconds the radio does reach idle, and it pays the
+full tail on every emission, which still costs 7 to 14 times the idle floor. Getting close to
+idle needs tens of minutes: GSMA's own IoT guidance recommends 29 minutes as a default polling
+interval, and at that interval there is no anonymity left to talk about.
+
+### So the honest statement is that this does not run on a phone
+
+The three constraints do not have a common solution. Five seconds is where precedent and the
+data budget agree, and it is half the shortest measured RRC timer, so it pins the radio awake
+permanently.
+
+WHITEPAPER §6.11 already concedes that constrained devices are exempt from cover traffic and
+are therefore not anonymous, and frames that around battery-powered sensors. **The measurement
+says the exemption is much wider than the concession.** It covers any battery-powered device at
+any interval short enough to be useful, which includes the phone in a pocket that most of this
+design's plausible users would be carrying.
+
+That is not a reason to change the parameter. It is a reason to state which device the
+parameter is for: **the shipping set assumes a client that is plugged in**, or one that accepts
+a day of battery rather than weeks. A phone-shaped deployment needs either a different
+mechanism or an explicit statement that it is not anonymous, and inventing a third option here
+would be inventing it.
+
 ---
 
 ## 2. Membership concealment, and a claim withdrawn
