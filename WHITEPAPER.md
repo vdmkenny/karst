@@ -713,9 +713,41 @@ in total**.
 
 Rotation does not fix it if the rotating value is predictable. An epoch **counter** is public
 and monotonic, so an adversary grinds an identity that wins for whichever epoch it likes, as far
-ahead as it likes. Rotation buys protection only against an unpredictable beacon, and **nothing
-in this design currently produces one** (#79). Until it does, placement is capturable at the
-prices above, and that is the honest state of this layer.
+ahead as it likes. Rotation buys protection only against an unpredictable value, and nothing in
+this design currently produces one.
+
+**And a beacon would not solve it either, which is worth knowing before building one.** An
+unpredictable value removes the adversary's ability to *aim*: it can no longer take a named
+publisher's slots by hashing a few hundred candidate identities, because it does not know what
+to hash against until the epoch starts. It does nothing about *presence*. Rendezvous hashing is
+uniform, and uniform is precisely what an unpredictable value guarantees, so an adversary
+running a share of the provider set holds that same share of every publisher's placement
+without grinding anything. Measured in `karst-net::placement`: minted identities at 20% of the
+set take 20% of slots, and no beacon changes that number.
+
+So a beacon converts **four dollars to capture the publisher you name** into **hold a
+proportion of the network to capture a proportion of publishers**. That is a real improvement
+and it is not a solution, and it is the same shape as §6's concession about L16: this design
+raises the cost of buying position and does not stop buying presence.
+
+**Nor can the beacon be a shared one.** Every deployed unbiasable beacon rests on an
+honest-majority assumption over a named set: drand's group is fixed by a distributed key
+generation ceremony, Tor's shared random value needs its directory authorities, and a
+stake-weighted beacon needs a stake register. Cleve (*Limits on the Security of Coin Flips when
+Half the Processors Are Faulty*, STOC 1986) shows no protocol agrees on a bit with negligible
+bias once half the parties are faulty, and Douceur (*The Sybil Attack*, IPTPS 2002) shows that
+without a logically centralised authority an adversary can be half the parties whenever it
+chooses. Open membership plus free identities therefore rules out distributed coin tossing, and
+every route back to it reintroduces the privileged set error 03 exists to delete.
+
+The route that stays inside the design is to stop asking for a *shared* value: give each
+publisher a verifiable random function keypair and let the placement value for an epoch be that
+publisher's own VRF output on it. Unpredictable to everyone but the publisher, unique so the
+publisher cannot regrind it, verifiable by anyone holding the address, and there are as many of
+them as there are publishers, which is "zero or n, never one" satisfied literally. The cost is
+that the value has to reach the reader, so this section's claim that placement needs no
+announcement weakens to needing one small unforgeable one, and a publisher who stops emitting
+falls back to a stale value an adversary then has unlimited time to grind against. See #79.
 
 **Divergence is detectable, not preventable.** A reader that asks `k` providers and receives
 different answers learns that at least one is lying and cannot learn which. Quorum reads
