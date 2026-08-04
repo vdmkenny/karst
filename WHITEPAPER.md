@@ -1477,9 +1477,19 @@ boundary does not exist rather than being padded over. L5 already conceals membe
 research problem rather than an engineering task. See
 [`docs/15-fundamental-limits.md`](docs/15-fundamental-limits.md).
 
-**6.11 Constrained devices are exempt from cover traffic and are therefore not anonymous.** A battery
-powered sensor cannot emit continuously. The exemption is honest and it segments the anonymity set,
-which is precisely the failure mode L4 exists to avoid. We do not have a good answer.
+**6.11 Battery-powered devices are exempt from cover traffic and are therefore not anonymous, and
+that includes phones.** This was written about sensors and it is much wider than that. The binding
+constraint is the RRC inactivity timer, measured between 10.7 and 21.4 seconds on every network
+with a published figure, so **an emission interval below about ten seconds means the radio never
+returns to idle at all**. A pinned LTE radio draws around 1060 mW against an idle floor near
+31 mW, and radio-only battery life on a 15.5 Wh phone falls from roughly 21 days to roughly 15
+hours. Thirty to sixty seconds still costs 7 to 14 times idle, because the full tail is paid on
+every emission; reaching idle needs tens of minutes, at which point there is no anonymity left.
+
+The shipping parameters therefore assume a client that is **plugged in**. The exemption is honest
+and it segments the anonymity set, which is precisely the failure mode L4 exists to avoid, and it
+segments it along the line between people who can leave a machine running and people carrying a
+phone. We do not have a good answer. `docs/15-fundamental-limits.md` has the measurements.
 
 **6.12 A claim of human authorship is unfalsifiable, and the field invites exclusion.** §3.13.1 makes
 delegation checkable and leaves `Direct` a bare assertion, permanently. If your threat model is a
