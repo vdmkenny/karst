@@ -307,7 +307,8 @@ result rather than a resilience one. RPKI also fails open by design, so an adver
 a publication point disables validation for everything depending on it (*Stalloris*, USENIX
 Security 2022). And BGPsec, the path-validating successor, has essentially no deployment, with
 a peer-reviewed result showing partial deployment can introduce **new** vulnerabilities
-(Lychev, Goldberg, Schapira, SIGCOMM 2013).
+(Lychev, Goldberg, Schapira, SIGCOMM 2013). The hijack measurements behind this section, and the
+full RPKI deployment figures, are in [`docs/27-path.md`](docs/27-path.md).
 
 **Interaction with L4.** Path selection also determines anonymity, and **selection is uniform
 over admitted operators, not over registered relays**. The distinction is the whole of it.
@@ -603,7 +604,8 @@ budget, because some node must deliver to each identity the adversary controls o
 **The deployed attempt, read honestly.** Tor bridges are this in production. China broke the
 HTTPS distribution channel in September 2009 and the mail one in March 2010, "by just pretending
 to be enough legitimate users from enough different subnets"; by 2011 the pools in distribution
-were 176 bridges and 201 bridges, against a state. Distribution was not even the weak part: Ling,
+were 176 bridges and 201 bridges, against a state (Dingledine, *Research problems: Ten ways to
+discover Tor bridges*, Tor Project blog, 2011). Distribution was not even the weak part: Ling,
 Luo, Yu, Yang and Fu (INFOCOM 2012) enumerated 2,369 bridges from **one malicious middle relay
 in fourteen days**, matching a month of enumeration across 500 PlanetLab nodes. Tor's structural
 answer, proposal 188, remains Reserve, shelved in 2020 because the attack was not observed in
@@ -627,11 +629,15 @@ refused to pay, and no mechanism here changes that. What KARST does differently 
 offer the escape hatch, which converts an adoption problem into an adoption ceiling.
 
 **And social-graph admission is not a mechanism, it is a hope.** The SybilGuard family assumes
-sybils form a tight region behind a sparse cut. Yang and colleagues measured a live network with
-hundreds of thousands of real sybils and found they integrate like ordinary users, with most
-sybil-to-sybil links accidental. Alvisi and colleagues then scored those schemes under the real
-attack shape, where 0.5 is a coin flip: SybilLimit 0.45, SybilGuard 0.44, Gatekeeper 0.49, one
-variant 0.34. **Four of five at or below chance.** Mohaisen, Yun and Kim had already shown the
+sybils form a tight region behind a sparse cut. Yang, Wilson, Wang, Gao, Zhao and Dai (*Uncovering
+Social Network Sybils in the Wild*, IMC 2011) measured a live network with hundreds of thousands of
+real sybils and found they integrate like ordinary users, with over 70% having no sybil edge at all
+and most of the rest accidental. Alvisi, Clement, Epasto, Lattanzi and Panconesi (*SoK: The
+Evolution of Sybil Defense via Social Networks*, IEEE S&P 2013) then scored those schemes under the
+real
+attack shape, where 0.5 is a coin flip: SybilLimit 0.45, SybilGuard 0.44, Mislove 0.34,
+Gatekeeper 0.49, ACL 0.37. **All five below chance**, including ACL, which the same paper
+introduces as the first sybil defence with provable guarantees. Mohaisen, Yun and Kim had already shown the
 mixing-time assumption fails, and that the graphs with real trust semantics are the slow-mixing
 ones. So no admission decision is made here, because there is no admission decision anyone knows
 how to make.
@@ -724,7 +730,8 @@ the top `k` hold the feed. This is rendezvous hashing, highest random weight (Th
 Ravishankar, *Using Name-Based Mappings to Increase Hit Rates*, IEEE/ACM Transactions on
 Networking, 1998), whose Theorem 1 gives the property that matters: when a provider leaves, only
 the publishers it held move. A placement that reshuffled on every membership change would be
-unknowable in practice.
+unknowable in practice. [`docs/25-replication.md`](docs/25-replication.md) works the placement
+through, including why rotating on a counter buys nothing.
 
 A publisher's feed sits at `feed_tag(publisher, epoch) = H(publisher || epoch)`, computable by
 anyone who knows the publisher's address. So a reader holding an address can derive the tag,
@@ -992,7 +999,7 @@ exists because a general browser leaks identity through DNS, WebRTC, canvas and 
 fingerprinting, plugins, and a long tail nobody catalogued. The fingerprinting surface is
 proportional to the size of the platform specification.
 
-**Cost.** §6.6: this is permanently and by design far less capable than a modern browser.
+**Cost.** §6.18: this is permanently and by design far less capable than a modern browser.
 
 ---
 
@@ -1550,6 +1557,20 @@ open problem. a verifier can identify a double spender but cannot *prove* it to 
 Compact E-Cash (EUROCRYPT 2005) adds that exculpability and is not implemented, and it matters more
 here than in a banked setting because there is no authority whose word anyone takes.
 
+**6.11 Battery-powered devices are exempt from cover traffic and are therefore not anonymous, and
+that includes phones.** This was written about sensors and it is much wider than that. The binding
+constraint is the RRC inactivity timer, measured between 10.7 and 21.4 seconds on every network
+with a published figure, so **an emission interval below about ten seconds means the radio never
+returns to idle at all**. A pinned LTE radio draws around 1060 mW against an idle floor near
+31 mW, and radio-only battery life on a 15.5 Wh phone falls from roughly 21 days to roughly 15
+hours. Thirty to sixty seconds still costs 7 to 14 times idle, because the full tail is paid on
+every emission; reaching idle needs tens of minutes, at which point there is no anonymity left.
+
+The shipping parameters therefore assume a client that is **plugged in**. The exemption is honest
+and it segments the anonymity set, which is precisely the failure mode L4 exists to avoid, and it
+segments it along the line between people who can leave a machine running and people carrying a
+phone. We do not have a good answer. `docs/15-fundamental-limits.md` has the measurements.
+
 **6.11a Joining the network is observable, and everyone does it once.** Constant-rate cover
 protects a participant and not the act of becoming one. An adversary who was already watching
 gets the absent-population baseline that statistical disclosure needs, and half an observation
@@ -1569,20 +1590,6 @@ boundary does not exist rather than being padded over. L5 already conceals membe
 *directory*; what remains is concealing it from a *network observer*, which is an unfinished
 research problem rather than an engineering task. See
 [`docs/15-fundamental-limits.md`](docs/15-fundamental-limits.md).
-
-**6.11 Battery-powered devices are exempt from cover traffic and are therefore not anonymous, and
-that includes phones.** This was written about sensors and it is much wider than that. The binding
-constraint is the RRC inactivity timer, measured between 10.7 and 21.4 seconds on every network
-with a published figure, so **an emission interval below about ten seconds means the radio never
-returns to idle at all**. A pinned LTE radio draws around 1060 mW against an idle floor near
-31 mW, and radio-only battery life on a 15.5 Wh phone falls from roughly 21 days to roughly 15
-hours. Thirty to sixty seconds still costs 7 to 14 times idle, because the full tail is paid on
-every emission; reaching idle needs tens of minutes, at which point there is no anonymity left.
-
-The shipping parameters therefore assume a client that is **plugged in**. The exemption is honest
-and it segments the anonymity set, which is precisely the failure mode L4 exists to avoid, and it
-segments it along the line between people who can leave a machine running and people carrying a
-phone. We do not have a good answer. `docs/15-fundamental-limits.md` has the measurements.
 
 **6.12 A claim of human authorship is unfalsifiable, and the field invites exclusion.** §3.13.1 makes
 delegation checkable and leaves `Direct` a bare assertion, permanently. If your threat model is a
@@ -1658,6 +1665,20 @@ That is detection, and it needs the victim to still hold the key. Prevention nee
 than the two keys to countersign the rotation. `karst-witness` is the mechanism and it is not
 wired into rotation. Until it is, a stolen key takes an identity as thoroughly as a lost one
 destroys it, and §6.16's conclusion applies unchanged.
+
+**6.18 The client is permanently far less capable than a browser, and cannot be built on one.**
+L10 is a small typed document format with no scripting, no layout engine and no plugin surface.
+That is deliberate: a specification one person can implement in a season is what keeps error 03
+from returning as a rendering engine duopoly, and the fingerprinting surface is proportional to
+the size of the platform specification. It is still a permanent capability ceiling. Anything that
+needs arbitrary client-side computation is not expressible, and the answer is not "later" but
+"not here".
+
+The cost compounds with delivery. This cannot ship as a browser extension or a web page, because
+a client that renders documents without a layout engine, holds its own keys, and paces its own
+traffic is none of the things a page inside a browser is permitted to be. Every user needs a
+separate application before they see anything at all, against an incumbent that is already
+installed. §9 treats that as the adoption problem it is.
 
 ---
 
@@ -1803,7 +1824,7 @@ The rest of the dependency graph, from the crate manifests rather than from inte
 | L14 Value | `karst-value` | L2, L6 | capacity credentials, earn and spend separated |
 | L15 Discovery | `karst-index` | L2, L6 | catalogues, ranking, completeness, census |
 | L16 Symmetry | `karst-symmetry` | nothing | standing, contention, flat returns |
-| L0 Bearer | none | nothing | **not built**; see §3.1 |
+| L0 Bearer | none | nothing | **not built**; see §3, L0 Bearer |
 
 `karst-thread` (boards and threads) and `karst-stack` (the composed demonstration) sit above all
 of it and are applications rather than layers.

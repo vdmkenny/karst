@@ -103,6 +103,10 @@ cargo run -p karst-symmetry --bin karst-symsim  # does flat returns prevent capt
 
 ## Documents
 
+Every file in `docs/` is listed here. The numbers are stable identifiers rather than a sequence:
+they are never reused and never renumbered, because a document reachable at one number for a year
+must stay reachable there. There is no 01, 02 or 03; the whitepaper occupies that ground.
+
 | | |
 |---|---|
 | [`WHITEPAPER.md`](WHITEPAPER.md) | The complete design. All seventeen layers, the threat model, and the costs. |
