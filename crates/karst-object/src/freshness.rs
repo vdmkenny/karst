@@ -30,7 +30,7 @@
 //! # What is here and what is not
 //!
 //! Freeze detection is implemented. TUF's other mechanisms map onto primitives that already
-//! exist and are not wired up: threshold signing (`karst-value::shamir`), role separation, and
+//! exist and are not wired up: threshold signing, role separation, and
 //! key rotation ([`crate::Rotation`]). Advisories themselves are ordinary objects distributed
 //! as label sets at L15.
 

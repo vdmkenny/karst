@@ -379,6 +379,28 @@ shape. The wire image adapts per region: indistinguishable from uniform random w
 random traffic is unremarkable, and steganographically embedded in whatever protocol
 dominates locally where it is not.
 
+**What this layer does not do, and cannot.** Adapting the wire image hides *what* a flow is.
+It does not hide *that* there is a flow, and against the party that meters the line it does
+not hide the shape either. Constant-rate emission is the most distinctive pattern a consumer
+connection can carry, and no amount of work inside the tunnel changes the aggregate byte
+counter the access provider already bills against.
+
+So the claim splits in two, and the design states both rather than letting the first imply the
+second:
+
+- **KARST provides anonymity against a global network observer.** That is what L4 buys, and
+  it is measured.
+- **KARST does not provide unobservability against the subscriber's own access provider.**
+  A user's ISP can tell they are running it. This is not a gap awaiting a mechanism; it is
+  what constant-rate cover means when the adversary is the party counting your bytes.
+
+There is no construction that recovers it. Every candidate either fails against statistical
+disclosure or reintroduces the coordination the rest of this design refuses, and the only
+lever that helps is the absolute emission rate, which trades directly against latency under
+the same bound as everything else at L4. A client must say this at first run, in those words,
+because a user in a jurisdiction where running such a tool is itself the offence needs to know
+before they start rather than after.
+
 **Honest assessment.** This is the weakest layer here and the only one in a permanently
 contested arms race. Uniform random is itself a fingerprint if all normal traffic is
 structured. A censor who is willing to block everything they cannot classify wins, and
@@ -1142,13 +1164,20 @@ Full treatment in [`docs/10-versioning-and-permanence.md`](docs/10-versioning-an
 
 ### L14 Value
 
-*Fixes errors 02 and 03. Status: **built, without threshold** (`karst-value`). A credential is
-an RFC 9474 blind signature: an issuer signs a blinded serial it cannot read, and a verifier
-checks the result against the issuer's public key, so no verifier can mint. Threshold issuance
-within one issuer set is **not composed**, so a set is one key; plurality of sets is what error
-03 demands and is satisfied, since anyone may run a set and there is no registry. Recovering
-threshold within a set needs Coconut over a pairing curve or threshold RSA (#133). The ledgers
-and the double-spend attribution are models rather than deployment artifacts.*
+*Fixes errors 02 and 03. Status: **built** (`karst-value`). A credential is an RFC 9474 blind
+signature: an issuer signs a blinded serial it cannot read, and a verifier checks the result
+against the issuer's public key, so no verifier can mint. An issuer is one key, and the type is
+named `Issuer` rather than `IssuerSet` because it is one.*
+
+*Threshold within one issuer is **declined rather than deferred**. What error 03 demands is
+plurality of issuers: anyone may run one, many coexist, no global one must be used, there is no
+registry, and that holds. Threshold within one issuer protects that issuer against a member
+being compromised or compelled, which is a different property, and reaching it needs Coconut
+over a pairing curve or threshold RSA, neither of which composes with the blind signature a
+credential is built on. The Shamir module that used to stand in for it is deleted: it had a
+61-bit field and coefficients derived deterministically from a public seed, so one share
+recovered the secret, and dead cryptography with known defects invites somebody to wire it in.
+The ledgers and the double-spend attribution are models rather than deployment artifacts.*
 
 **Lever removed.** Payment processors, and the de-banking that runs through them.
 
@@ -1561,15 +1590,17 @@ fall below that line, so a request identifies its requester. PIR is the known an
 affordable, and needs either a per-server client relationship or non-colluding servers, both of
 which this design refuses elsewhere. Unresolved.
 
-**6.13a Constant-rate emission is a signature to your own access provider.** L3 hides what the
-bytes are and not what shape they arrive in. Ordinary residential traffic is bursty; L4 mandates
-a fixed rate forever, and a classifier separates the two above 99% with a byte counter, no
-payload inspection required. The BKA operation against Boystown ended with a court order to
-Telefónica identifying which subscriber had connected to a node, and that is exactly the stage
-this exposes. The anonymity set is not everyone on the network, it is everyone on that ISP
-emitting at a constant rate, so the only defence is adoption and the mechanism that provides
-anonymity at scale removes it when few people are using it. See
-[`docs/18-documented-attacks.md`](docs/18-documented-attacks.md).
+**6.13a Constant-rate emission is a signature to your own access provider, permanently.** L3
+hides what a flow is and cannot hide that there is one, because the adversary here is the party
+metering the line and reading the aggregate byte counter. There is no construction that
+recovers it: every candidate either fails against statistical disclosure or reintroduces the
+coordination this design refuses, and the only lever is the absolute emission rate, which
+trades against latency under the same bound as everything else at L4.
+
+So the claim is split rather than defended. **This design provides anonymity against a global
+network observer and does not provide unobservability against the subscriber's own access
+provider.** A client must say so at first run: a user in a jurisdiction where running the tool
+is itself the offence needs to know before they start. §3 L3 carries the same statement.
 
 **6.14 Paying relays leaks that they are relays, to the issuer quorum.** Concealment and payment
 pull against each other, and the four published anonymous incentive schemes for Tor all observe
@@ -1670,7 +1701,7 @@ See [`docs/08-roadmap.md`](docs/08-roadmap.md) for phases and open issues.
 | L3 Wire | built, tested | `karst-wire` |
 | L5 Membership | built, tested | `karst-member` |
 | L8 Witness | built, tested | `karst-witness` |
-| L14 Value | built; threshold within a set not composed (#133) | `karst-value` |
+| L14 Value | built; threshold within one issuer declined (#133) | `karst-value` |
 | L16 Symmetry | simulated | `karst-symmetry` |
 | L0 Bearer | specified, unbuilt | none |
 

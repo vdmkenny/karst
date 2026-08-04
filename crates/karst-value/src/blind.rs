@@ -50,7 +50,8 @@
 //!
 //! RSA blind signatures give plurality and public verifiability and lose
 //! threshold-within-a-set. Recovering it needs Coconut over a pairing curve, or threshold RSA.
-//! The `shamir` module carries the threshold structure and the two are not composed.
+//! Neither composes with this, so threshold within a set is declined rather than deferred; see
+//! `Issuer`.
 
 use blind_rsa_signatures::{
     BlindSignature as RawBlindSignature, BlindingResult, DefaultRng,
